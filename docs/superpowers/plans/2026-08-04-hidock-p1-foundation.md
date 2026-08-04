@@ -2188,25 +2188,111 @@ private func sampleFile(name: String = "20260804143022REC001.mp3", length: Int =
              version: 1, recordedAt: ResponseParsers.recordedAt(fromFilename: name))
 }
 
-@Test func destinationIsDateFolderedWithCorrectedExtension() {
+@Test func destinationIsDateFolderedWithSignatureSuffix() {
     let lib = Library(root: URL(fileURLWithPath: "/tmp/x"))
     let url = lib.destinationURL(for: sampleFile())
     #expect(url.deletingLastPathComponent().lastPathComponent == "2026-08-04")
-    #expect(url.lastPathComponent == "143022.mp3")
+    #expect(url.lastPathComponent.hasPrefix("143022-"))
+    #expect(url.pathExtension == "mp3")
 }
 
 /// A device-named `.hda` must land as `.mp3`; the bytes are already MP3.
 @Test func hdaRecordingLandsAsMp3() {
     let lib = Library(root: URL(fileURLWithPath: "/tmp/x"))
-    let file = FileInfo(name: "2026Aug04-135302-Wip02.hda", lengthBytes: 53568,
-                        signature: "sig", version: 5,
-                        recordedAt: ResponseParsers.recordedAt(fromFilename: "2026Aug04-135302-Wip02.hda"))
-    #expect(lib.destinationURL(for: file).lastPathComponent == "135302.mp3")
+    let name = "2026Aug04-135302-Wip02.hda"
+    let file = FileInfo(name: name, lengthBytes: 53568, signature: "c74e0ac92b1708dd",
+                        version: 5, recordedAt: ResponseParsers.recordedAt(fromFilename: name))
+    #expect(lib.destinationURL(for: file).lastPathComponent == "135302-c74e0ac9.mp3")
 }
 
-@Test func commitMovesFileAndWritesSidecar() throws {
-    let root = tempRoot()
-    defer { try? FileManager.default.removeItem(at: root) }
+/// Two recordings in the same second must NOT resolve to one path. Keyed on
+/// timestamp alone they did, and commit deleted before it moved — silently
+/// destroying the earlier recording.
+@Test func sameSecondRecordingsGetDistinctPaths() {
+    let lib = Library(root: URL(fileURLWithPath: "/tmp/x"))
+    let a = sampleFile(name: "20260804143022REC001.mp3")
+    let b = FileInfo(name: "20260804143022REC002.mp3", lengthBytes: 9, signature: "ffffffffffff",
+                     version: 1, recordedAt: a.recordedAt)
+    #expect(lib.destinationURL(for: a) != lib.destinationURL(for: b))
+}
+
+/// An unparseable filename must still resolve to a STABLE path. The old
+/// fallback was `Date()`, so every undated recording collided with every
+/// other one and moved on every sync.
+@Test func undatedRecordingsGetStableDistinctPaths() {
+    let lib = Library(root: URL(fileURLWithPath: "/tmp/x"))
+    let a = FileInfo(name: "mystery.hda", lengthBytes: 1, signature: "aaaaaaaaaaaaaaaaaaaa",
+                     version: 1, recordedAt: nil)
+    let b = FileInfo(name: "other.hda", lengthBytes: 1, signature: "bbbbbbbbbbbbbbbbbbbb",
+                     version: 1, recordedAt: nil)
+    #expect(lib.destinationURL(for: a) == lib.destinationURL(for: a))   // stable
+    #expect(lib.destinationURL(for: a) != lib.destinationURL(for: b))   // distinct
+    #expect(lib.destinationURL(for: a).deletingLastPathComponent().lastPathComponent == "undated")
+}
+
+/// commit must refuse to overwrite a DIFFERENT recording rather than destroy it.
+@Test func commitRefusesToClobberADifferentRecording() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let lib = Library(root: root)
+
+    let first = sampleFile()
+    let incoming = lib.incomingURL(for: first)
+    try FileManager.default.createDirectory(
+        at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data([1, 2, 3, 4]).write(to: incoming)
+    _ = try lib.commit(incoming: incoming, file: first, deviceSerial: "SN1")
+
+    // Same computed path, different signature: force the collision by hand.
+    let impostor = FileInfo(name: first.name, lengthBytes: 4,
+                            signature: first.signature, version: 1, recordedAt: first.recordedAt)
+    let clobberPath = lib.destinationURL(for: impostor)
+    let sidecarPath = clobberPath.deletingPathExtension().appendingPathExtension("json")
+    var stored = try JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: sidecarPath))
+    stored.signature = "a-completely-different-recording"
+    let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+    try enc.encode(stored).write(to: sidecarPath)
+
+    let second = lib.incomingURL(for: impostor)
+    try Data([9, 9, 9, 9]).write(to: second)
+    #expect(throws: (any Error).self) {
+        _ = try lib.commit(incoming: second, file: impostor, deviceSerial: "SN1")
+    }
+    // The original audio must still be there and unchanged.
+    #expect(try Data(contentsOf: clobberPath) == Data([1, 2, 3, 4]))
+}
+
+/// The index is a DERIVED cache. This is the invariant that makes that true:
+/// a full folder walk must reconstruct it exactly.
+@Test func indexIsFullyReconstructableFromAFolderWalk() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let lib = Library(root: root)
+    let index = try LibraryIndex(url: root.appendingPathComponent("index.sqlite"))
+
+    var committed: [Sidecar] = []
+    for name in ["20260804143022REC001.mp3", "20260805090000REC002.wav"] {
+        let f = sampleFile(name: name)
+        let incoming = lib.incomingURL(for: f)
+        try FileManager.default.createDirectory(
+            at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([1, 2, 3, 4]).write(to: incoming)
+        let sc = try lib.commit(incoming: incoming, file: f, deviceSerial: "SN1")
+        committed.append(sc)
+        try index.upsert(sc)
+    }
+
+    // Nuke the index entirely, then rebuild it from disk alone.
+    try index.rebuild(from: [])
+    #expect(try index.all().isEmpty)
+    try index.rebuild(from: lib.scanSidecars())
+
+    #expect(Set(try index.all().map(\.signature)) == Set(committed.map(\.signature)))
+    for sc in committed { #expect(index.contains(signature: sc.signature)) }
+}
+
+/// The sidecar is the source of truth, so every field must survive the round
+/// trip to disk — including relativePath, which reveal-in-Finder depends on.
+@Test func sidecarRoundTripsEveryFieldThroughDisk() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
     let lib = Library(root: root)
     let file = sampleFile()
 
@@ -2214,38 +2300,24 @@ private func sampleFile(name: String = "20260804143022REC001.mp3", length: Int =
     try FileManager.default.createDirectory(
         at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
     try Data([1, 2, 3, 4]).write(to: incoming)
+    let written = try lib.commit(incoming: incoming, file: file, deviceSerial: "SN1")
 
-    let sidecar = try lib.commit(incoming: incoming, file: file, deviceSerial: "SN1")
+    let decoded = try #require(lib.scanSidecars().first)
+    #expect(decoded.signature == written.signature)
+    #expect(decoded.deviceFilename == file.name)
+    #expect(decoded.relativePath == written.relativePath)
+    #expect(decoded.lengthBytes == 4)                       // measured on disk, not device-reported
+    #expect(decoded.deviceSerial == "SN1")
+    #expect(decoded.deviceModel == "hidock-p1")
+    #expect(decoded.timeZoneIdentifier == TimeZone.current.identifier)
 
-    let audio = lib.destinationURL(for: file)
-    #expect(FileManager.default.fileExists(atPath: audio.path))
-    #expect(FileManager.default.fileExists(atPath: incoming.path) == false)
-
-    let json = audio.deletingPathExtension().appendingPathExtension("json")
-    #expect(FileManager.default.fileExists(atPath: json.path))
-    #expect(sidecar.signature == file.signature)
-    #expect(sidecar.lengthBytes == 4)
-    #expect(sidecar.deviceSerial == "SN1")
+    // relativePath must actually locate the file under the root.
+    let resolved = root.appendingPathComponent(decoded.relativePath)
+    #expect(FileManager.default.fileExists(atPath: resolved.path))
+    #expect(decoded.relativePath.hasPrefix("2026-08-04/"))
 }
 
-@Test func scanSidecarsFindsEveryCommittedRecording() throws {
-    let root = tempRoot()
-    defer { try? FileManager.default.removeItem(at: root) }
-    let lib = Library(root: root)
-
-    for name in ["20260804143022REC001.mp3", "20260805090000REC002.wav"] {
-        let f = sampleFile(name: name)
-        let incoming = lib.incomingURL(for: f)
-        try FileManager.default.createDirectory(
-            at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data([1, 2, 3, 4]).write(to: incoming)
-        _ = try lib.commit(incoming: incoming, file: f, deviceSerial: "SN1")
-    }
-
-    #expect(try lib.scanSidecars().count == 2)
-}
-
-@Test func reachabilityIsFalseForMissingRoot() {
+@Test func reachabilityIsFalseForMissingRoot() {@Test func reachabilityIsFalseForMissingRoot() {
     let lib = Library(root: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"))
     #expect(lib.isReachable() == false)
 }
@@ -2375,57 +2447,116 @@ public struct Library: Sendable {
             .appendingPathComponent("\(file.signature).part")
     }
 
-    /// `<root>/YYYY-MM-DD/HHMMSS.<corrected extension>`
-    /// Uses `preferredExtension`, so a device-named `.hda` lands as `.mp3`.
+    /// `<root>/YYYY-MM-DD/HHMMSS-<sig8>.<corrected extension>`
+    ///
+    /// PURE — no I/O, and the same FileInfo always resolves to the same path.
+    /// SyncEngine's diff checks the filesystem at this path, so it must be
+    /// derivable without consulting the disk.
+    ///
+    /// The signature prefix is not decoration. Keyed on timestamp alone, two
+    /// recordings sharing a second collide, and every recording whose filename
+    /// does not parse collides with every other one, because the fallback was
+    /// `Date()`. Combined with a commit that deleted the destination first, that
+    /// silently and permanently destroyed the earlier recording.
     public func destinationURL(for file: FileInfo) -> URL {
         let ext = file.preferredExtension
-        let date = file.recordedAt ?? Date()
-        let folder = Self.dayFormatter.string(from: date)
-        let stem = Self.timeFormatter.string(from: date)
-        return root.appendingPathComponent(folder)
+        let short = String(file.signature.prefix(8))
+
+        guard let date = file.recordedAt else {
+            // No parseable timestamp. Key entirely on the signature so the path
+            // is stable across runs; `Date()` here would give one recording a
+            // different path on every sync.
+            let stem = String(file.signature.prefix(16))
+            return root.appendingPathComponent("undated")
+                .appendingPathComponent(ext.isEmpty ? stem : "\(stem).\(ext)")
+        }
+
+        let stem = "\(Self.timeFormatter.string(from: date))-\(short)"
+        return root.appendingPathComponent(Self.dayFormatter.string(from: date))
             .appendingPathComponent(ext.isEmpty ? stem : "\(stem).\(ext)")
     }
 
     public func sidecarURL(for file: FileInfo) -> URL {
-        destinationURL(for: file).deletingPathExtension().appendingPathExtension("json")
+        Self.sidecarURL(forAudio: destinationURL(for: file))
+    }
+
+    static func sidecarURL(forAudio url: URL) -> URL {
+        url.deletingPathExtension().appendingPathExtension("json")
     }
 
     /// Moves a verified download into place and writes its sidecar.
-    /// Duration is measured from the audio header, not inferred from bitrate.
+    ///
+    /// The sidecar is written and moved BEFORE the audio, so the failure window
+    /// is a single same-volume rename. Written the other way round, a failure
+    /// after the audio moved would leave audio with no sidecar — and since
+    /// sidecars are the source of truth, `scanSidecars` would not see that
+    /// recording, so the next sync would download it again.
     @discardableResult
     public func commit(incoming: URL, file: FileInfo, deviceSerial: String) throws -> Sidecar {
         let destination = destinationURL(for: file)
+        let sidecarDestination = Self.sidecarURL(forAudio: destination)
         let fm = FileManager.default
+
+        // Refuse to clobber a DIFFERENT recording. Signature is identity, so a
+        // matching signature is the same file being re-synced and is safe to
+        // replace; anything else is a collision and must not be destroyed.
+        if fm.fileExists(atPath: sidecarDestination.path),
+           let existing = try? Self.decoder.decode(
+               Sidecar.self, from: Data(contentsOf: sidecarDestination)),
+           existing.signature != file.signature {
+            throw LibraryError.destinationOccupied(destination.path, existing.signature)
+        }
+
         try fm.createDirectory(at: destination.deletingLastPathComponent(),
                                withIntermediateDirectories: true)
-        if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
-        try fm.moveItem(at: incoming, to: destination)
 
+        // Measure from the staged file; it is byte-identical to the destination.
         let sidecar = Sidecar(
             signature: file.signature,
             deviceFilename: file.name,
-            relativePath: destination.path.replacingOccurrences(
-                of: root.path.hasSuffix("/") ? root.path : root.path + "/", with: ""),
-            lengthBytes: file.lengthBytes,
-            durationSeconds: Self.measureDuration(of: destination),
+            relativePath: Self.relativePath(of: destination, under: root),
+            lengthBytes: Self.fileSize(at: incoming) ?? file.lengthBytes,
+            durationSeconds: Self.measureDuration(of: incoming),
             recordedAt: file.recordedAt,
             syncedAt: Date(),
             deviceSerial: deviceSerial,
             deviceModel: "hidock-p1",
             timeZoneIdentifier: TimeZone.current.identifier)
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(sidecar).write(to: sidecarURL(for: file))
+        let stagedSidecar = incoming.appendingPathExtension("json")
+        try Self.encoder.encode(sidecar).write(to: stagedSidecar)
+
+        if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
+        if fm.fileExists(atPath: sidecarDestination.path) { try fm.removeItem(at: sidecarDestination) }
+        try fm.moveItem(at: stagedSidecar, to: sidecarDestination)
+        do {
+            try fm.moveItem(at: incoming, to: destination)
+        } catch {
+            try? fm.removeItem(at: sidecarDestination)   // never leave an orphan sidecar
+            throw error
+        }
         return sidecar
+    }
+
+    /// Path relative to `root`, by path components rather than string
+    /// replacement — the latter replaces every occurrence and silently yields
+    /// an absolute path when the prefix does not match.
+    static func relativePath(of url: URL, under root: URL) -> String {
+        let rootParts = root.standardizedFileURL.pathComponents
+        let urlParts = url.standardizedFileURL.pathComponents
+        guard urlParts.count > rootParts.count,
+              Array(urlParts.prefix(rootParts.count)) == rootParts else {
+            return url.lastPathComponent
+        }
+        return urlParts.dropFirst(rootParts.count).joined(separator: "/")
+    }
+
+    static func fileSize(at url: URL) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
     }
 
     public func scanSidecars() throws -> [Sidecar] {
         guard isReachable() else { return [] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-
         var results: [Sidecar] = []
         let enumerator = FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: nil,
@@ -2434,7 +2565,7 @@ public struct Library: Sendable {
         while let url = enumerator?.nextObject() as? URL {
             guard url.pathExtension == "json" else { continue }
             guard let data = try? Data(contentsOf: url),
-                  let sidecar = try? decoder.decode(Sidecar.self, from: data) else { continue }
+                  let sidecar = try? Self.decoder.decode(Sidecar.self, from: data) else { continue }
             results.append(sidecar)
         }
         return results
@@ -2446,17 +2577,42 @@ public struct Library: Sendable {
         return seconds.isFinite && seconds > 0 ? seconds : nil
     }
 
+    // en_US_POSIX is required for fixed-format dates. Under a non-Gregorian
+    // Locale.current (Buddhist, Japanese) `yyyy` renders a different year and
+    // the on-disk folder layout becomes locale-dependent.
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
         f.dateFormat = "yyyy-MM-dd"
         return f
     }()
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
         f.dateFormat = "HHmmss"
         return f
     }()
+
+    static let encoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }()
+
+    static let decoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }()
+}
+
+public enum LibraryError: Error, Equatable {
+    /// A different recording already occupies the computed path.
+    case destinationOccupied(String, String)
 }
 ```
 
@@ -2518,6 +2674,11 @@ public final class LibraryIndex: @unchecked Sendable {
 
     public func upsert(_ s: Sidecar) throws {
         lock.lock(); defer { lock.unlock() }
+        try upsertLocked(s)
+    }
+
+    /// Caller must already hold `lock`.
+    private func upsertLocked(_ s: Sidecar) throws {
         var stmt: OpaquePointer?
         let sql = """
             INSERT INTO recordings
@@ -2557,28 +2718,49 @@ public final class LibraryIndex: @unchecked Sendable {
     }
 
     public func recent(limit: Int) throws -> [Sidecar] {
-        try query("SELECT * FROM recordings ORDER BY recorded_at DESC LIMIT \(limit);")
+        // Bound and bound: a negative limit means UNLIMITED in SQLite, so an
+        // interpolated -1 would quietly return the whole library.
+        try query("SELECT * FROM recordings ORDER BY recorded_at DESC LIMIT ?;",
+                  limit: max(0, limit))
     }
 
     public func all() throws -> [Sidecar] {
         try query("SELECT * FROM recordings ORDER BY recorded_at DESC;")
     }
 
+    /// Holds the lock for the WHOLE call, inside one transaction.
+    ///
+    /// Dropping the lock between the DELETE and the re-inserts would let a
+    /// concurrent `contains(signature:)` observe an empty table and report
+    /// not-synced, which makes SyncEngine re-download files already on disk.
+    /// The transaction also collapses one implicit commit per row.
     public func rebuild(from sidecars: [Sidecar]) throws {
-        lock.lock()
-        let result = sqlite3_exec(db, "DELETE FROM recordings;", nil, nil, nil)
-        lock.unlock()
-        guard result == SQLITE_OK else { throw LibraryIndexError.writeFailed(lastMessage()) }
-        for s in sidecars { try upsert(s) }
+        lock.lock(); defer { lock.unlock() }
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil) == SQLITE_OK else {
+            throw LibraryIndexError.writeFailed(lastMessage())
+        }
+        do {
+            guard sqlite3_exec(db, "DELETE FROM recordings;", nil, nil, nil) == SQLITE_OK else {
+                throw LibraryIndexError.writeFailed(lastMessage())
+            }
+            for s in sidecars { try upsertLocked(s) }
+            guard sqlite3_exec(db, "COMMIT;", nil, nil, nil) == SQLITE_OK else {
+                throw LibraryIndexError.writeFailed(lastMessage())
+            }
+        } catch {
+            sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+            throw error
+        }
     }
 
-    private func query(_ sql: String) throws -> [Sidecar] {
+    private func query(_ sql: String, limit: Int? = nil) throws -> [Sidecar] {
         lock.lock(); defer { lock.unlock() }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw LibraryIndexError.prepareFailed(lastMessage())
         }
         defer { sqlite3_finalize(stmt) }
+        if let limit { sqlite3_bind_int(stmt, 1, Int32(clamping: limit)) }
 
         var out: [Sidecar] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
@@ -2627,7 +2809,7 @@ public enum LibraryIndexError: Error {
 - [ ] **Step 7: Run tests to verify they pass**
 
 Run: `swift test --filter LibraryTests && swift test --filter LibraryIndexTests`
-Expected: PASS, 5 + 5 tests
+Expected: PASS, 10 + 5 tests
 
 - [ ] **Step 8: Commit**
 
