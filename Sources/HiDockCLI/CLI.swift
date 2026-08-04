@@ -54,8 +54,38 @@ struct CLI {
             await device.close()
             print("INFO OK")
 
+        case "list":
+            let transport = try IOUSBHostTransport.openFirstAvailable()
+            let device = JensenDevice(transport: transport)
+            try await device.open()
+
+
+            let info = try await device.deviceInfo()
+            print("firmware \(info.versionCode)  serial \(info.serialNumber)")
+
+            // The GET_DEVICE_TIME body layout is NOT documented in either reference
+            // implementation. Dump it raw so the real format can be read off the
+            // device before anything ever writes SET_DEVICE_TIME.
+            if let timeBody = try? await device.send(.getDeviceTime, timeout: .seconds(5)) {
+                let hex = timeBody.map { String(format: "%02x", $0) }.joined(separator: " ")
+                print("device time body (\(timeBody.count) bytes): \(hex)")
+                print("  ^ compare against the wall clock now: \(Date())")
+            }
+
+            let card = try await device.cardInfo()
+            print("storage: \(card.usedMiB) MiB used of \(card.capacityMiB) MiB")
+
+            let count = try await device.fileCount()
+            let files = try await device.listFiles()
+            print("device reports \(count) files, listed \(files.count)")
+            for f in files {
+                let when = f.recordedAt.map(ISO8601DateFormatter().string(from:)) ?? "unknown"
+                print("  \(f.name)  \(f.lengthBytes) bytes  \(when)  \(f.signature)")
+            }
+            print("LIST OK")
+
         default:
-            print("usage: hidock-cli [probe|info]")
+            print("usage: hidock-cli [probe|info|list]")
             exit(2)
         }
     }

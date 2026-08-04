@@ -164,4 +164,27 @@ public actor JensenDevice {
             }
         }
     }
+
+    // MARK: - Typed commands
+
+    public func deviceInfo(timeout: Duration = .seconds(5)) async throws -> DeviceInfo {
+        try ResponseParsers.deviceInfo(await send(.getDeviceInfo, timeout: timeout))
+    }
+
+    public func cardInfo(timeout: Duration = .seconds(5)) async throws -> CardInfo {
+        try ResponseParsers.cardInfo(await send(.getCardInfo, timeout: timeout))
+    }
+
+    public func fileCount(timeout: Duration = .seconds(5)) async throws -> Int {
+        let body = try await send(.getFileCount, timeout: timeout)
+        guard body.count >= 4 else {
+            throw JensenError.shortBody(command: 6, expected: 4, got: body.count)
+        }
+        let b = [UInt8](body)
+        return Int(b[0]) << 24 | Int(b[1]) << 16 | Int(b[2]) << 8 | Int(b[3])
+    }
+
+    public func listFiles(timeout: Duration = .seconds(20)) async throws -> [FileInfo] {
+        try ResponseParsers.fileList(await send(.getFileList, timeout: timeout)).files
+    }
 }
