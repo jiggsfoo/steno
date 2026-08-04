@@ -37,10 +37,26 @@ import Testing
     }
 }
 
-/// The timeout must bound the call's own duration. Passing the full command
-/// timeout as the per-read timeout lets a read entered just before the
-/// deadline block for another whole timeout, roughly doubling it.
-@Test func timeoutIsAnUpperBoundOnElapsedTime() async throws {
+/// Pins the per-read cap directly. A wall-clock assertion cannot tell the fix
+/// from the bug: reverting to a full-budget read timeout leaves elapsed time
+/// unchanged on the common path, so an elapsed bound passes either way. What
+/// matters is the value actually handed to the transport.
+@Test func perReadTimeoutNeverExceedsTheCap() async throws {
+    let t = FakeTransport(script: .init(
+        responses: [:], readTimeoutFor: [1], readDelay: .milliseconds(400)))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    _ = try? await device.send(.getDeviceInfo, timeout: .seconds(5))
+    #expect(await t.maxReadTimeoutSeen <= .milliseconds(250))
+}
+
+/// A timed-out command must return rather than hang. The bound is generous on
+/// purpose: elapsed time legitimately exceeds the command timeout, because the
+/// error path then drains for three 50 ms quiet windows. That drain is required
+/// by C3/I1. This test documents its cost; it does NOT claim the timeout is an
+/// upper bound on elapsed time.
+@Test func timedOutCommandReturnsWithoutHanging() async throws {
     let t = FakeTransport(script: .init(
         responses: [:], readTimeoutFor: [1], readDelay: .milliseconds(400)))
     let device = JensenDevice(transport: t)
@@ -48,8 +64,7 @@ import Testing
 
     let start = ContinuousClock.now
     _ = try? await device.send(.getDeviceInfo, timeout: .milliseconds(300))
-    let elapsed = ContinuousClock.now - start
-    #expect(elapsed < .milliseconds(600))
+    #expect(ContinuousClock.now - start < .seconds(2))
 }
 
 /// A buffered reply whose command id matches but whose sequence does not is a
@@ -119,6 +134,12 @@ import Testing
     #expect(rc == Data([0x16]))
     #expect(await t.written.count == 3)
     #expect(Set(await t.written.map(\.sequence)).count == 3)
+
+    // The load-bearing assertion. Response correctness alone does not prove
+    // serialization -- the fake's FIFO queue satisfies it even with the gate
+    // removed. Overlapping writes are the direct observable, and reach zero
+    // only when exactly one command is ever on the wire.
+    #expect(await t.overlappingWrites == 0)
 }
 
 @Test func openAndCloseForwardToTransport() async throws {

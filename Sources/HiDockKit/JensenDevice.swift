@@ -78,7 +78,7 @@ public actor JensenDevice {
             // packet would swallow the next response, and a late reply would
             // be waiting on the endpoint for whoever comes next.
             buffer.removeAll(keepingCapacity: true)
-            await drain()
+            await drainLocked(maxDuration: .milliseconds(500))
             throw error
         }
     }
@@ -104,7 +104,10 @@ public actor JensenDevice {
             let chunk = try await transport.read(
                 maxLength: Self.readChunk, timeout: min(remaining, Self.maxReadWindow))
             if chunk.isEmpty {
-                try? await Task.sleep(for: .milliseconds(5))
+                // Deliberately `try`, not `try?`. Swallowing cancellation here
+                // strips the backoff and spins this loop while holding the gate
+                // until the deadline.
+                try await Task.sleep(for: .milliseconds(5))
             } else {
                 buffer.append(chunk)
             }
@@ -136,6 +139,14 @@ public actor JensenDevice {
     /// single empty read only means nothing arrived in the last 50 ms. The
     /// response this exists to catch is precisely the one that arrives late.
     public func drain(maxDuration: Duration = .milliseconds(500)) async {
+        await acquire()
+        defer { release() }
+        await drainLocked(maxDuration: maxDuration)
+    }
+
+    /// Caller must already hold the gate. `perform`'s error path calls this
+    /// directly, since it is still inside its own gated section.
+    private func drainLocked(maxDuration: Duration) async {
         buffer.removeAll(keepingCapacity: true)
         let deadline = ContinuousClock.now.advanced(by: maxDuration)
         var consecutiveEmpty = 0

@@ -20,6 +20,17 @@ actor FakeTransport: USBTransport {
     private(set) var openCount = 0
     private(set) var closeCount = 0
 
+    /// Incremented when a command is written while a previous command's
+    /// response is still unread. With the FIFO gate held this is impossible,
+    /// so it is the direct observable for "two commands on the wire at once".
+    /// Without it the gate is untestable through this fake: a FIFO queue hands
+    /// every caller its own response no matter how they interleave.
+    private(set) var overlappingWrites = 0
+
+    /// Largest `timeout` this transport was ever asked to read with. Pins the
+    /// per-read cap directly rather than inferring it from wall clock.
+    private(set) var maxReadTimeoutSeen: Duration = .zero
+
     init(script: Script) { self.script = script }
 
     func open() async throws { openCount += 1 }
@@ -27,6 +38,7 @@ actor FakeTransport: USBTransport {
 
     func write(_ data: Data) async throws {
         guard case let .packet(p, _) = try JensenPacket.decode(from: data) else { return }
+        if !pending.isEmpty { overlappingWrites += 1 }
         written.append(p)
         if script.readTimeoutFor.contains(p.command) { return }
         for body in script.responses[p.command] ?? [] {
@@ -41,6 +53,7 @@ actor FakeTransport: USBTransport {
     private static let readSplit = 64
 
     func read(maxLength: Int, timeout: Duration) async throws -> Data {
+        maxReadTimeoutSeen = max(maxReadTimeoutSeen, timeout)
         if script.readDelay > .zero {
             try? await Task.sleep(for: min(script.readDelay, timeout))
         }
