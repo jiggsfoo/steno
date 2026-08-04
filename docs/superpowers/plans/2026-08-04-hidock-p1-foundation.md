@@ -146,6 +146,7 @@ Proves the single riskiest assumption in the spec: that a non-sandboxed Swift bi
 
 ```swift
 // Tests/HiDockKitTests/DeviceMatchingTests.swift
+import Foundation
 import Testing
 @testable import HiDockKit
 
@@ -157,9 +158,18 @@ import Testing
     #expect(HiDockDeviceMatching.vendorIDs.sorted() == [0x10d6, 0x3887])
 }
 
-@Test func matchingDictionaryIsBuiltForInterfaceZero() {
+/// The dictionary is a bare class match on purpose. Narrowing it with an
+/// `interfaceNumber` criterion matches nothing on macOS 27; interface 0 is
+/// selected in Swift by `isHiDockP1Interface` instead.
+@Test func matchingDictionaryIsABareInterfaceClassMatch() {
     let dict = HiDockDeviceMatching.matchingDictionary() as NSDictionary
-    #expect(dict["bInterfaceNumber"] as? Int == 0)
+    #expect(dict["IOProviderClass"] as? String == "IOUSBHostInterface")
+    #expect(dict["bInterfaceNumber"] == nil)
+}
+
+/// A service handle of 0 is never a device, and the filter must not trap on it.
+@Test func isHiDockP1InterfaceRejectsNullService() {
+    #expect(HiDockDeviceMatching.isHiDockP1Interface(0) == false)
 }
 ```
 
@@ -216,36 +226,32 @@ public enum HiDockDeviceMatching {
     public static let vendorIDs: [Int] = [0x10d6, 0x3887]
     public static let p1ProductIDs: [Int] = [0xaf0e, 0xb00e, 0x2040]
 
-    /// Matches interface 0 (the vendor-specific Jensen interface) directly.
-    /// macOS claims the audio interfaces separately, so this never contends with AppleUSBAudio.
+    /// Matches every USB interface; callers narrow with `isHiDockP1Interface`.
+    ///
+    /// This is deliberately a bare class match. Passing `interfaceNumber: 0`
+    /// to `IOUSBHostInterface.__createMatchingDictionary` produces a dictionary
+    /// that matches NOTHING on macOS 27 (build 26A5388g), even though the
+    /// device's registered `bInterfaceNumber` really is 0 — IOKit's property
+    /// matching compares CFNumber types strictly, not just numeric values.
+    /// Verified on hardware 2026-08-04: the predicate form returned 0 matches
+    /// while this form found the P1 and claimed it. Filter in Swift instead.
     public static func matchingDictionary() -> CFMutableDictionary {
-        let unmanaged = IOUSBHostInterface.__createMatchingDictionary(
-            withVendorID: nil,
-            productID: nil,
-            bcdDevice: nil,
-            interfaceNumber: NSNumber(value: 0),
-            configurationValue: nil,
-            interfaceClass: nil,
-            interfaceSubclass: nil,
-            interfaceProtocol: nil,
-            speed: nil,
-            productIDArray: nil)
-        return unmanaged.takeRetainedValue()
+        IOServiceMatching("IOUSBHostInterface")
     }
 
     /// Returns io_service_t handles for every attached P1 Jensen interface.
     /// Caller owns each handle and must IOObjectRelease it.
     public static func copyMatchingServices() -> [io_service_t] {
         var iterator: io_iterator_t = 0
-        let dict = matchingDictionary()
-        guard IOServiceGetMatchingServices(kIOMainPortDefault, dict, &iterator) == KERN_SUCCESS else {
+        guard IOServiceGetMatchingServices(
+            kIOMainPortDefault, matchingDictionary(), &iterator) == KERN_SUCCESS else {
             return []
         }
         defer { IOObjectRelease(iterator) }
 
         var services: [io_service_t] = []
         while case let svc = IOIteratorNext(iterator), svc != 0 {
-            if matchesHiDockP1(svc) {
+            if isHiDockP1Interface(svc) {
                 services.append(svc)
             } else {
                 IOObjectRelease(svc)
@@ -254,15 +260,20 @@ public enum HiDockDeviceMatching {
         return services
     }
 
-    private static func matchesHiDockP1(_ service: io_service_t) -> Bool {
+    /// True for interface 0 of an attached HiDock P1. Public because
+    /// DeviceMonitor must apply the same filter to notification callbacks:
+    /// the bare class match fires for every USB interface on the system.
+    public static func isHiDockP1Interface(_ service: io_service_t) -> Bool {
         guard let vid = intProperty(service, "idVendor"),
-              let pid = intProperty(service, "idProduct") else { return false }
-        return vendorIDs.contains(vid) && p1ProductIDs.contains(pid)
+              let pid = intProperty(service, "idProduct"),
+              let interfaceNumber = intProperty(service, "bInterfaceNumber") else { return false }
+        return vendorIDs.contains(vid) && p1ProductIDs.contains(pid) && interfaceNumber == 0
     }
 
     /// USB interface nubs inherit idVendor/idProduct from the parent device,
     /// so walk up the IOService plane when the property is not local.
-    static func intProperty(_ service: io_service_t, _ key: String) -> Int? {
+    /// Public because HiDockCLI (a separate module) calls it.
+    public static func intProperty(_ service: io_service_t, _ key: String) -> Int? {
         if let cf = IORegistryEntrySearchCFProperty(
             service, kIOServicePlane, key as CFString, kCFAllocatorDefault,
             IOOptionBits(kIORegistryIterateRecursively | kIORegistryIterateParents)) {
@@ -276,7 +287,7 @@ public enum HiDockDeviceMatching {
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `swift test --filter DeviceMatchingTests`
-Expected: PASS, 3 tests
+Expected: PASS, 4 tests
 
 - [ ] **Step 7: Write the probe CLI**
 
@@ -297,7 +308,8 @@ case "probe":
 
     guard let service = services.first else {
         print("No HiDock P1 found.")
-        print("Attached USB devices can be listed with: system_profiler SPUSBDataType")
+        // Note: SPUSBDataType returns nothing at all on macOS 27 (26A5388g).
+        print("Attached USB devices can be listed with: system_profiler SPUSBHostDataType")
         exit(1)
     }
 
@@ -332,7 +344,7 @@ default:
 Run: `swift run hidock-cli probe`
 Expected: `PROBE OK`
 
-If it prints `No HiDock P1 found`, run `system_profiler SPUSBDataType | grep -A5 -i hidock`, read the real vendor and product IDs, and add them to `DeviceMatching.swift` plus the Step 1 tests.
+If it prints `No HiDock P1 found`, run `system_profiler SPUSBHostDataType | grep -A12 -i hidock` (the older `SPUSBDataType` key returns nothing on macOS 27), read the real vendor and product IDs, and add them to `DeviceMatching.swift` plus the Step 1 tests.
 
 If the claim fails with an access error, the fallback documented in the spec applies: switch `IOUSBHostTransport` to the legacy `IOKit`/`IOUSBLib` plugin interface in Task 4. Endpoints and framing are unchanged. **Stop and report this before continuing.**
 
@@ -2553,13 +2565,25 @@ public final class DeviceMonitor: @unchecked Sendable {
 
     /// Emits at most one event per callback, regardless of how many
     /// interfaces the iterator holds.
+    ///
+    /// The matching dictionary is a bare `IOUSBHostInterface` class match (see
+    /// `HiDockDeviceMatching.matchingDictionary`), so these callbacks fire for
+    /// EVERY USB interface on the system. Attach events must be filtered here
+    /// or plugging in a keyboard would kick off a sync.
+    ///
+    /// Termination is handled differently: a terminated service may no longer
+    /// expose `idVendor`, so the filter cannot be trusted on the way out.
+    /// Any termination triggers an authoritative rescan instead.
     private func drain(_ iterator: io_iterator_t, event: DeviceEvent) {
-        var sawAny = false
+        var sawRelevant = false
         while case let service = IOIteratorNext(iterator), service != 0 {
-            sawAny = true
+            if event == .detached || HiDockDeviceMatching.isHiDockP1Interface(service) {
+                sawRelevant = true
+            }
             IOObjectRelease(service)
         }
-        if sawAny { onChange(event) }
+        guard sawRelevant else { return }
+        if event == .detached { rescan() } else { onChange(.attached) }
     }
 
     public func rescan() {
