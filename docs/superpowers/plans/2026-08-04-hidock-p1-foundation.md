@@ -960,7 +960,11 @@ public actor JensenDevice {
         try? await Task.sleep(for: .milliseconds(300))
     }
 
+    /// Takes the gate. Closing while a command is in flight tears down the USB
+    /// user client under a blocking transfer on another thread.
     public func close() async {
+        await acquire()
+        defer { release() }
         await transport.close()
         buffer.removeAll(keepingCapacity: true)
         sequence = 0
@@ -1164,19 +1168,34 @@ public actor IOUSBHostTransport: USBTransport {
 
     public func open() async throws {
         guard interface == nil else { return }
+        var claimed: IOUSBHostInterface?
         do {
             let iface = try IOUSBHostInterface(
                 __ioService: service, options: [], queue: nil, interestHandler: nil)
+            claimed = iface
             try iface.selectAlternateSetting(0)
             self.outPipe = try iface.copyPipe(withAddress: Self.endpointOut)
             self.inPipe = try iface.copyPipe(withAddress: Self.endpointIn)
             self.interface = iface
         } catch {
+            // A pipe holds a STRONG reference to its interface. An orphaned pipe
+            // therefore keeps the exclusive IOService claim alive, and every
+            // later open() fails with "user client already created" for the rest
+            // of the process lifetime. Tear it down explicitly.
+            outPipe = nil
+            inPipe = nil
+            claimed?.destroy()
+            interface = nil
             throw JensenError.interfaceUnavailable(String(describing: error))
         }
     }
 
     public func close() async {
+        // Abort synchronously BEFORE destroy. destroy() tears down the user
+        // client, and a blocking __sendIORequest outstanding against these pipes
+        // would then be operating on a connection that no longer exists.
+        if let outPipe { try? outPipe.__abort(with: .synchronous) }
+        if let inPipe { try? inPipe.__abort(with: .synchronous) }
         outPipe = nil
         inPipe = nil
         interface?.destroy()
@@ -1200,6 +1219,19 @@ public actor IOUSBHostTransport: USBTransport {
         return Data(bytes: buffer.bytes, count: transferred)
     }
 
+    /// Carries the pipe and buffer into the detached closure.
+    ///
+    /// The `buffer` is genuinely exclusive: a fresh `NSMutableData` is allocated
+    /// per call, never stored in actor state, and read only after the
+    /// continuation resumes. The `pipe` is NOT exclusive — it is actor state
+    /// that `close()` also reaches. Safety therefore rests on `close()` aborting
+    /// both pipes before `destroy()`, and on `JensenDevice.close()` holding the
+    /// FIFO gate so no transfer is in flight when it runs.
+    private struct UncheckedSendableBox: @unchecked Sendable {
+        let pipe: IOUSBHostPipe
+        let buffer: NSMutableData
+    }
+
     /// `__sendIORequest` blocks the calling thread, so it runs off the actor.
     @discardableResult
     private static func transfer(
@@ -1208,20 +1240,29 @@ public actor IOUSBHostTransport: USBTransport {
         timeout: TimeInterval,
         toleratesTimeout: Bool = false
     ) async throws -> Int {
-        try await withCheckedThrowingContinuation { continuation in
+        let box = UncheckedSendableBox(pipe: pipe, buffer: buffer)
+        return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 var transferred = 0
                 do {
-                    try pipe.__sendIORequest(
-                        with: buffer, bytesTransferred: &transferred, completionTimeout: timeout)
+                    try box.pipe.__sendIORequest(
+                        with: box.buffer, bytesTransferred: &transferred,
+                        completionTimeout: timeout)
                     continuation.resume(returning: transferred)
                 } catch {
-                    // A read that simply had nothing waiting is not an error.
-                    if toleratesTimeout {
-                        continuation.resume(returning: 0)
-                    } else {
+                    // ONLY a genuine timeout means "nothing arrived". Anything
+                    // else — kIOReturnNoDevice on unplug, a stalled pipe — must
+                    // propagate, or an absent device reads as a merely idle one
+                    // and every command spins out its full budget before failing.
+                    guard toleratesTimeout,
+                          (error as NSError).code == kIOReturnTimeout else {
                         continuation.resume(throwing: error)
+                        return
                     }
+                    // Bytes already moved off the endpoint are consumed even on a
+                    // timeout. Reporting 0 would silently discard them and desync
+                    // the stream.
+                    continuation.resume(returning: transferred)
                 }
             }
         }
@@ -1243,10 +1284,13 @@ case "info":
     let transport = try IOUSBHostTransport.openFirstAvailable()
     let device = JensenDevice(transport: transport)
     try await device.open()
-    defer { Task { await device.close() } }
+
 
     let body = try await device.send(.getDeviceInfo, timeout: .seconds(5))
     print("device info body (\(body.count) bytes): \(body.map { String(format: "%02x", $0) }.joined())")
+    // Awaited, not `defer { Task { ... } }` — the process exits before a
+    // detached task runs, so destroy() would never execute.
+    await device.close()
     print("INFO OK")
 
 default:
@@ -1478,7 +1522,7 @@ public enum ResponseParsers {
         let b = [UInt8](body)
         let versionNumber = UInt32(b[0]) << 24 | UInt32(b[1]) << 16 | UInt32(b[2]) << 8 | UInt32(b[3])
         let versionCode = "\(b[1]).\(b[2]).\(b[3])"
-        let serial = String(decoding: b[4 ..< min(20, b.count)].filter { $0 > 0 }, as: UTF8.self)
+        let serial = String(decoding: b[4...].filter { $0 > 0 }, as: UTF8.self)
         return DeviceInfo(versionCode: versionCode, versionNumber: versionNumber, serialNumber: serial)
     }
 
@@ -1615,7 +1659,7 @@ case "list":
     let transport = try IOUSBHostTransport.openFirstAvailable()
     let device = JensenDevice(transport: transport)
     try await device.open()
-    defer { Task { await device.close() } }
+
 
     let info = try await device.deviceInfo()
     print("firmware \(info.versionCode)  serial \(info.serialNumber)")
@@ -1848,7 +1892,7 @@ case "pull":
     let transport = try IOUSBHostTransport.openFirstAvailable()
     let device = JensenDevice(transport: transport)
     try await device.open()
-    defer { Task { await device.close() } }
+
 
     let files = try await device.listFiles()
     guard let file = files.first(where: { $0.name == target }) else {
@@ -2979,7 +3023,7 @@ public final class AppModel {
                 let transport = try IOUSBHostTransport.openFirstAvailable()
                 let device = JensenDevice(transport: transport)
                 try await device.open()
-                defer { Task { await device.close() } }
+            
 
                 let info = try await device.deviceInfo()
                 let card = try await device.cardInfo()
@@ -3284,7 +3328,7 @@ Append to the class:
                 let transport = try IOUSBHostTransport.openFirstAvailable()
                 let device = JensenDevice(transport: transport)
                 try await device.open()
-                defer { Task { await device.close() } }
+            
                 let candidates = try await engine.reclaimable(device: device)
                 await MainActor.run { self?.reclaimCandidates = candidates }
             } catch {
@@ -3302,7 +3346,7 @@ Append to the class:
                 let transport = try IOUSBHostTransport.openFirstAvailable()
                 let device = JensenDevice(transport: transport)
                 try await device.open()
-                defer { Task { await device.close() } }
+            
                 _ = try await engine.deleteFromDevice(files, device: device)
                 await MainActor.run { self?.reclaimCandidates = [] }
             } catch {
