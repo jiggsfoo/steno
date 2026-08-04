@@ -2002,8 +2002,11 @@ case "pull":
         print("not found on device: \(target)"); exit(1)
     }
 
+    // Write with the corrected extension so the result is directly playable.
+    // The device names MP3 recordings `.hda`; the bytes need no conversion.
+    let stem = (file.name as NSString).deletingPathExtension
     let out = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        .appendingPathComponent(file.name)
+        .appendingPathComponent("\(stem).\(file.preferredExtension)")
     try await device.transferFile(file, to: out) { done, total in
         let pct = total > 0 ? done * 100 / total : 0
         FileHandle.standardError.write(Data("\r\(pct)% (\(done)/\(total))".utf8))
@@ -2018,11 +2021,18 @@ Update the usage string to `[probe|info|list|pull <name>]`.
 
 Run:
 ```bash
-swift run hidock-cli list                       # copy a filename
-swift run hidock-cli pull <that-filename>
-afplay <that-filename>                          # must be audible
+swift run hidock-cli list                    # copy a device filename
+swift run hidock-cli pull 2026Aug04-135302-Wip02.hda
+ls -l 2026Aug04-135302-Wip02.mp3             # must be exactly 53568 bytes
+afinfo 2026Aug04-135302-Wip02.mp3            # expect ~4.46 s, 96 kbps, 48 kHz mono
+afplay 2026Aug04-135302-Wip02.mp3            # must be audible
 ```
-Expected: `PULL OK`, and the file plays. Confirm the on-disk byte size matches the size `list` reported.
+Expected: `PULL OK`; the on-disk size matches the byte count `list` reported exactly; `afinfo`
+reads it as MP3; the audio is audible. Note the output is `.mp3` even though the device
+names it `.hda` — the bytes are unchanged, only the extension is corrected.
+
+Then pull the largest file (`2026Aug04-135322-Wip04.hda`, 91296 bytes) as well, to exercise
+a transfer that spans more packets.
 
 - [ ] **Step 7: Commit**
 
