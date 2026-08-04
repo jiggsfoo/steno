@@ -654,8 +654,6 @@ git commit -m "feat(kit): Jensen packet codec with padding and slice handling"
 
 ### Task 3: Transport seam and JensenDevice actor
 
-The actor's serial executor is what enforces the protocol's single-outstanding-command invariant.
-
 **Files:**
 - Create: `Sources/HiDockKit/USBTransport.swift`
 - Create: `Sources/HiDockKit/JensenDevice.swift`
@@ -664,7 +662,14 @@ The actor's serial executor is what enforces the protocol's single-outstanding-c
 
 **Interfaces:**
 - Consumes: `JensenPacket`, `JensenCommand`, `JensenError`
-- Produces: `protocol USBTransport: Sendable { func open() async throws; func close() async; func write(_: Data) async throws; func read(maxLength: Int, timeout: Duration) async throws -> Data }`, `actor JensenDevice`, `JensenDevice.init(transport:)`, `JensenDevice.send(_: JensenCommand, body: Data, timeout: Duration) async throws -> Data`, `JensenDevice.open()`, `JensenDevice.close()`
+- Produces: `protocol USBTransport: Sendable, Actor { func open() async throws; func close() async; func write(_: Data) async throws; func read(maxLength: Int, timeout: Duration) async throws -> Data }`, `actor JensenDevice`, `JensenDevice.init(transport:)`, `JensenDevice.send(_:body:timeout:) async throws -> Data`, `JensenDevice.open()`, `JensenDevice.close()`, `JensenDevice.drain(maxDuration:)`
+
+#### Two hardware facts this task is built on
+
+Both were measured against a real P1 on 2026-08-04, not assumed.
+
+1. **The device echoes the request sequence.** Sequences `0x00000000`, `0x00000007`, `0x00003039`, and `0xDEADBEEF` all came back byte-identical in the response header. Responses are therefore matched on **(command id, sequence)**, not command id alone. This is what stops a late response from a timed-out command satisfying its own retry.
+2. **An actor does NOT serialize commands.** Swift actors are reentrant: isolation protects state between suspension points, it does not make an `async` method body atomic. Two concurrent callers will both reach `transport.write` before either reads a response, putting two commands on a wire that permits one. Serialization needs the explicit FIFO gate below. Do not delete it on the theory that the actor already covers it — it does not.
 
 - [ ] **Step 1: Write the fake transport**
 
@@ -673,15 +678,19 @@ The actor's serial executor is what enforces the protocol's single-outstanding-c
 import Foundation
 @testable import HiDockKit
 
-/// Scriptable transport. Each written command id maps to the responses the
-/// device would return, popped in order.
+/// Scriptable transport. Responses are keyed by command id and echo the
+/// request's sequence, matching real device behaviour.
 actor FakeTransport: USBTransport {
     struct Script: Sendable {
         var responses: [UInt16: [Data]] = [:]
+        /// Commands the device deliberately never answers.
         var readTimeoutFor: Set<UInt16> = []
+        /// Wall-clock cost of every read. Without this no test can exercise a
+        /// timeout path, which is how a whole class of bugs stayed invisible.
+        var readDelay: Duration = .zero
     }
 
-    private var script: Script
+    private let script: Script
     private var pending: [Data] = []
     private(set) var written: [JensenPacket] = []
     private(set) var openCount = 0
@@ -695,7 +704,7 @@ actor FakeTransport: USBTransport {
     func write(_ data: Data) async throws {
         guard case let .packet(p, _) = try JensenPacket.decode(from: data) else { return }
         written.append(p)
-        if script.readTimeoutFor.contains(p.command) { return }   // deliberately answer nothing
+        if script.readTimeoutFor.contains(p.command) { return }
         for body in script.responses[p.command] ?? [] {
             pending.append(JensenPacket(command: p.command, sequence: p.sequence, body: body).encoded())
         }
@@ -703,11 +712,14 @@ actor FakeTransport: USBTransport {
 
     /// Hands back at most `readSplit` bytes per call, so encoded packets
     /// genuinely arrive across multiple reads and the device layer has to
-    /// reassemble them. A fake that always returns whole packets would let a
+    /// reassemble them. A fake that always returned whole packets would let a
     /// broken reassembler pass.
     private static let readSplit = 64
 
     func read(maxLength: Int, timeout: Duration) async throws -> Data {
+        if script.readDelay > .zero {
+            try? await Task.sleep(for: min(script.readDelay, timeout))
+        }
         guard !pending.isEmpty else { return Data() }
         let next = pending.removeFirst()
         guard next.count > Self.readSplit else { return next }
@@ -715,8 +727,13 @@ actor FakeTransport: USBTransport {
         return Data(next.prefix(Self.readSplit))
     }
 
-    /// Queue an unsolicited packet, simulating a late response arriving after a timeout.
-    func injectStrayResponse(command: UInt16, sequence: UInt32, body: Data) {
+    /// Queue an unsolicited packet, simulating a response that arrives after
+    /// its command already timed out. `delay` defers it so the late-arrival
+    /// case is exercised rather than the trivially-already-queued one.
+    func injectStrayResponse(
+        command: UInt16, sequence: UInt32, body: Data, after delay: Duration = .zero
+    ) async {
+        if delay > .zero { try? await Task.sleep(for: delay) }
         pending.append(JensenPacket(command: command, sequence: sequence, body: body).encoded())
     }
 }
@@ -734,8 +751,7 @@ import Testing
     let t = FakeTransport(script: .init(responses: [1: [Data([0xAB])]]))
     let device = JensenDevice(transport: t)
     try await device.open()
-    let body = try await device.send(.getDeviceInfo)
-    #expect(body == Data([0xAB]))
+    #expect(try await device.send(.getDeviceInfo) == Data([0xAB]))
 }
 
 @Test func sequenceNumbersIncrementPerCommand() async throws {
@@ -744,8 +760,7 @@ import Testing
     try await device.open()
     _ = try await device.send(.getDeviceInfo)
     _ = try await device.send(.getFileCount)
-    let written = await t.written
-    #expect(written.map(\.sequence) == [0, 1])
+    #expect(await t.written.map(\.sequence) == [0, 1])
 }
 
 @Test func reassemblesBodySplitAcrossReads() async throws {
@@ -754,8 +769,7 @@ import Testing
     let t = FakeTransport(script: .init(responses: [4: [Data(repeating: 0x7, count: 300)]]))
     let device = JensenDevice(transport: t)
     try await device.open()
-    let body = try await device.send(.getFileList)
-    #expect(body.count == 300)
+    #expect(try await device.send(.getFileList).count == 300)
 }
 
 @Test func timesOutWhenDeviceNeverAnswers() async throws {
@@ -763,38 +777,89 @@ import Testing
     let device = JensenDevice(transport: t)
     try await device.open()
     await #expect(throws: JensenError.timeout(command: 1)) {
-        _ = try await device.send(.getDeviceInfo, timeout: .milliseconds(50))
+        _ = try await device.send(.getDeviceInfo, timeout: .milliseconds(100))
     }
 }
 
-/// After a timeout the IN endpoint must be drained, or a late response
-/// would be matched against the *next* command and desync everything.
-@Test func drainsStrayResponseAfterTimeout() async throws {
+/// The timeout must bound the call's own duration. Passing the full command
+/// timeout as the per-read timeout lets a read entered just before the
+/// deadline block for another whole timeout, roughly doubling it.
+@Test func timeoutIsAnUpperBoundOnElapsedTime() async throws {
+    let t = FakeTransport(script: .init(
+        responses: [:], readTimeoutFor: [1], readDelay: .milliseconds(400)))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    let start = ContinuousClock.now
+    _ = try? await device.send(.getDeviceInfo, timeout: .milliseconds(300))
+    let elapsed = ContinuousClock.now - start
+    #expect(elapsed < .milliseconds(600))
+}
+
+/// A response that arrives after its command timed out must never satisfy a
+/// later command, even one with the SAME command id. The device echoes the
+/// request sequence, so the retry carries a different sequence and the stale
+/// packet is recognisable.
+@Test func staleResponseDoesNotSatisfyARetryOfTheSameCommand() async throws {
+    let t = FakeTransport(script: .init(responses: [1: [Data([0x22])]], readTimeoutFor: []))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    // Sequence 0 is what the first (abandoned) attempt would have used.
+    await t.injectStrayResponse(command: 1, sequence: 0, body: Data([0x11]))
+    let body = try await device.send(.getDeviceInfo, timeout: .seconds(1))
+    #expect(body == Data([0x22]))          // never the stale 0x11
+}
+
+/// A timeout must not strand a partial packet in the buffer. A stranded
+/// header's declared length would swallow every subsequent response, and
+/// because its sync marker is intact `invalidHeader` never fires to clear it.
+@Test func timeoutClearsBufferSoTheNextCommandSucceeds() async throws {
     let t = FakeTransport(script: .init(responses: [6: [Data([0, 0, 0, 3])]], readTimeoutFor: [1]))
     let device = JensenDevice(transport: t)
     try await device.open()
 
-    _ = try? await device.send(.getDeviceInfo, timeout: .milliseconds(50))
-    await t.injectStrayResponse(command: 1, sequence: 0, body: Data([0xDE, 0xAD]))
-    await device.drain()
+    await t.injectStrayResponse(command: 1, sequence: 0, body: Data(repeating: 0xEE, count: 40))
+    _ = try? await device.send(.getDeviceInfo, timeout: .milliseconds(100))
 
-    let body = try await device.send(.getFileCount)
-    #expect(body == Data([0, 0, 0, 3]))          // not the stray 0xDEAD
+    #expect(try await device.send(.getFileCount) == Data([0, 0, 0, 3]))
 }
 
-@Test func concurrentCallersAreSerialized() async throws {
-    let t = FakeTransport(script: .init(responses: [1: [Data([1])], 6: [Data([2])], 16: [Data([3])]]))
+/// drain() exists to catch a response that arrives LATE. Exiting on the first
+/// empty read misses exactly that case, because an empty read means "nothing
+/// in the last 50 ms", not "the endpoint is empty".
+@Test func drainConsumesALateArrivingResponse() async throws {
+    let t = FakeTransport(script: .init(responses: [6: [Data([0, 0, 0, 9])]]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    async let late: Void = t.injectStrayResponse(
+        command: 1, sequence: 0, body: Data([0xDE]), after: .milliseconds(120))
+    await device.drain(maxDuration: .milliseconds(600))
+    await late
+
+    #expect(try await device.send(.getFileCount) == Data([0, 0, 0, 9]))
+}
+
+/// Actors are reentrant, so this pins the property the explicit gate provides:
+/// every caller receives its OWN command's response, and no two commands are
+/// on the wire at once.
+@Test func concurrentCallersEachReceiveTheirOwnResponse() async throws {
+    let t = FakeTransport(script: .init(
+        responses: [1: [Data([0x11])], 6: [Data([0x66])], 16: [Data([0x16])]]))
     let device = JensenDevice(transport: t)
     try await device.open()
 
     async let a = device.send(.getDeviceInfo)
     async let b = device.send(.getFileCount)
     async let c = device.send(.getCardInfo)
-    _ = try await (a, b, c)
+    let (ra, rb, rc) = try await (a, b, c)
 
-    let written = await t.written
-    #expect(written.count == 3)
-    #expect(Set(written.map(\.sequence)) == [0, 1, 2])   // no reuse
+    #expect(ra == Data([0x11]))
+    #expect(rb == Data([0x66]))
+    #expect(rc == Data([0x16]))
+    #expect(await t.written.count == 3)
+    #expect(Set(await t.written.map(\.sequence)).count == 3)
 }
 
 @Test func openAndCloseForwardToTransport() async throws {
@@ -822,6 +887,7 @@ public protocol USBTransport: Sendable, Actor {
     func close() async
     func write(_ data: Data) async throws
     /// Returns an empty Data when nothing arrived before the timeout.
+    /// Empty means "nothing in this window", NOT "the endpoint is empty".
     func read(maxLength: Int, timeout: Duration) async throws -> Data
 }
 ```
@@ -836,9 +902,14 @@ public actor JensenDevice {
     private var sequence: UInt32 = 0
     private var buffer = Data()
 
-    /// Bulk reads are capped at this size. The device streams file data in
-    /// chunks well under this, and oversizing costs nothing but a temp buffer.
+    // FIFO gate. Swift actors are reentrant, so actor isolation alone does NOT
+    // keep one command on the wire at a time — a caller suspended at
+    // `transport.write` releases the actor and lets the next caller in.
+    private var isBusy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
     private static let readChunk = 64 * 1024
+    private static let maxReadWindow = Duration.milliseconds(250)
 
     public init(transport: any USBTransport) {
         self.transport = transport
@@ -855,7 +926,21 @@ public actor JensenDevice {
     public func close() async {
         await transport.close()
         buffer.removeAll(keepingCapacity: true)
+        sequence = 0
     }
+
+    // MARK: - Serialization
+
+    private func acquire() async {
+        guard isBusy else { isBusy = true; return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    private func release() {
+        if waiters.isEmpty { isBusy = false } else { waiters.removeFirst().resume() }
+    }
+
+    // MARK: - Commands
 
     @discardableResult
     public func send(
@@ -867,35 +952,58 @@ public actor JensenDevice {
     }
 
     func sendRaw(_ command: UInt16, body: Data, timeout: Duration) async throws -> Data {
-        let seq = sequence
-        sequence &+= 1
-        try await transport.write(
-            JensenPacket(command: command, sequence: seq, body: body).encoded())
-        return try await awaitResponse(command: command, timeout: timeout)
+        await acquire()
+        defer { release() }
+        return try await perform(command: command, body: body, timeout: timeout)
     }
 
-    /// Reads until a packet whose command id matches arrives, or the deadline passes.
-    /// Packets for other commands are discarded as stale.
-    private func awaitResponse(command: UInt16, timeout: Duration) async throws -> Data {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-
-        while true {
-            if let packet = try takeBufferedPacket(matching: command) { return packet }
-
-            guard ContinuousClock.now < deadline else {
-                throw JensenError.timeout(command: command)
-            }
-
-            let chunk = try await transport.read(maxLength: Self.readChunk, timeout: timeout)
-            if chunk.isEmpty {
-                try await Task.sleep(for: .milliseconds(5))
-                continue
-            }
-            buffer.append(chunk)
+    /// Caller must already hold the gate.
+    private func perform(command: UInt16, body: Data, timeout: Duration) async throws -> Data {
+        let seq = sequence
+        sequence &+= 1
+        do {
+            try await transport.write(
+                JensenPacket(command: command, sequence: seq, body: body).encoded())
+            return try await awaitResponse(command: command, sequence: seq, timeout: timeout)
+        } catch {
+            // A failed command must leave nothing behind: a stranded partial
+            // packet would swallow the next response, and a late reply would
+            // be waiting on the endpoint for whoever comes next.
+            buffer.removeAll(keepingCapacity: true)
+            await drain()
+            throw error
         }
     }
 
-    private func takeBufferedPacket(matching command: UInt16) throws -> Data? {
+    /// Matches on (command, sequence). The device echoes the request sequence,
+    /// verified on hardware, so a stale reply to an abandoned command is
+    /// distinguishable from the answer to its retry.
+    private func awaitResponse(
+        command: UInt16, sequence expected: UInt32, timeout: Duration
+    ) async throws -> Data {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+
+        while true {
+            if let body = try takeBufferedPacket(command: command, sequence: expected) {
+                return body
+            }
+
+            let remaining = ContinuousClock.now.duration(to: deadline)
+            guard remaining > .zero else { throw JensenError.timeout(command: command) }
+
+            // Never read for longer than the command has left, or the call
+            // could run to roughly twice its stated timeout.
+            let chunk = try await transport.read(
+                maxLength: Self.readChunk, timeout: min(remaining, Self.maxReadWindow))
+            if chunk.isEmpty {
+                try? await Task.sleep(for: .milliseconds(5))
+            } else {
+                buffer.append(chunk)
+            }
+        }
+    }
+
+    private func takeBufferedPacket(command: UInt16, sequence expected: UInt32) throws -> Data? {
         while !buffer.isEmpty {
             let result: JensenPacket.DecodeResult
             do {
@@ -908,21 +1016,31 @@ public actor JensenDevice {
 
             guard case let .packet(packet, consumed) = result else { return nil }
             buffer.removeFirst(consumed)
-            if packet.command == command { return packet.body }
-            // else: stale response for an earlier command, drop it and keep looking
+            if packet.command == command && packet.sequence == expected { return packet.body }
+            // else: a reply to an abandoned command. Drop it and keep looking.
         }
         return nil
     }
 
     /// Reads and discards anything still queued on the IN endpoint.
-    /// Must be called after a timeout before issuing the next command.
+    ///
+    /// Requires several consecutive quiet windows rather than one, because a
+    /// single empty read only means nothing arrived in the last 50 ms. The
+    /// response this exists to catch is precisely the one that arrives late.
     public func drain(maxDuration: Duration = .milliseconds(500)) async {
         buffer.removeAll(keepingCapacity: true)
         let deadline = ContinuousClock.now.advanced(by: maxDuration)
+        var consecutiveEmpty = 0
+
         while ContinuousClock.now < deadline {
-            guard let chunk = try? await transport.read(
-                maxLength: Self.readChunk, timeout: .milliseconds(50)),
-                  !chunk.isEmpty else { return }
+            let chunk = (try? await transport.read(
+                maxLength: Self.readChunk, timeout: .milliseconds(50))) ?? Data()
+            if chunk.isEmpty {
+                consecutiveEmpty += 1
+                if consecutiveEmpty >= 3 { return }
+            } else {
+                consecutiveEmpty = 0
+            }
         }
     }
 }
@@ -931,13 +1049,13 @@ public actor JensenDevice {
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `swift test --filter JensenDeviceTests`
-Expected: PASS, 7 tests
+Expected: PASS, 10 tests
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add Sources/HiDockKit/USBTransport.swift Sources/HiDockKit/JensenDevice.swift Tests/HiDockKitTests/FakeTransport.swift Tests/HiDockKitTests/JensenDeviceTests.swift
-git commit -m "feat(kit): USBTransport seam and JensenDevice actor with drain-after-timeout"
+git commit -m "feat(kit): USBTransport seam and JensenDevice with FIFO command gate"
 ```
 
 ---
@@ -1576,9 +1694,15 @@ Append inside the actor:
         var received = 0
         var failure: (any Error)?
 
+        // Holds the same FIFO gate as every other command: a transfer streams
+        // many packets, and a concurrent command would interleave with them.
+        await acquire()
+        defer { release() }
+
+        let seq = sequence
+        sequence &+= 1
+
         do {
-            let seq = sequence
-            sequence &+= 1
             let body = Data(file.name.utf8)
             try await transport.write(
                 JensenPacket(command: JensenCommand.transferFile.rawValue,
@@ -1590,7 +1714,7 @@ Append inside the actor:
             var deadline = ContinuousClock.now.advanced(by: chunkTimeout)
             while received < file.lengthBytes {
                 if let chunk = try takeBufferedPacket(
-                    matching: JensenCommand.transferFile.rawValue), !chunk.isEmpty {
+                    command: JensenCommand.transferFile.rawValue, sequence: seq), !chunk.isEmpty {
                     let slice = chunk.prefix(file.lengthBytes - received)
                     try handle.write(contentsOf: slice)
                     received += slice.count
@@ -1615,6 +1739,8 @@ Append inside the actor:
 
         if let failure {
             try? fm.removeItem(at: url)
+            buffer.removeAll(keepingCapacity: true)
+            await drain()
             throw failure
         }
         guard received == file.lengthBytes else {

@@ -131,9 +131,22 @@ and testable without a P1 attached.
 | `JensenDevice` | `actor`. Command queue, sequence assignment, response matching, timeouts, endpoint draining. | `USBTransport`, `JensenPacket` |
 | Models | `DeviceInfo`, `FileInfo`, `CardInfo`, `BatteryStatus` | Foundation |
 
-`JensenDevice` is an `actor` because the protocol permits exactly one outstanding command
-and matches responses by command id with no sequence correlation. An actor's serial
-executor enforces that invariant for free under Swift 6 strict concurrency.
+`JensenDevice` is an `actor` guarding a shared read buffer, plus an explicit FIFO gate
+that keeps exactly one command on the wire at a time.
+
+**Corrected 2026-08-04, during implementation.** This section originally claimed the actor
+alone enforced the one-outstanding-command invariant "for free" via its serial executor.
+That is false. Swift actors are reentrant: isolation protects state *between* suspension
+points, it does not make an `async` method body atomic. Two concurrent callers both reach
+`transport.write` before either reads a response, putting two commands on a wire that
+permits one. Demonstrated empirically during Task 3's review. The invariant needs the
+explicit gate; the actor only makes the buffer and sequence counter safe to touch.
+
+**Also corrected: the device does echo the request sequence.** Measured against a real P1
+with sequences `0x00000000`, `0x00000007`, `0x00003039`, and `0xDEADBEEF`, all returned
+byte-identical. Responses are therefore matched on **(command id, sequence)** rather than
+command id alone, which is what prevents a late response from an abandoned command from
+satisfying its own retry.
 
 `transferFile` streams chunks to a file handle and reports progress. It does not return
 a `Data`.
@@ -237,7 +250,7 @@ toggle (`SMAppService`), and a "Rebuild index" button.
 | Interface claim fails (in use, permissions) | Menubar shows "P1 unavailable". Retry with backoff. Never busy-loop. |
 | Device busy (recording, or in Vibe Mic Bluetooth mode) | Commands time out. Show "P1 busy", back off, retry on next attach. |
 | Unplugged mid-transfer | `.part` remains, nothing commits. Next attach restarts that file. `.part` is keyed by signature so retries do not accumulate orphans. |
-| Command timeout | Drain the IN endpoint until idle before issuing the next command. Required: with one command in flight and matching by command id, a late response would desync every subsequent command. |
+| Command timeout | Clear the read buffer and drain the IN endpoint before the next command. Both halves are required. A stranded partial packet's declared length would swallow the next response, and because its sync marker is intact `invalidHeader` never fires to clear it. Draining must span several quiet windows, not stop at the first empty read: an empty read means "nothing arrived in this window", and the response being guarded against is precisely the late one. |
 | Invalid packet header | Transport is desynced. Drop the read buffer, drain, reconnect. No mid-stream resync attempt. |
 | Received bytes != `FileInfo.length` | Discard `.part`, do not commit. Retry once, then surface the failure. A truncated recording must never enter the library. |
 | Disk full | Pre-check before starting the transfer. Fail fast rather than writing a partial file. |
