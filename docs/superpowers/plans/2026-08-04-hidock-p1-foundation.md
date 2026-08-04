@@ -2538,11 +2538,10 @@ public struct Library: Sendable {
 
     /// Moves a verified download into place and writes its sidecar.
     ///
-    /// The sidecar is written and moved BEFORE the audio, so the failure window
-    /// is a single same-volume rename. Written the other way round, a failure
-    /// after the audio moved would leave audio with no sidecar — and since
-    /// sidecars are the source of truth, `scanSidecars` would not see that
-    /// recording, so the next sync would download it again.
+    /// The audio is installed BEFORE the sidecar. See the comment at the
+    /// install site for why: neither ordering is atomic across two files, and
+    /// audio-first fails into a self-healing state while sidecar-first fails
+    /// into a sidecar that lies about what is on disk.
     @discardableResult
     public func commit(incoming: URL, file: FileInfo, deviceSerial: String) throws -> Sidecar {
         let destination = destinationURL(for: file)
