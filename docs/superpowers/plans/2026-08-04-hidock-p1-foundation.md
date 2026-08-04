@@ -3821,6 +3821,12 @@ public final class AppModel {
         // while B is still running and letting a wake- or retry-rescan start a
         // second concurrent sync against the same device. Clearing only when the
         // generation still matches closes that.
+        // Clear stale state before a fresh attempt. lastError is now rendered,
+        // so a drift warning or failure count from a previous attach would
+        // otherwise sit in the menu forever, describing something that is no
+        // longer true.
+        lastError = nil
+
         syncGeneration &+= 1
         let generation = syncGeneration
 
