@@ -48,6 +48,15 @@ public struct MenuBarView: View {
                 .foregroundStyle(.red)
             Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
         }
+
+        // Rendered regardless of status. Clock-drift warnings and "N recordings
+        // failed to sync" were being written and never shown to anyone.
+        if let error = model.lastError {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .lineLimit(3)
+        }
     }
 
     @ViewBuilder

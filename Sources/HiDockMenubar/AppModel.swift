@@ -28,8 +28,12 @@ public final class AppModel: @unchecked Sendable {
 
     public var libraryRoot: URL {
         didSet {
+            guard libraryRoot != oldValue else { return }
             UserDefaults.standard.set(libraryRoot.path, forKey: Self.rootKey)
-            reloadRecent()
+            // Rebuild, not just reload: the index still holds rows for the OLD
+            // root, and the menubar would resolve those relative paths against
+            // the new one and open nothing.
+            rebuildIndex()
         }
     }
 
@@ -37,6 +41,7 @@ public final class AppModel: @unchecked Sendable {
     private var monitor: DeviceMonitor?
     private var index: LibraryIndex?
     private var syncTask: Task<Void, Never>?
+    private var syncGeneration = 0
     private var retryDelay: Duration = .seconds(2)
 
     public init() {
@@ -61,8 +66,10 @@ public final class AppModel: @unchecked Sendable {
     }
 
     private static func indexURL() -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("HiDock/index.sqlite")
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support")
+        return base.appendingPathComponent("HiDock/index.sqlite")
     }
 
     private func handle(_ event: DeviceEvent) {
@@ -93,14 +100,46 @@ public final class AppModel: @unchecked Sendable {
         let library = Library(root: libraryRoot)
         let engine = SyncEngine(library: library, index: index)
 
+        // Identity token. A fast unplug/replug can cancel sync A, start sync B,
+        // and only THEN have A's unwind clear `syncTask` — reopening the guard
+        // while B is still running and letting a wake- or retry-rescan start a
+        // second concurrent sync against the same device. Clearing only when the
+        // generation still matches closes that. `SyncEngine.isSyncing` cannot
+        // cover this: `startSync` builds a fresh `SyncEngine` every call, so
+        // `syncTask` (guarded by generation) is the only real mutex here.
+        syncGeneration &+= 1
+        let generation = syncGeneration
+
         syncTask = Task { [weak self] in
-            defer { Task { @MainActor in self?.syncTask = nil } }
+            defer {
+                Task { @MainActor in
+                    guard let self, self.syncGeneration == generation else { return }
+                    self.syncTask = nil
+                }
+            }
+
+            let device: JensenDevice
             do {
                 let transport = try IOUSBHostTransport.openFirstAvailable()
-                let device = JensenDevice(transport: transport)
+                device = JensenDevice(transport: transport)
                 try await device.open()
+            } catch let error as JensenError {
+                await MainActor.run { self?.handleConnectionFailure(error) }
+                return
+            } catch {
+                await MainActor.run { self?.status = .unavailable(error.localizedDescription) }
+                return
+            }
 
-
+            // Swift has no async `defer`, and `defer { Task { ... } }` does NOT
+            // work here — it is fire-and-forget and may never run. The device
+            // MUST be closed on every path: `close()` aborts in-flight pipes and
+            // destroys the user client, and an interface left claimed makes every
+            // later open() fail with "user client already created" for the rest of
+            // the process's life. The app would sync once and then be dead until
+            // relaunch. So: capture the error, close unconditionally, then handle.
+            var caught: (any Error)?
+            do {
                 let info = try await device.deviceInfo()
                 let card = try await device.cardInfo()
                 await MainActor.run {
@@ -138,12 +177,20 @@ public final class AppModel: @unchecked Sendable {
                                               freeMiB: refreshed?.freeMiB ?? card.freeMiB,
                                               capacityMiB: refreshed?.capacityMiB ?? card.capacityMiB)
                 }
-            } catch let error as JensenError {
-                await MainActor.run { self?.handleConnectionFailure(error) }
             } catch {
-                await MainActor.run {
-                    self?.status = .unavailable(error.localizedDescription)
-                    self?.lastError = error.localizedDescription
+                caught = error
+            }
+
+            await device.close()
+
+            if let caught {
+                if let jensen = caught as? JensenError {
+                    await MainActor.run { self?.handleConnectionFailure(jensen) }
+                } else {
+                    await MainActor.run {
+                        self?.status = .unavailable(caught.localizedDescription)
+                        self?.lastError = caught.localizedDescription
+                    }
                 }
             }
         }
