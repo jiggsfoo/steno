@@ -3812,7 +3812,7 @@ public final class AppModel {
     }
 
     private func startSync() {
-        guard let index else { return }
+        guard let index, !isReclaiming else { return }
         let library = Library(root: libraryRoot)
         let engine = SyncEngine(library: library, index: index)
 
@@ -3826,6 +3826,7 @@ public final class AppModel {
         // otherwise sit in the menu forever, describing something that is no
         // longer true.
         lastError = nil
+        lastNotice = nil
 
         syncGeneration &+= 1
         let generation = syncGeneration
@@ -4023,6 +4024,12 @@ struct MenuBarView: View {
                 .foregroundStyle(.orange)
                 .lineLimit(3)
         }
+        if let notice = model.lastNotice {
+            Text(notice)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
     }
 
     @ViewBuilder
@@ -4163,31 +4170,61 @@ Append to the class:
 ```swift
     public var reclaimCandidates: [FileInfo] = []
     public var isLoadingReclaim = false
+    /// Neutral outcome message. `lastError` is for problems; this is for
+    /// "it worked", which the reclaim flow otherwise had no way to say.
+    public var lastNotice: String?
+    /// Reclaim holds the USB interface too. Without this, an attach or a retry
+    /// rescan can call startSync mid-reclaim and fail on "user client already
+    /// created". The guard has to run in BOTH directions.
+    private var isReclaiming = false
 
     /// Lists only recordings verified present on disk at the expected byte
     /// length, checked at call time rather than trusted from the index.
     public func loadReclaimable() {
-        guard let index, syncTask == nil else { return }
+        // Clear first: a stale list left from a previous Cancel would otherwise
+        // be presented as if it were current.
+        reclaimCandidates = []
+        lastNotice = nil
+
+        guard let index, syncTask == nil, !isReclaiming else {
+            lastError = "Can't check the device while a sync is running. Try again in a moment."
+            return
+        }
+        isReclaiming = true
         isLoadingReclaim = true
         let engine = SyncEngine(library: Library(root: libraryRoot), index: index)
 
         Task { [weak self] in
-            defer { Task { @MainActor in self?.isLoadingReclaim = false } }
             do {
                 let transport = try IOUSBHostTransport.openFirstAvailable()
                 let device = JensenDevice(transport: transport)
                 try await device.open()
             
                 let candidates = try await engine.reclaimable(device: device)
-                await MainActor.run { self?.reclaimCandidates = candidates }
+                await device.close()
+                await MainActor.run {
+                    self?.reclaimCandidates = candidates
+                    self?.isLoadingReclaim = false
+                    self?.isReclaiming = false
+                }
             } catch {
-                await MainActor.run { self?.lastError = error.localizedDescription }
+                await MainActor.run {
+                    self?.lastError = error.localizedDescription
+                    self?.isLoadingReclaim = false
+                    self?.isReclaiming = false
+                }
             }
         }
     }
 
     public func reclaim(_ files: [FileInfo]) {
-        guard let index, syncTask == nil, !files.isEmpty else { return }
+        guard let index, syncTask == nil, !isReclaiming, !files.isEmpty else {
+            lastError = "Can't delete right now. Try again in a moment."
+            return
+        }
+        isReclaiming = true
+        lastError = nil
+        lastNotice = nil
         let engine = SyncEngine(library: Library(root: libraryRoot), index: index)
 
         Task { [weak self] in
@@ -4196,10 +4233,33 @@ Append to the class:
                 let device = JensenDevice(transport: transport)
                 try await device.open()
             
-                _ = try await engine.deleteFromDevice(files, device: device)
-                await MainActor.run { self?.reclaimCandidates = [] }
+                let result = try await engine.deleteFromDevice(files, device: device)
+                await device.close()
+                await MainActor.run {
+                    self?.reclaimCandidates = []
+                    self?.isReclaiming = false
+                    // Report ALL three outcomes. A file reported `failed` may
+                    // still be on the device, and a fully-`skipped` run used to
+                    // look identical to a successful one.
+                    var problems: [String] = []
+                    if !result.failed.isEmpty {
+                        problems.append("\(result.failed.count) could not be deleted")
+                    }
+                    if !result.skipped.isEmpty {
+                        problems.append("\(result.skipped.count) skipped (no verified local copy)")
+                    }
+                    if problems.isEmpty {
+                        self?.lastNotice = "Freed \(result.deleted.count) recording(s) from the P1."
+                    } else {
+                        self?.lastError = "Deleted \(result.deleted.count). "
+                            + problems.joined(separator: ", ") + "."
+                    }
+                }
             } catch {
-                await MainActor.run { self?.lastError = error.localizedDescription }
+                await MainActor.run {
+                    self?.lastError = error.localizedDescription
+                    self?.isReclaiming = false
+                }
             }
         }
     }
@@ -4215,6 +4275,9 @@ struct SettingsView: View {
     @Bindable var model: AppModel
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginItemError: String?
+    /// Suppresses the onChange that the revert below would otherwise re-trigger,
+    /// issuing a spurious opposite-direction register/unregister.
+    @State private var isSyncingToggle = false
 
     var body: some View {
         Form {
@@ -4231,8 +4294,17 @@ struct SettingsView: View {
             Section("Startup") {
                 Toggle("Launch at login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, enabled in
+                        guard !isSyncingToggle else { return }
                         setLoginItem(enabled)
                     }
+                    // SwiftUI's Settings scene can retain its root view across
+                    // window open/close, so a change made in System Settings
+                    // would otherwise leave this stale.
+                    .onAppear { refreshLoginItemState() }
+                if SMAppService.mainApp.status == .requiresApproval {
+                    Text("Waiting for approval in System Settings > Login Items.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
                 if let loginItemError {
                     Text(loginItemError).font(.caption).foregroundStyle(.red)
                 }
@@ -4253,11 +4325,21 @@ struct SettingsView: View {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
+        panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.directoryURL = model.libraryRoot
+        // LSUIElement apps are not activated by default, so without this the
+        // panel can open behind the frontmost application.
+        NSApp.activate(ignoringOtherApps: true)
         if panel.runModal() == .OK, let url = panel.url {
             model.libraryRoot = url
         }
+    }
+
+    private func refreshLoginItemState() {
+        isSyncingToggle = true
+        launchAtLogin = SMAppService.mainApp.status == .enabled
+        isSyncingToggle = false
     }
 
     private func setLoginItem(_ enabled: Bool) {
@@ -4270,7 +4352,7 @@ struct SettingsView: View {
             loginItemError = nil
         } catch {
             loginItemError = error.localizedDescription
-            launchAtLogin = SMAppService.mainApp.status == .enabled
+            refreshLoginItemState()
         }
     }
 }
@@ -4286,6 +4368,7 @@ struct ReclaimView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var selected: Set<String> = []
+    @State private var showConfirm = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -4318,12 +4401,29 @@ struct ReclaimView: View {
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Delete \(selected.count) from device") {
+                    .keyboardShortcut(.cancelAction)
+
+                // Deliberately NOT .defaultAction. Deleting from the device is
+                // irreversible, and Select-all sits one click away — Return
+                // should never be able to wipe the P1. A confirmation dialog
+                // stands between the button and the deletion.
+                Button("Delete \(selected.count) from device\u{2026}") {
+                    showConfirm = true
+                }
+                .disabled(selected.isEmpty)
+            }
+            .confirmationDialog(
+                "Delete \(selected.count) recording(s) from the P1?",
+                isPresented: $showConfirm, titleVisibility: .visible
+            ) {
+                Button("Delete from device", role: .destructive) {
                     model.reclaim(model.reclaimCandidates.filter { selected.contains($0.signature) })
                     dismiss()
                 }
-                .disabled(selected.isEmpty)
-                .keyboardShortcut(.defaultAction)
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Your local copies in the library are not affected. "
+                     + "This cannot be undone on the device.")
             }
         }
         .padding()
