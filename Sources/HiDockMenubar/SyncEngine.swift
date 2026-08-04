@@ -188,7 +188,17 @@ public actor SyncEngine {
 
         guard !requested.isEmpty else { return result }
 
-        let stillPresent = Set((try? await device.listFiles())?.map(\.signature) ?? [])
+        // If the confirmation listing itself fails we know NOTHING about what
+        // happened, so report everything as failed. `try?` here would yield an
+        // empty set and mark every file deleted — overstating a destructive
+        // action on exactly the evidence we failed to obtain. Understating what
+        // was deleted is recoverable; overstating it is not.
+        guard let remaining = try? await device.listFiles() else {
+            result.failed.append(contentsOf: requested.map(\.name))
+            return result
+        }
+
+        let stillPresent = Set(remaining.map(\.signature))
         for file in requested {
             if stillPresent.contains(file.signature) {
                 result.failed.append(file.name)

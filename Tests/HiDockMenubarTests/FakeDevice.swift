@@ -9,17 +9,26 @@ actor FakeDevice: SyncDevice {
     /// Simulates a device that accepts DELETE_FILE but does not act on it —
     /// the case a status byte we cannot parse would hide.
     var ignoreDeletes: Bool
+    /// Simulates the confirmation listing failing after deletes were issued.
+    var failListAfterDelete: Bool
     private(set) var deletedNames: [String] = []
 
     init(files: [FileInfo], payloads: [String: Data],
-         failTransfersFor: Set<String> = [], ignoreDeletes: Bool = false) {
+         failTransfersFor: Set<String> = [], ignoreDeletes: Bool = false,
+         failListAfterDelete: Bool = false) {
         self.files = files
         self.payloads = payloads
         self.failTransfersFor = failTransfersFor
         self.ignoreDeletes = ignoreDeletes
+        self.failListAfterDelete = failListAfterDelete
     }
 
-    func listFiles() async throws -> [FileInfo] { files }
+    func listFiles() async throws -> [FileInfo] {
+        if failListAfterDelete && !deletedNames.isEmpty {
+            throw JensenError.timeout(command: 4)
+        }
+        return files
+    }
 
     func transferFile(_ file: FileInfo, to url: URL, chunkTimeout: Duration,
                       progress: @Sendable (Int, Int) -> Void) async throws {

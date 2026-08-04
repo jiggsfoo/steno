@@ -162,6 +162,23 @@ private func file(_ name: String, _ bytes: Int, sig: String) -> FileInfo {
     #expect(result.failed == [a.name])
 }
 
+/// If the confirmation listing fails we know nothing about what happened, so
+/// every file must be reported as failed. Reporting them deleted would
+/// overstate a destructive action on precisely the evidence we could not get.
+@Test func reclaimReportsFailureWhenConfirmationCannotBeObtained() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])],
+                            failListAfterDelete: true)
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+
+    let result = try await engine.deleteFromDevice([a], device: device)
+    #expect(result.deleted.isEmpty)
+    #expect(result.failed == [a.name])
+}
+
 @Test func progressReportsEachPhase() async throws {
     let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
     let (engine, _, _) = try makeEngine(root: root)
