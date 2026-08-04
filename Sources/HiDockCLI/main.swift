@@ -14,7 +14,8 @@ case "probe":
 
     guard let service = services.first else {
         print("No HiDock P1 found.")
-        print("Attached USB devices can be listed with: system_profiler SPUSBDataType")
+        // Note: SPUSBDataType returns nothing at all on macOS 27 (26A5388g).
+        print("Attached USB devices can be listed with: system_profiler SPUSBHostDataType")
         exit(1)
     }
 
