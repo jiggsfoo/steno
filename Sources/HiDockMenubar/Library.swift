@@ -244,3 +244,12 @@ public enum LibraryError: Error, Equatable {
     /// A different recording already occupies the computed path.
     case destinationOccupied(String, String)
 }
+
+extension LibraryError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .destinationOccupied(let path, _):
+            return "Skipped a recording — a different file already exists at \(path)."
+        }
+    }
+}

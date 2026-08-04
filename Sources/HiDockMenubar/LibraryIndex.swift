@@ -13,6 +13,9 @@ public final class LibraryIndex: @unchecked Sendable {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         guard sqlite3_open(url.path, &db) == SQLITE_OK else {
+            // SQLite allocates a handle even on failure; close it before
+            // throwing or it leaks.
+            sqlite3_close(db)
             throw LibraryIndexError.cannotOpen(url.path)
         }
         try execute("PRAGMA journal_mode=WAL;")
@@ -96,6 +99,24 @@ public final class LibraryIndex: @unchecked Sendable {
         }
     }
 
+    /// The full indexed row for one signature, or nil if none.
+    ///
+    /// `SyncEngine.isAlreadySynced` uses this to locate a recording by the path
+    /// the index actually recorded for it, rather than a freshly recomputed
+    /// one — this is what makes `relative_path` load-bearing instead of a
+    /// column nothing reads.
+    public func record(signature: String) -> Sidecar? {
+        lock.lock(); defer { lock.unlock() }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db, "SELECT * FROM recordings WHERE signature = ? LIMIT 1;", -1, &stmt, nil) == SQLITE_OK
+        else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, signature, -1, Self.transient)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return Self.decode(stmt)
+    }
+
     public func recent(limit: Int) throws -> [Sidecar] {
         // Bound and bound: a negative limit means UNLIMITED in SQLite, so an
         // interpolated -1 would quietly return the whole library.
@@ -143,26 +164,33 @@ public final class LibraryIndex: @unchecked Sendable {
 
         var out: [Sidecar] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            func text(_ i: Int32) -> String {
-                guard let c = sqlite3_column_text(stmt, i) else { return "" }
-                return String(cString: c)
-            }
-            func optionalDouble(_ i: Int32) -> Double? {
-                sqlite3_column_type(stmt, i) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, i)
-            }
-            out.append(Sidecar(
-                signature: text(0),
-                deviceFilename: text(1),
-                relativePath: text(2),
-                lengthBytes: Int(sqlite3_column_int64(stmt, 3)),
-                durationSeconds: optionalDouble(4),
-                recordedAt: optionalDouble(5).map(Date.init(timeIntervalSince1970:)),
-                syncedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6)),
-                deviceSerial: text(7),
-                deviceModel: text(8),
-                timeZoneIdentifier: text(9)))
+            out.append(Self.decode(stmt))
         }
         return out
+    }
+
+    /// Decodes one `recordings` row at the statement's current step. Shared by
+    /// `query` and `record(signature:)` so there is exactly one place that
+    /// knows the column order.
+    private static func decode(_ stmt: OpaquePointer?) -> Sidecar {
+        func text(_ i: Int32) -> String {
+            guard let c = sqlite3_column_text(stmt, i) else { return "" }
+            return String(cString: c)
+        }
+        func optionalDouble(_ i: Int32) -> Double? {
+            sqlite3_column_type(stmt, i) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, i)
+        }
+        return Sidecar(
+            signature: text(0),
+            deviceFilename: text(1),
+            relativePath: text(2),
+            lengthBytes: Int(sqlite3_column_int64(stmt, 3)),
+            durationSeconds: optionalDouble(4),
+            recordedAt: optionalDouble(5).map(Date.init(timeIntervalSince1970:)),
+            syncedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6)),
+            deviceSerial: text(7),
+            deviceModel: text(8),
+            timeZoneIdentifier: text(9))
     }
 
     private func execute(_ sql: String) throws {
@@ -182,4 +210,15 @@ public enum LibraryIndexError: Error {
     case cannotOpen(String)
     case prepareFailed(String)
     case writeFailed(String)
+}
+
+extension LibraryIndexError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .cannotOpen:
+            return "Your recordings index couldn't be opened."
+        case .prepareFailed, .writeFailed:
+            return "Your recordings index couldn't be updated."
+        }
+    }
 }

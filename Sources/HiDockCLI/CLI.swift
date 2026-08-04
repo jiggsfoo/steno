@@ -83,6 +83,7 @@ struct CLI {
                 let when = f.recordedAt.map(ISO8601DateFormatter().string(from:)) ?? "unknown"
                 print("  \(f.name)  \(f.lengthBytes) bytes  \(when)  \(f.signature)")
             }
+            await device.close()
             print("LIST OK")
 
         case "pull":
@@ -108,6 +109,7 @@ struct CLI {
                 let pct = total > 0 ? done * 100 / total : 0
                 FileHandle.standardError.write(Data("\r\(pct)% (\(done)/\(total))".utf8))
             }
+            await device.close()
             print("\nwrote \(out.path)")
             print("PULL OK")
 

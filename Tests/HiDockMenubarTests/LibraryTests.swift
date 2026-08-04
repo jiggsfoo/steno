@@ -197,3 +197,17 @@ private func sampleFile(name: String = "20260804143022REC001.mp3", length: Int =
     let lib = Library(root: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"))
     #expect(lib.isReachable() == false)
 }
+
+/// Disk-full is a spec-named handled case (see `SyncError.insufficientSpace`)
+/// that had zero coverage.
+@Test func hasFreeSpaceIsTrueForATrivialRequest() {
+    let lib = Library(root: FileManager.default.temporaryDirectory)
+    #expect(lib.hasFreeSpace(forBytes: 10))
+}
+
+@Test func hasFreeSpaceIsFalseWhenTheRequestExceedsAvailableCapacity() {
+    let lib = Library(root: FileManager.default.temporaryDirectory)
+    // 10 TB: far more than any real test machine has free, but small enough
+    // not to overflow the Int64 addition inside hasFreeSpace.
+    #expect(lib.hasFreeSpace(forBytes: 10_000_000_000_000) == false)
+}

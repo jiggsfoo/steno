@@ -110,6 +110,10 @@ public struct MenuBarView: View {
     private static func dateLabel(_ date: Date?) -> String {
         guard let date else { return "unknown" }
         let f = DateFormatter()
+        // en_US_POSIX for the same reason Library's formatters set it: under a
+        // non-Gregorian Locale.current the fixed format can render unexpected
+        // digits/characters.
+        f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "MMM d  HH:mm"
         return f.string(from: date)
     }

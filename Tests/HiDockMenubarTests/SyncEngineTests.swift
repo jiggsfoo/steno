@@ -179,6 +179,68 @@ private func file(_ name: String, _ bytes: Int, sig: String) -> FileInfo {
     #expect(result.failed == [a.name])
 }
 
+/// Disk-full is a spec-named handled case with zero prior coverage: it must
+/// be reported per-file via `SyncError.insufficientSpace`, not crash the sync
+/// or silently drop the recording.
+@Test func syncReportsInsufficientSpaceAsAPerFileFailure() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, index) = try makeEngine(root: root)
+
+    // No real machine has 10 TB free; `Library.hasFreeSpace` will say no.
+    let huge = file("20260804143022REC001.mp3", 10_000_000_000_000, sig: "sbig")
+    let device = FakeDevice(files: [huge], payloads: [huge.name: Data([1, 2, 3, 4])])
+
+    let result = try await engine.sync(device: device, serial: "SN1") { _ in }
+    #expect(result.downloaded.isEmpty)
+    #expect(result.failed.count == 1)
+    #expect(result.failed.first?.name == huge.name)
+    #expect(index.contains(signature: "sbig") == false)
+
+    let error = try #require(result.failed.first?.error as? SyncError)
+    guard case .insufficientSpace = error else {
+        Issue.record("expected .insufficientSpace, got \(error)")
+        return
+    }
+}
+
+/// Finding 3 / approved spec decision: identity is the signature, not the
+/// path. `isAlreadySynced` must locate a recording via the INDEX's recorded
+/// `relativePath`, not by recomputing a fresh path from `FileInfo` — or a
+/// rename/move within the library looks like a missing file and gets
+/// silently re-downloaded as a duplicate at the original computed name.
+///
+/// Mutation check: reverting `isAlreadySynced` to check only
+/// `library.destinationURL(for:)` makes this test fail, because the freshly
+/// computed path is empty after the move below while the indexed path is not.
+@Test func isAlreadySyncedFindsARenamedRecordingByItsIndexedPath() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, library, index) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])])
+
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+
+    // Simulate a Finder rename/move: relocate the committed audio, and have
+    // the index record where it actually lives now — exactly what a
+    // rename-aware index entry looks like, independent of how it got there.
+    let original = library.destinationURL(for: a)
+    let renamed = root.appendingPathComponent("moved-by-user.mp3")
+    try FileManager.default.moveItem(at: original, to: renamed)
+
+    var record = try #require(index.record(signature: "sa"))
+    record.relativePath = "moved-by-user.mp3"
+    try index.upsert(record)
+
+    // Sync again with the identical FileInfo. The freshly computed path is
+    // now empty, but the recording is still on disk where the index says.
+    let result = try await engine.sync(device: device, serial: "SN1") { _ in }
+
+    #expect(result.downloaded.isEmpty)
+    #expect(result.skipped == 1)
+    #expect(FileManager.default.fileExists(atPath: original.path) == false)
+}
+
 @Test func progressReportsEachPhase() async throws {
     let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
     let (engine, _, _) = try makeEngine(root: root)

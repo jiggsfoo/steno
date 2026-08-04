@@ -54,7 +54,7 @@ public final class AppModel: @unchecked Sendable {
     public func start() {
         try? FileManager.default.createDirectory(
             at: libraryRoot, withIntermediateDirectories: true)
-        index = try? LibraryIndex(url: Self.indexURL())
+        index = openIndex()
         reloadRecent()
 
         let monitor = DeviceMonitor { [weak self] event in
@@ -72,6 +72,30 @@ public final class AppModel: @unchecked Sendable {
         return base.appendingPathComponent("HiDock/index.sqlite")
     }
 
+    /// Opens the on-disk index, deleting and retrying once on failure.
+    ///
+    /// `LibraryIndex` is a DERIVED cache (its own doc comment says so) —
+    /// nothing is lost by throwing away a corrupt one, and `rebuildIndex()`
+    /// can always reconstruct it from the sidecars on disk. Without this, a
+    /// corrupt `index.sqlite` left `index` nil forever: `startSync`'s
+    /// `guard let index` returned silently on every attach — P1 plugged in,
+    /// menubar reading "No device", nothing in `lastError` — and the in-app
+    /// recovery button (`rebuildIndex`) was ALSO a no-op with `index` nil, so
+    /// there was no way out short of quitting and manually deleting the file.
+    /// If the retry also fails, surface the reason instead of staying silent.
+    private func openIndex() -> LibraryIndex? {
+        let url = Self.indexURL()
+        if let index = try? LibraryIndex(url: url) { return index }
+
+        try? FileManager.default.removeItem(at: url)
+        do {
+            return try LibraryIndex(url: url)
+        } catch {
+            lastError = "Recordings index is unavailable: \(error.localizedDescription)"
+            return nil
+        }
+    }
+
     private func handle(_ event: DeviceEvent) {
         switch event {
         case .detached:
@@ -80,12 +104,24 @@ public final class AppModel: @unchecked Sendable {
             status = .disconnected
         case .attached:
             guard syncTask == nil else { return }
+            // DeviceMonitor cannot trust its own termination filter (a
+            // terminated service may not expose idVendor), so ANY USB device
+            // detaching elsewhere on the system forces an authoritative
+            // rescan — and if the P1 is still attached, that rescan re-emits
+            // `.attached` even though nothing changed for it. Once a sync has
+            // already completed (`status == .connected`), routine churn must
+            // not restart it or wipe `lastNotice`/`lastError` — e.g. clobbering
+            // a reclaim result the user hasn't read yet just because a
+            // keyboard was unplugged. An actual P1 detach resets `status` to
+            // `.disconnected` above, so a real replug still syncs.
+            if case .connected = status { return }
             startSync()
         }
     }
 
     public func rebuildIndex() {
-        guard let index else { return }
+        guard let index = index ?? openIndex() else { return }
+        self.index = index
         let library = Library(root: libraryRoot)
         try? index.rebuild(from: (try? library.scanSidecars()) ?? [])
         reloadRecent()
@@ -96,10 +132,19 @@ public final class AppModel: @unchecked Sendable {
     }
 
     private func startSync() {
+        guard let index else { return }
+
         // Reclaim holds the USB interface too. Without this, an attach or a
         // retry rescan can call startSync mid-reclaim and fail on "user
         // client already created". The guard has to run in BOTH directions.
-        guard let index, !isReclaiming else { return }
+        // Unlike a plain "index is nil" return, dropping the attach here must
+        // NOT be silent: reclaim finishes and releases the interface, but
+        // nothing else re-triggers a sync, so an unplug-during-reclaim would
+        // otherwise leave auto-sync dead until a physical replug.
+        guard !isReclaiming else {
+            scheduleRetry()
+            return
+        }
         let library = Library(root: libraryRoot)
         let engine = SyncEngine(library: library, index: index)
 
@@ -176,7 +221,7 @@ public final class AppModel: @unchecked Sendable {
                 // class is `@unchecked Sendable` precisely because every mutation
                 // of its state — including `apply` — happens on MainActor.
                 let selfForProgress = self
-                _ = try await engine.sync(device: device, serial: info.serialNumber) { progress in
+                let syncResult = try await engine.sync(device: device, serial: info.serialNumber) { progress in
                     Task { @MainActor in selfForProgress?.apply(progress) }
                 }
 
@@ -186,6 +231,15 @@ public final class AppModel: @unchecked Sendable {
                     self?.status = .connected(battery: nil,
                                               freeMiB: refreshed?.freeMiB ?? card.freeMiB,
                                               capacityMiB: refreshed?.capacityMiB ?? card.capacityMiB)
+                    // Name and cause, not just a count — a permanently-failing
+                    // recording used to render as "1 recording(s) failed to
+                    // sync" forever, with no way to tell which one or why.
+                    if let first = syncResult.failed.first {
+                        let extra = syncResult.failed.count > 1
+                            ? " (+\(syncResult.failed.count - 1) more)" : ""
+                        self?.lastError = "\(first.name) failed to sync: "
+                            + "\(first.error.localizedDescription)\(extra)"
+                    }
                 }
             } catch {
                 caught = error
@@ -208,12 +262,13 @@ public final class AppModel: @unchecked Sendable {
 
     /// The device clock names the recordings, so drift means mislabelled notes.
     ///
-    /// READ ONLY, DELIBERATELY. The GET_DEVICE_TIME body layout below is an
-    /// educated guess and appears in neither reference implementation. Reading
-    /// a wrong layout yields a nonsense date and is harmless; *writing* one
-    /// would set the clock that names every future recording to garbage.
-    /// Task 5's hardware check dumps the real bytes. Do not call
-    /// SET_DEVICE_TIME until this parse is confirmed against them.
+    /// READ ONLY, DELIBERATELY. The GET_DEVICE_TIME body layout is
+    /// hardware-verified — see `ResponseParsers.deviceTime`, confirmed BCD
+    /// against a real device 2026-08-04. What remains unverified is the
+    /// WRITE side: nothing confirms SET_DEVICE_TIME accepts the same layout
+    /// back, and writing a wrong one would set the clock that names every
+    /// future recording to garbage. Do not call SET_DEVICE_TIME until that is
+    /// confirmed too.
     private static func readClockDrift(device: JensenDevice) async -> TimeInterval? {
         guard let body = try? await device.send(.getDeviceTime, timeout: .seconds(5)),
               let deviceTime = ResponseParsers.deviceTime(body) else { return nil }
@@ -227,7 +282,7 @@ public final class AppModel: @unchecked Sendable {
         case .interfaceUnavailable(let detail):
             status = .unavailable(detail)
         default:
-            status = .unavailable(String(describing: error))
+            status = .unavailable(error.localizedDescription)
         }
         scheduleRetry()
     }
@@ -252,9 +307,12 @@ public final class AppModel: @unchecked Sendable {
         case let .downloading(_, index, total, bytesDone, bytesTotal):
             let percent = bytesTotal > 0 ? bytesDone * 100 / bytesTotal : 0
             status = .syncing(done: index, total: total, percent: percent)
-        case let .finished(downloaded, _, failed):
-            if failed > 0 { lastError = "\(failed) recording(s) failed to sync" }
-            if downloaded > 0 { reloadRecent() }
+        case .finished:
+            // The full SyncResult — including per-file names and reasons for
+            // any failures — is handled once, after `engine.sync` returns in
+            // `startSync`, where it's actually available. This progress event
+            // only ever carried counts, not enough to report anything useful.
+            break
         }
     }
 

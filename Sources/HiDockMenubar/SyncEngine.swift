@@ -20,6 +20,20 @@ public enum SyncError: Error, Equatable {
     case alreadyRunning
 }
 
+extension SyncError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .libraryUnreachable:
+            return "Your recordings folder isn't reachable. Check the location in Settings."
+        case .insufficientSpace(let needed):
+            let size = ByteCountFormatter.string(fromByteCount: Int64(needed), countStyle: .file)
+            return "Not enough free space to sync this recording (needs \(size))."
+        case .alreadyRunning:
+            return "A sync is already in progress."
+        }
+    }
+}
+
 /// Outcome of a reclaim. Names rather than FileInfo, so the menubar can report
 /// it without holding device state.
 public struct DeleteResult: Sendable, Equatable {
@@ -138,8 +152,20 @@ public actor SyncEngine {
 
     /// A recording counts as synced only if the index knows it *and* the bytes
     /// are still on disk at the expected length.
+    ///
+    /// Identity is the signature, not the path (approved spec decision).
+    /// Locates the file via the INDEX'S recorded `relativePath`, not a freshly
+    /// recomputed `destinationURL` — a rename or move within the library must
+    /// still be found there, or sync mistakes it for missing and re-downloads a
+    /// duplicate at the newly computed name. Falls back to the computed path
+    /// only when there is no indexed row at all (nothing has ever recorded
+    /// where this signature lives).
     private func isAlreadySynced(_ file: FileInfo) -> Bool {
-        guard index.contains(signature: file.signature) else { return false }
+        if let record = index.record(signature: file.signature) {
+            guard let size = Library.fileSize(at: library.root.appendingPathComponent(record.relativePath))
+            else { return false }
+            return size == record.lengthBytes
+        }
         guard let size = Library.fileSize(at: library.destinationURL(for: file)) else {
             return false
         }
