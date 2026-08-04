@@ -188,6 +188,10 @@ public actor JensenDevice {
         try ResponseParsers.fileList(await send(.getFileList, timeout: timeout)).files
     }
 
+    public func deleteFile(named name: String) async throws {
+        _ = try await send(.deleteFile, body: Data(name.utf8), timeout: .seconds(10))
+    }
+
     /// Streams a recording to `url`. Never buffers the whole file in memory.
     ///
     /// Contract: on return, either `url` holds the complete, length-verified
