@@ -204,7 +204,7 @@ let package = Package(
 ```swift
 import Foundation
 
-public enum JensenError: Error, Equatable {
+public enum JensenError: Error, Equatable, Sendable {
     case deviceNotFound
     case interfaceUnavailable(String)
     case invalidHeader
@@ -951,6 +951,11 @@ public actor IOUSBHostTransport: USBTransport {
         return IOUSBHostTransport(service: first)
     }
 
+    /// Correct and required, not a double-release. IOUSBHostObject's header
+    /// states it "will keep a reference to the io_service_t and release it
+    /// after the IOUSBHostObject has been released" — the init borrows, it
+    /// does not consume. The caller's own reference is still the caller's to
+    /// free. Verified against the SDK header 2026-08-04. Do not remove.
     deinit {
         IOObjectRelease(service)
     }
