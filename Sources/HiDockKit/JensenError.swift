@@ -1,6 +1,6 @@
 import Foundation
 
-public enum JensenError: Error, Equatable {
+public enum JensenError: Error, Equatable, Sendable {
     case deviceNotFound
     case interfaceUnavailable(String)
     case invalidHeader
