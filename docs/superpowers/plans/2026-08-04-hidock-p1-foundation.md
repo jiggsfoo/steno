@@ -3526,17 +3526,41 @@ public final class DeviceMonitor: @unchecked Sendable {
         }
     }
 
+    /// Idempotent, and safe to call from `deinit` on any thread.
+    ///
+    /// The handles are copied out and cleared synchronously, then released on
+    /// the main queue — the queue IOKit delivers callbacks on. Releasing an
+    /// iterator while `drain` is mid-walk on that queue would be a
+    /// use-after-free, and `deinit` carries no main-thread guarantee. Capturing
+    /// the handles by value rather than `self` also means the teardown block
+    /// never touches a deallocating object.
     public func stop() {
-        if matchedIterator != 0 { IOObjectRelease(matchedIterator); matchedIterator = 0 }
-        if terminatedIterator != 0 { IOObjectRelease(terminatedIterator); terminatedIterator = 0 }
-        if let notifyPort { IONotificationPortDestroy(notifyPort) }
-        notifyPort = nil
+        let port = notifyPort
+        let matched = matchedIterator
+        let terminated = terminatedIterator
+        let sleepObs = sleepObserver
+        let wakeObs = wakeObserver
 
-        let center = NSWorkspace.shared.notificationCenter
-        if let sleepObserver { center.removeObserver(sleepObserver) }
-        if let wakeObserver { center.removeObserver(wakeObserver) }
+        notifyPort = nil
+        matchedIterator = 0
+        terminatedIterator = 0
         sleepObserver = nil
         wakeObserver = nil
+
+        let teardown = {
+            if matched != 0 { IOObjectRelease(matched) }
+            if terminated != 0 { IOObjectRelease(terminated) }
+            if let port { IONotificationPortDestroy(port) }
+            let center = NSWorkspace.shared.notificationCenter
+            if let sleepObs { center.removeObserver(sleepObs) }
+            if let wakeObs { center.removeObserver(wakeObs) }
+        }
+
+        if Thread.isMainThread {
+            teardown()
+        } else {
+            DispatchQueue.main.async(execute: teardown)
+        }
     }
 
     /// Emits at most one event per callback, regardless of how many
@@ -3582,6 +3606,11 @@ Add to `Sources/HiDockCLI/CLI.swift` before `default:`:
 
 ```swift
 case "watch":
+    // Line-buffer stdout. print() BLOCK-buffers to a pipe or file, so every
+    // event is lost unflushed when the process is killed — `watch > log`
+    // produces an empty file and the monitor looks broken when it is not.
+    setvbuf(stdout, nil, _IOLBF, 0)
+
     print("Watching for HiDock P1 attach/detach. Ctrl-C to stop.")
     let monitor = DeviceMonitor { event in
         let stamp = ISO8601DateFormatter().string(from: Date())
@@ -3591,8 +3620,21 @@ case "watch":
         }
     }
     monitor.start()
-    // The monitor delivers on the main queue, so keep the run loop alive.
-    RunLoop.main.run()
+
+    // withExtendedLifetime is load-bearing, not defensive. Nothing else holds a
+    // strong reference — IOKit keeps only an unretained pointer — so ARC may
+    // release `monitor` at its last syntactic use, running deinit -> stop() and
+    // tearing down every notification before the process even parks. The
+    // initial rescan() would still print ATTACHED, so the tool would look like
+    // it worked while being permanently deaf to attach and detach.
+    withExtendedLifetime(monitor) {
+        // RunLoop.main.run() is `noasync`, so it cannot be called directly from
+        // an async main. The Swift concurrency runtime parks the real main
+        // thread in dispatch_main() and drains DispatchQueue.main, which is
+        // where IOKit delivers, so this only needs to not return.
+        func parkForever() { RunLoop.main.run() }
+        parkForever()
+    }
 ```
 
 Update the usage string to `[probe|info|list|pull <name>|watch]`.
@@ -3605,6 +3647,11 @@ Expected: builds with no errors
 Run: `swift run hidock-cli watch` with the P1 already plugged in.
 Expected: one `ATTACHED` line appears within a second or two, from the initial
 `rescan()`. Leave it running.
+
+**That first line proves only that the initial scan works — it says nothing
+about live notifications**, because `rescan()` runs synchronously inside
+`start()` before the process parks. Only the unplug in Step 4 exercises the
+notification path.
 
 - [ ] **Step 4: Hardware check (manual, needs the P1)**
 
