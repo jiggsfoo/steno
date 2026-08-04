@@ -1438,6 +1438,9 @@ private func fileListEntry(
     d.append(contentsOf: [UInt8](repeating: 0, count: 6))
     d.append(contentsOf: [UInt8](repeating: 0xCC, count: 16))
     let result = try ResponseParsers.fileList(d)
+    // Assert the count first: indexing straight into [0] would TRAP the whole
+    // suite on a regression to zero entries instead of failing this one test.
+    try #require(result.files.count == 1)
     #expect(result.files[0].name == "a.mp3")
 }
 
@@ -1453,6 +1456,32 @@ private func fileListEntry(
         let f = FileInfo(name: name, lengthBytes: 1, signature: "s", version: 1, recordedAt: nil)
         #expect(f.preferredExtension == expected)
     }
+}
+
+/// Golden case from real hardware, 2026-08-04: body `20 26 08 04 14 04 27`
+/// captured at local wall clock 14:04:28.
+@Test func parsesDeviceTimeFromRealHardware() throws {
+    let body = Data([0x20, 0x26, 0x08, 0x04, 0x14, 0x04, 0x27])
+    let date = try #require(ResponseParsers.deviceTime(body))
+    let c = Calendar.current.dateComponents(
+        [.year, .month, .day, .hour, .minute, .second], from: date)
+    #expect(c.year == 2026 && c.month == 8 && c.day == 4)
+    #expect(c.hour == 14 && c.minute == 4 && c.second == 27)
+}
+
+/// Reading those same bytes as binary rather than BCD gives hour 20 and
+/// second 39. This pins the distinction.
+@Test func deviceTimeDecodesBcdNotBinary() throws {
+    let date = try #require(
+        ResponseParsers.deviceTime(Data([0x20, 0x26, 0x08, 0x04, 0x14, 0x04, 0x27])))
+    let c = Calendar.current.dateComponents([.hour, .second], from: date)
+    #expect(c.hour != 20)
+    #expect(c.second != 39)
+}
+
+@Test func deviceTimeRejectsInvalidBcdAndShortBodies() {
+    #expect(ResponseParsers.deviceTime(Data([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])) == nil)
+    #expect(ResponseParsers.deviceTime(Data([0x20, 0x26])) == nil)
 }
 
 @Test func parsesCardInfo() throws {
@@ -1551,8 +1580,46 @@ public enum ResponseParsers {
         let b = [UInt8](body)
         let versionNumber = UInt32(b[0]) << 24 | UInt32(b[1]) << 16 | UInt32(b[2]) << 8 | UInt32(b[3])
         let versionCode = "\(b[1]).\(b[2]).\(b[3])"
-        let serial = String(decoding: b[4...].filter { $0 > 0 }, as: UTF8.self)
+        // Truncate at the first NUL rather than filtering all zero bytes out:
+        // filtering would splice trailing junk onto the serial instead of
+        // ending it at the terminator.
+        let serial = String(decoding: b[4...].prefix(while: { $0 > 0 }), as: UTF8.self)
         return DeviceInfo(versionCode: versionCode, versionNumber: versionNumber, serialNumber: serial)
+    }
+
+    /// The device clock, BCD-encoded.
+    ///
+    /// Verified against hardware 2026-08-04: body `20 26 08 04 14 04 27` was
+    /// read at local wall clock 14:04:28, one second of read latency apart.
+    /// Each byte carries two BCD digits, so 0x14 is 14, not 20. Reading these
+    /// bytes as plain binary yields year 8230, hour 20, second 39 — which is
+    /// exactly what the original guessed parser produced.
+    ///
+    /// READ ONLY. Do NOT infer that SET_DEVICE_TIME accepts the same layout.
+    /// That is an assumption, and writing a wrong one corrupts the clock that
+    /// names every recording.
+    public static func deviceTime(_ body: Data) -> Date? {
+        guard body.count >= 7 else { return nil }
+        let b = [UInt8](body)
+
+        func bcd(_ v: UInt8) -> Int? {
+            let hi = Int(v >> 4), lo = Int(v & 0x0F)
+            guard hi <= 9, lo <= 9 else { return nil }   // not valid BCD
+            return hi * 10 + lo
+        }
+
+        guard let century = bcd(b[0]), let yearInCentury = bcd(b[1]),
+              let month = bcd(b[2]), let day = bcd(b[3]),
+              let hour = bcd(b[4]), let minute = bcd(b[5]),
+              let second = bcd(b[6]) else { return nil }
+
+        let year = century * 100 + yearInCentury
+        guard (2020...2100).contains(year) else { return nil }
+
+        var c = DateComponents()
+        c.year = year; c.month = month; c.day = day
+        c.hour = hour; c.minute = minute; c.second = second
+        return Calendar.current.date(from: c)
     }
 
     public static func cardInfo(_ body: Data) throws -> CardInfo {
@@ -1578,25 +1645,24 @@ public enum ResponseParsers {
         }
 
         while pos < b.count {
-            let start = pos
             guard pos + 4 <= b.count else { break }
             let version = b[pos]; pos += 1
 
             let nameLength = Int(b[pos]) << 16 | Int(b[pos + 1]) << 8 | Int(b[pos + 2])
             pos += 3
 
-            guard pos + nameLength <= b.count else { pos = start; break }
+            guard pos + nameLength <= b.count else { break }
             let name = String(decoding: b[pos ..< pos + nameLength].filter { $0 > 0 }, as: UTF8.self)
             pos += nameLength
 
-            guard pos + 4 <= b.count else { pos = start; break }
+            guard pos + 4 <= b.count else { break }
             let length = Int(b[pos]) << 24 | Int(b[pos + 1]) << 16 | Int(b[pos + 2]) << 8 | Int(b[pos + 3])
             pos += 4
 
-            guard pos + 6 <= b.count else { pos = start; break }
+            guard pos + 6 <= b.count else { break }
             pos += 6                                        // padding
 
-            guard pos + 16 <= b.count else { pos = start; break }
+            guard pos + 16 <= b.count else { break }
             let signature = b[pos ..< pos + 16].map { String(format: "%02x", $0) }.joined()
             pos += 16
 
@@ -1630,9 +1696,14 @@ public enum ResponseParsers {
     }
 
     /// e.g. 20260804143022REC001.wav
+    ///
+    /// Anchored to the start of the name. Unanchored, `firstMatch` would take
+    /// the first 12-digit run anywhere in the filename, so a name carrying an
+    /// unrelated digit run ahead of the timestamp would silently misfile the
+    /// recording by parsing the wrong instant.
     private static func parseNumericForm(_ s: String) -> Date? {
-        let pattern = /(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/
-        guard let m = s.firstMatch(of: pattern) else { return nil }
+        let pattern = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/
+        guard let m = s.prefixMatch(of: pattern) else { return nil }
         return makeDate(year: Int(m.1), month: Int(m.2), day: Int(m.3),
                         hour: Int(m.4), minute: Int(m.5), second: Int(m.6))
     }
@@ -1677,7 +1748,7 @@ Append inside the actor:
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `swift test --filter ResponseParserTests`
-Expected: PASS, 14 tests
+Expected: PASS, 16 tests
 
 - [ ] **Step 7: Add the `list` command to the CLI**
 
@@ -3115,16 +3186,7 @@ public final class AppModel {
     /// SET_DEVICE_TIME until this parse is confirmed against them.
     private static func readClockDrift(device: JensenDevice) async -> TimeInterval? {
         guard let body = try? await device.send(.getDeviceTime, timeout: .seconds(5)),
-              body.count >= 7 else { return nil }
-        let b = [UInt8](body)
-        var c = DateComponents()
-        c.year = Int(b[0]) << 8 | Int(b[1])
-        c.month = Int(b[2]); c.day = Int(b[3])
-        c.hour = Int(b[4]); c.minute = Int(b[5]); c.second = Int(b[6])
-
-        // Reject an implausible parse rather than report nonsense drift.
-        guard let year = c.year, (2020...2100).contains(year),
-              let deviceTime = Calendar.current.date(from: c) else { return nil }
+              let deviceTime = ResponseParsers.deviceTime(body) else { return nil }
         return deviceTime.timeIntervalSinceNow
     }
 
