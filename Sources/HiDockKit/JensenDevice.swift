@@ -61,20 +61,12 @@ public actor JensenDevice {
     }
 
     /// Caller must already hold the gate.
+    ///
+    /// Deliberately does NOT drain before writing. `drain` issues a read with a
+    /// 50 ms timeout before re-checking its own deadline, so even a 1 ms budget
+    /// blocks for up to 50 ms against a quiet endpoint — on every command. The
+    /// endpoint is left clean by the error path below instead.
     private func perform(command: UInt16, body: Data, timeout: Duration) async throws -> Data {
-        // Flush anything already sitting on the endpoint before writing. The
-        // gate guarantees no command is in flight right now, so any bytes
-        // queued at this point are residue — e.g. a response left over from
-        // before this device session started — and matching on (command,
-        // sequence) alone can't tell such residue apart from a genuine reply
-        // if the sequence counter (reset in open()) happens to coincide.
-        //
-        // Unlike the post-timeout drain, nothing is "in flight" yet, so there
-        // is nothing to wait out: a single quiet read confirms the endpoint
-        // is clear. Bounding this to roughly one read keeps a healthy call
-        // (the overwhelmingly common case) from paying drain()'s full
-        // multi-read cost on every command.
-        await drain(maxDuration: .milliseconds(1))
         let seq = sequence
         sequence &+= 1
         do {

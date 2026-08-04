@@ -52,17 +52,20 @@ import Testing
     #expect(elapsed < .milliseconds(600))
 }
 
-/// A response that arrives after its command timed out must never satisfy a
-/// later command, even one with the SAME command id. The device echoes the
-/// request sequence, so the retry carries a different sequence and the stale
-/// packet is recognisable.
-@Test func staleResponseDoesNotSatisfyARetryOfTheSameCommand() async throws {
-    let t = FakeTransport(script: .init(responses: [1: [Data([0x22])]], readTimeoutFor: []))
+/// A buffered reply whose command id matches but whose sequence does not is a
+/// leftover from a command that already timed out. It must be skipped rather
+/// than returned, and the scan must continue on to the real answer.
+///
+/// Sequence 99 is deliberately one this device never issues in this test. Do
+/// NOT inject a stray carrying the same sequence the next command will use:
+/// that is a genuine collision no matching scheme can resolve, and it models
+/// nothing real, since a retry always advances the sequence.
+@Test func staleResponseWithWrongSequenceIsSkipped() async throws {
+    let t = FakeTransport(script: .init(responses: [1: [Data([0x22])]]))
     let device = JensenDevice(transport: t)
     try await device.open()
 
-    // Sequence 0 is what the first (abandoned) attempt would have used.
-    await t.injectStrayResponse(command: 1, sequence: 0, body: Data([0x11]))
+    await t.injectStrayResponse(command: 1, sequence: 99, body: Data([0x11]))
     let body = try await device.send(.getDeviceInfo, timeout: .seconds(1))
     #expect(body == Data([0x22]))          // never the stale 0x11
 }
