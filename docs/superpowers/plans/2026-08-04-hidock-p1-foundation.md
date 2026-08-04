@@ -2939,17 +2939,26 @@ actor FakeDevice: SyncDevice {
     /// Simulates a device that accepts DELETE_FILE but does not act on it —
     /// the case a status byte we cannot parse would hide.
     var ignoreDeletes: Bool
+    /// Simulates the confirmation listing failing after deletes were issued.
+    var failListAfterDelete: Bool
     private(set) var deletedNames: [String] = []
 
     init(files: [FileInfo], payloads: [String: Data],
-         failTransfersFor: Set<String> = [], ignoreDeletes: Bool = false) {
+         failTransfersFor: Set<String> = [], ignoreDeletes: Bool = false,
+         failListAfterDelete: Bool = false) {
         self.files = files
         self.payloads = payloads
         self.failTransfersFor = failTransfersFor
         self.ignoreDeletes = ignoreDeletes
+        self.failListAfterDelete = failListAfterDelete
     }
 
-    func listFiles() async throws -> [FileInfo] { files }
+    func listFiles() async throws -> [FileInfo] {
+        if failListAfterDelete && !deletedNames.isEmpty {
+            throw JensenError.timeout(command: 4)
+        }
+        return files
+    }
 
     func transferFile(_ file: FileInfo, to url: URL, chunkTimeout: Duration,
                       progress: @Sendable (Int, Int) -> Void) async throws {
@@ -3131,6 +3140,23 @@ private func file(_ name: String, _ bytes: Int, sig: String) -> FileInfo {
     let a = file("20260804143022REC001.mp3", 4, sig: "sa")
     let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])],
                             ignoreDeletes: true)
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+
+    let result = try await engine.deleteFromDevice([a], device: device)
+    #expect(result.deleted.isEmpty)
+    #expect(result.failed == [a.name])
+}
+
+/// If the confirmation listing fails we know nothing about what happened, so
+/// every file must be reported as failed. Reporting them deleted would
+/// overstate a destructive action on precisely the evidence we could not get.
+@Test func reclaimReportsFailureWhenConfirmationCannotBeObtained() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])],
+                            failListAfterDelete: true)
     _ = try await engine.sync(device: device, serial: "SN1") { _ in }
 
     let result = try await engine.deleteFromDevice([a], device: device)
@@ -3352,7 +3378,17 @@ public actor SyncEngine {
 
         guard !requested.isEmpty else { return result }
 
-        let stillPresent = Set((try? await device.listFiles())?.map(\.signature) ?? [])
+        // If the confirmation listing itself fails we know NOTHING about what
+        // happened, so report everything as failed. `try?` here would yield an
+        // empty set and mark every file deleted — overstating a destructive
+        // action on exactly the evidence we failed to obtain. Understating what
+        // was deleted is recoverable; overstating it is not.
+        guard let remaining = try? await device.listFiles() else {
+            result.failed.append(contentsOf: requested.map(\.name))
+            return result
+        }
+
+        let stillPresent = Set(remaining.map(\.signature))
         for file in requested {
             if stillPresent.contains(file.signature) {
                 result.failed.append(file.name)
