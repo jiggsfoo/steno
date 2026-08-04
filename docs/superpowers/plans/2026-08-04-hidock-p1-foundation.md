@@ -696,6 +696,17 @@ actor FakeTransport: USBTransport {
     private(set) var openCount = 0
     private(set) var closeCount = 0
 
+    /// Incremented when a command is written while a previous command's
+    /// response is still unread. With the FIFO gate held this is impossible,
+    /// so it is the direct observable for "two commands on the wire at once".
+    /// Without it the gate is untestable through this fake: a FIFO queue hands
+    /// every caller its own response no matter how they interleave.
+    private(set) var overlappingWrites = 0
+
+    /// Largest `timeout` this transport was ever asked to read with. Pins the
+    /// per-read cap directly rather than inferring it from wall clock.
+    private(set) var maxReadTimeoutSeen: Duration = .zero
+
     init(script: Script) { self.script = script }
 
     func open() async throws { openCount += 1 }
@@ -703,6 +714,7 @@ actor FakeTransport: USBTransport {
 
     func write(_ data: Data) async throws {
         guard case let .packet(p, _) = try JensenPacket.decode(from: data) else { return }
+        if !pending.isEmpty { overlappingWrites += 1 }
         written.append(p)
         if script.readTimeoutFor.contains(p.command) { return }
         for body in script.responses[p.command] ?? [] {
@@ -717,6 +729,7 @@ actor FakeTransport: USBTransport {
     private static let readSplit = 64
 
     func read(maxLength: Int, timeout: Duration) async throws -> Data {
+        maxReadTimeoutSeen = max(maxReadTimeoutSeen, timeout)
         if script.readDelay > .zero {
             try? await Task.sleep(for: min(script.readDelay, timeout))
         }
@@ -781,10 +794,26 @@ import Testing
     }
 }
 
-/// The timeout must bound the call's own duration. Passing the full command
-/// timeout as the per-read timeout lets a read entered just before the
-/// deadline block for another whole timeout, roughly doubling it.
-@Test func timeoutIsAnUpperBoundOnElapsedTime() async throws {
+/// Pins the per-read cap directly. A wall-clock assertion cannot tell the fix
+/// from the bug: reverting to a full-budget read timeout leaves elapsed time
+/// unchanged on the common path, so an elapsed bound passes either way. What
+/// matters is the value actually handed to the transport.
+@Test func perReadTimeoutNeverExceedsTheCap() async throws {
+    let t = FakeTransport(script: .init(
+        responses: [:], readTimeoutFor: [1], readDelay: .milliseconds(400)))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    _ = try? await device.send(.getDeviceInfo, timeout: .seconds(5))
+    #expect(await t.maxReadTimeoutSeen <= .milliseconds(250))
+}
+
+/// A timed-out command must return rather than hang. The bound is generous on
+/// purpose: elapsed time legitimately exceeds the command timeout, because the
+/// error path then drains for three 50 ms quiet windows. That drain is required
+/// by C3/I1. This test documents its cost; it does NOT claim the timeout is an
+/// upper bound on elapsed time.
+@Test func timedOutCommandReturnsWithoutHanging() async throws {
     let t = FakeTransport(script: .init(
         responses: [:], readTimeoutFor: [1], readDelay: .milliseconds(400)))
     let device = JensenDevice(transport: t)
@@ -792,8 +821,7 @@ import Testing
 
     let start = ContinuousClock.now
     _ = try? await device.send(.getDeviceInfo, timeout: .milliseconds(300))
-    let elapsed = ContinuousClock.now - start
-    #expect(elapsed < .milliseconds(600))
+    #expect(ContinuousClock.now - start < .seconds(2))
 }
 
 /// A buffered reply whose command id matches but whose sequence does not is a
@@ -863,6 +891,12 @@ import Testing
     #expect(rc == Data([0x16]))
     #expect(await t.written.count == 3)
     #expect(Set(await t.written.map(\.sequence)).count == 3)
+
+    // The load-bearing assertion. Response correctness alone does not prove
+    // serialization -- the fake's FIFO queue satisfies it even with the gate
+    // removed. Overlapping writes are the direct observable, and reach zero
+    // only when exactly one command is ever on the wire.
+    #expect(await t.overlappingWrites == 0)
 }
 
 @Test func openAndCloseForwardToTransport() async throws {
@@ -978,7 +1012,7 @@ public actor JensenDevice {
             // packet would swallow the next response, and a late reply would
             // be waiting on the endpoint for whoever comes next.
             buffer.removeAll(keepingCapacity: true)
-            await drain()
+            await drainLocked(maxDuration: .milliseconds(500))
             throw error
         }
     }
@@ -1004,7 +1038,10 @@ public actor JensenDevice {
             let chunk = try await transport.read(
                 maxLength: Self.readChunk, timeout: min(remaining, Self.maxReadWindow))
             if chunk.isEmpty {
-                try? await Task.sleep(for: .milliseconds(5))
+                // Deliberately `try`, not `try?`. Swallowing cancellation here
+                // strips the backoff and spins this loop while holding the gate
+                // until the deadline.
+                try await Task.sleep(for: .milliseconds(5))
             } else {
                 buffer.append(chunk)
             }
@@ -1036,6 +1073,14 @@ public actor JensenDevice {
     /// single empty read only means nothing arrived in the last 50 ms. The
     /// response this exists to catch is precisely the one that arrives late.
     public func drain(maxDuration: Duration = .milliseconds(500)) async {
+        await acquire()
+        defer { release() }
+        await drainLocked(maxDuration: maxDuration)
+    }
+
+    /// Caller must already hold the gate. `perform`'s error path calls this
+    /// directly, since it is still inside its own gated section.
+    private func drainLocked(maxDuration: Duration) async {
         buffer.removeAll(keepingCapacity: true)
         let deadline = ContinuousClock.now.advanced(by: maxDuration)
         var consecutiveEmpty = 0
@@ -1753,6 +1798,10 @@ Append inside the actor:
         }
         guard received == file.lengthBytes else {
             try? fm.removeItem(at: url)
+            // Same cleanup as the sibling catch above: a short transfer leaves
+            // unread bytes on the endpoint that would corrupt the next command.
+            buffer.removeAll(keepingCapacity: true)
+            await drainLocked(maxDuration: .milliseconds(500))
             throw JensenError.transferIncomplete(expected: file.lengthBytes, got: received)
         }
     }
