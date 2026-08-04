@@ -2049,11 +2049,17 @@ Append inside the actor:
             throw JensenError.transferIncomplete(expected: file.lengthBytes, got: received)
         }
 
-        // The destination is not touched until here.
-        if fm.fileExists(atPath: url.path) {
-            _ = try fm.replaceItemAt(url, withItemAt: staging)
-        } else {
-            try fm.moveItem(at: staging, to: url)
+        // The destination is not touched until here. A failure to rename still
+        // leaves `url` exactly as it was, but must not strand the staging file.
+        do {
+            if fm.fileExists(atPath: url.path) {
+                _ = try fm.replaceItemAt(url, withItemAt: staging)
+            } else {
+                try fm.moveItem(at: staging, to: url)
+            }
+        } catch {
+            try? fm.removeItem(at: staging)
+            throw error
         }
     }
 ```
