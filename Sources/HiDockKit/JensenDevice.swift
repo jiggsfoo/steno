@@ -5,9 +5,14 @@ public actor JensenDevice {
     private var sequence: UInt32 = 0
     private var buffer = Data()
 
-    /// Bulk reads are capped at this size. The device streams file data in
-    /// chunks well under this, and oversizing costs nothing but a temp buffer.
+    // FIFO gate. Swift actors are reentrant, so actor isolation alone does NOT
+    // keep one command on the wire at a time — a caller suspended at
+    // `transport.write` releases the actor and lets the next caller in.
+    private var isBusy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
     private static let readChunk = 64 * 1024
+    private static let maxReadWindow = Duration.milliseconds(250)
 
     public init(transport: any USBTransport) {
         self.transport = transport
@@ -24,7 +29,21 @@ public actor JensenDevice {
     public func close() async {
         await transport.close()
         buffer.removeAll(keepingCapacity: true)
+        sequence = 0
     }
+
+    // MARK: - Serialization
+
+    private func acquire() async {
+        guard isBusy else { isBusy = true; return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    private func release() {
+        if waiters.isEmpty { isBusy = false } else { waiters.removeFirst().resume() }
+    }
+
+    // MARK: - Commands
 
     @discardableResult
     public func send(
@@ -36,35 +55,71 @@ public actor JensenDevice {
     }
 
     func sendRaw(_ command: UInt16, body: Data, timeout: Duration) async throws -> Data {
-        let seq = sequence
-        sequence &+= 1
-        try await transport.write(
-            JensenPacket(command: command, sequence: seq, body: body).encoded())
-        return try await awaitResponse(command: command, timeout: timeout)
+        await acquire()
+        defer { release() }
+        return try await perform(command: command, body: body, timeout: timeout)
     }
 
-    /// Reads until a packet whose command id matches arrives, or the deadline passes.
-    /// Packets for other commands are discarded as stale.
-    private func awaitResponse(command: UInt16, timeout: Duration) async throws -> Data {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-
-        while true {
-            if let packet = try takeBufferedPacket(matching: command) { return packet }
-
-            guard ContinuousClock.now < deadline else {
-                throw JensenError.timeout(command: command)
-            }
-
-            let chunk = try await transport.read(maxLength: Self.readChunk, timeout: timeout)
-            if chunk.isEmpty {
-                try await Task.sleep(for: .milliseconds(5))
-                continue
-            }
-            buffer.append(chunk)
+    /// Caller must already hold the gate.
+    private func perform(command: UInt16, body: Data, timeout: Duration) async throws -> Data {
+        // Flush anything already sitting on the endpoint before writing. The
+        // gate guarantees no command is in flight right now, so any bytes
+        // queued at this point are residue — e.g. a response left over from
+        // before this device session started — and matching on (command,
+        // sequence) alone can't tell such residue apart from a genuine reply
+        // if the sequence counter (reset in open()) happens to coincide.
+        //
+        // Unlike the post-timeout drain, nothing is "in flight" yet, so there
+        // is nothing to wait out: a single quiet read confirms the endpoint
+        // is clear. Bounding this to roughly one read keeps a healthy call
+        // (the overwhelmingly common case) from paying drain()'s full
+        // multi-read cost on every command.
+        await drain(maxDuration: .milliseconds(1))
+        let seq = sequence
+        sequence &+= 1
+        do {
+            try await transport.write(
+                JensenPacket(command: command, sequence: seq, body: body).encoded())
+            return try await awaitResponse(command: command, sequence: seq, timeout: timeout)
+        } catch {
+            // A failed command must leave nothing behind: a stranded partial
+            // packet would swallow the next response, and a late reply would
+            // be waiting on the endpoint for whoever comes next.
+            buffer.removeAll(keepingCapacity: true)
+            await drain()
+            throw error
         }
     }
 
-    private func takeBufferedPacket(matching command: UInt16) throws -> Data? {
+    /// Matches on (command, sequence). The device echoes the request sequence,
+    /// verified on hardware, so a stale reply to an abandoned command is
+    /// distinguishable from the answer to its retry.
+    private func awaitResponse(
+        command: UInt16, sequence expected: UInt32, timeout: Duration
+    ) async throws -> Data {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+
+        while true {
+            if let body = try takeBufferedPacket(command: command, sequence: expected) {
+                return body
+            }
+
+            let remaining = ContinuousClock.now.duration(to: deadline)
+            guard remaining > .zero else { throw JensenError.timeout(command: command) }
+
+            // Never read for longer than the command has left, or the call
+            // could run to roughly twice its stated timeout.
+            let chunk = try await transport.read(
+                maxLength: Self.readChunk, timeout: min(remaining, Self.maxReadWindow))
+            if chunk.isEmpty {
+                try? await Task.sleep(for: .milliseconds(5))
+            } else {
+                buffer.append(chunk)
+            }
+        }
+    }
+
+    private func takeBufferedPacket(command: UInt16, sequence expected: UInt32) throws -> Data? {
         while !buffer.isEmpty {
             let result: JensenPacket.DecodeResult
             do {
@@ -77,21 +132,31 @@ public actor JensenDevice {
 
             guard case let .packet(packet, consumed) = result else { return nil }
             buffer.removeFirst(consumed)
-            if packet.command == command { return packet.body }
-            // else: stale response for an earlier command, drop it and keep looking
+            if packet.command == command && packet.sequence == expected { return packet.body }
+            // else: a reply to an abandoned command. Drop it and keep looking.
         }
         return nil
     }
 
     /// Reads and discards anything still queued on the IN endpoint.
-    /// Must be called after a timeout before issuing the next command.
+    ///
+    /// Requires several consecutive quiet windows rather than one, because a
+    /// single empty read only means nothing arrived in the last 50 ms. The
+    /// response this exists to catch is precisely the one that arrives late.
     public func drain(maxDuration: Duration = .milliseconds(500)) async {
         buffer.removeAll(keepingCapacity: true)
         let deadline = ContinuousClock.now.advanced(by: maxDuration)
+        var consecutiveEmpty = 0
+
         while ContinuousClock.now < deadline {
-            guard let chunk = try? await transport.read(
-                maxLength: Self.readChunk, timeout: .milliseconds(50)),
-                  !chunk.isEmpty else { return }
+            let chunk = (try? await transport.read(
+                maxLength: Self.readChunk, timeout: .milliseconds(50))) ?? Data()
+            if chunk.isEmpty {
+                consecutiveEmpty += 1
+                if consecutiveEmpty >= 3 { return }
+            } else {
+                consecutiveEmpty = 0
+            }
         }
     }
 }
