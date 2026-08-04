@@ -189,45 +189,50 @@ public actor JensenDevice {
     }
 
     /// Streams a recording to `url`. Never buffers the whole file in memory.
-    /// Throws `transferIncomplete` and deletes the partial file if the byte
-    /// count does not match what the device reported.
+    ///
+    /// Contract: on return, either `url` holds the complete, length-verified
+    /// recording, or `url` is exactly as it was before the call. Bytes land in
+    /// a sibling `.part` file and are moved into place only after verification,
+    /// so an interrupted transfer can neither destroy a good file already at
+    /// the destination nor leave a truncated one where a library scan would
+    /// mistake it for complete.
     public func transferFile(
         _ file: FileInfo,
         to url: URL,
         chunkTimeout: Duration = .seconds(30),
         progress: @Sendable (Int, Int) -> Void
     ) async throws {
-        let fm = FileManager.default
-        try? fm.removeItem(at: url)
-        fm.createFile(atPath: url.path, contents: nil)
-        guard let handle = try? FileHandle(forWritingTo: url) else {
-            throw JensenError.interfaceUnavailable("cannot open \(url.path) for writing")
-        }
-
-        var received = 0
-        var failure: (any Error)?
-
-        // Holds the same FIFO gate as every other command: a transfer streams
-        // many packets, and a concurrent command would interleave with them.
         await acquire()
         defer { release() }
 
+        let fm = FileManager.default
+        let staging = url.appendingPathExtension("part")
+        try? fm.removeItem(at: staging)
+        guard fm.createFile(atPath: staging.path, contents: nil),
+              let handle = try? FileHandle(forWritingTo: staging) else {
+            throw JensenError.fileWriteFailed(staging.path)
+        }
+
         let seq = sequence
         sequence &+= 1
+        var received = 0
+        var failure: (any Error)?
 
         do {
-            let body = Data(file.name.utf8)
             try await transport.write(
                 JensenPacket(command: JensenCommand.transferFile.rawValue,
-                             sequence: seq, body: body).encoded())
+                             sequence: seq, body: Data(file.name.utf8)).encoded())
 
             // Resets on every received chunk. A single deadline for the whole
-            // transfer would cap a 170 MB WAV at chunkTimeout regardless of
-            // link speed; this bounds the gap *between* chunks instead.
+            // transfer would cap a large recording by link speed; this bounds
+            // the gap *between* chunks instead.
             var deadline = ContinuousClock.now.advanced(by: chunkTimeout)
             while received < file.lengthBytes {
                 if let chunk = try takeBufferedPacket(
-                    command: JensenCommand.transferFile.rawValue, sequence: seq), !chunk.isEmpty {
+                    command: JensenCommand.transferFile.rawValue, sequence: seq),
+                    !chunk.isEmpty {
+                    // Clamp: a device sending more than it advertised must not
+                    // overflow the file.
                     let slice = chunk.prefix(file.lengthBytes - received)
                     try handle.write(contentsOf: slice)
                     received += slice.count
@@ -236,8 +241,12 @@ public actor JensenDevice {
                     continue
                 }
 
-                guard ContinuousClock.now < deadline else { break }
-                let raw = try await transport.read(maxLength: 64 * 1024, timeout: chunkTimeout)
+                let remaining = ContinuousClock.now.duration(to: deadline)
+                guard remaining > .zero else { break }
+                // Never read for longer than the gap budget has left, or a read
+                // entered just before the deadline doubles the stated timeout.
+                let raw = try await transport.read(
+                    maxLength: 64 * 1024, timeout: min(remaining, Self.maxReadWindow))
                 if raw.isEmpty {
                     try await Task.sleep(for: .milliseconds(5))
                 } else {
@@ -248,23 +257,37 @@ public actor JensenDevice {
             failure = error
         }
 
-        try? handle.close()
+        if failure == nil && received == file.lengthBytes {
+            // Only place a close failure can still mean "success, but short".
+            do {
+                try handle.synchronize()
+                try handle.close()
+            } catch {
+                failure = error
+            }
+        } else {
+            try? handle.close()
+        }
+
+        // Clear the buffer and endpoint on SUCCESS as well as failure. A device
+        // that sent more than it advertised would otherwise leave bytes that
+        // corrupt the next command's response.
+        await drainLocked(maxDuration: .milliseconds(150))
 
         if let failure {
-            try? fm.removeItem(at: url)
-            buffer.removeAll(keepingCapacity: true)
-            // drainLocked, NOT drain(): transferFile already holds the gate and
-            // the public drain() takes it. Calling it here self-deadlocks.
-            await drainLocked(maxDuration: .milliseconds(500))
+            try? fm.removeItem(at: staging)
             throw failure
         }
         guard received == file.lengthBytes else {
-            try? fm.removeItem(at: url)
-            // Same cleanup as the sibling catch above: a short transfer leaves
-            // unread bytes on the endpoint that would corrupt the next command.
-            buffer.removeAll(keepingCapacity: true)
-            await drainLocked(maxDuration: .milliseconds(500))
+            try? fm.removeItem(at: staging)
             throw JensenError.transferIncomplete(expected: file.lengthBytes, got: received)
+        }
+
+        // The destination is not touched until here.
+        if fm.fileExists(atPath: url.path) {
+            _ = try fm.replaceItemAt(url, withItemAt: staging)
+        } else {
+            try fm.moveItem(at: staging, to: url)
         }
     }
 }

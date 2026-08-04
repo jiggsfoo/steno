@@ -7,5 +7,6 @@ public enum JensenError: Error, Equatable, Sendable {
     case timeout(command: UInt16)
     case shortBody(command: UInt16, expected: Int, got: Int)
     case transferIncomplete(expected: Int, got: Int)
+    case fileWriteFailed(String)
     case notConnected
 }

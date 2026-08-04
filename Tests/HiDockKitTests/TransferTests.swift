@@ -47,14 +47,70 @@ private func makeFile(length: Int) -> FileInfo {
     #expect(box.seen.count >= 2)
 }
 
+/// The gate must be released even when a transfer fails, or the device wedges
+/// permanently. Also the regression test for transferFile calling the GATED
+/// public drain() instead of drainLocked — that self-deadlocks, and this test
+/// would hang rather than fail.
+@Test func gateSurvivesAFailedTransfer() async throws {
+    let t = FakeTransport(script: .init(responses: [
+        5: [Data(repeating: 1, count: 100)],
+        1: [Data(repeating: 0, count: 20)],
+    ]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    _ = try? await device.transferFile(
+        makeFile(length: 1000), to: url, chunkTimeout: .milliseconds(200)) { _, _ in }
+
+    // Any gated command completing proves the gate came back.
+    #expect(try await device.send(.getDeviceInfo, timeout: .seconds(2)).count == 20)
+}
+
+/// A failed transfer must not destroy a good file already at the destination.
+@Test func failedTransferLeavesAnExistingFileIntact() async throws {
+    let t = FakeTransport(script: .init(responses: [5: [Data(repeating: 1, count: 100)]]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let original = Data("already here".utf8)
+    try original.write(to: url)
+
+    _ = try? await device.transferFile(
+        makeFile(length: 1000), to: url, chunkTimeout: .milliseconds(200)) { _, _ in }
+
+    #expect(try Data(contentsOf: url) == original)
+}
+
+/// A device sending more than it advertised must not overflow the file.
+@Test func overLongStreamIsClampedToTheAdvertisedLength() async throws {
+    let t = FakeTransport(script: .init(responses: [5: [Data(repeating: 9, count: 500)]]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    try await device.transferFile(
+        makeFile(length: 200), to: url, chunkTimeout: .seconds(2)) { _, _ in }
+
+    #expect(try Data(contentsOf: url).count == 200)
+}
+
 @Test func transferThrowsAndRemovesPartialOnShortStream() async throws {
     let t = FakeTransport(script: .init(responses: [5: [Data(repeating: 1, count: 100)]]))
     let device = JensenDevice(transport: t)
     try await device.open()
 
     let url = tempURL()
+    // Pass a short chunkTimeout explicitly. The default is 30 s, and this test
+    // deliberately starves the stream, so it would otherwise sit out the whole
+    // deadline -- a 30-second unit test that slows every later task's run.
     await #expect(throws: JensenError.transferIncomplete(expected: 1000, got: 100)) {
-        try await device.transferFile(makeFile(length: 1000), to: url) { _, _ in }
+        try await device.transferFile(
+            makeFile(length: 1000), to: url, chunkTimeout: .milliseconds(200)) { _, _ in }
     }
     #expect(FileManager.default.fileExists(atPath: url.path) == false)
 }
