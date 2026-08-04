@@ -27,6 +27,8 @@ public actor JensenDevice {
     }
 
     public func close() async {
+        await acquire()
+        defer { release() }
         await transport.close()
         buffer.removeAll(keepingCapacity: true)
         sequence = 0

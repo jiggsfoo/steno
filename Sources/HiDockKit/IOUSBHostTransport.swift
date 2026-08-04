@@ -2,15 +2,6 @@ import Foundation
 import IOKit
 @preconcurrency import IOUSBHost
 
-/// `IOUSBHostPipe` and `NSMutableData` are reference types that are not
-/// `Sendable`, but `transfer(pipe:buffer:...)` hands both to a detached
-/// `DispatchQueue.global` closure and nothing else touches either value
-/// until the continuation resumes — there is no concurrent access for the
-/// compiler to protect against, just a single ownership handoff.
-private struct UncheckedSendableBox<Value>: @unchecked Sendable {
-    let value: Value
-}
-
 public actor IOUSBHostTransport: USBTransport {
     private let service: io_service_t
     private var interface: IOUSBHostInterface?
@@ -43,19 +34,34 @@ public actor IOUSBHostTransport: USBTransport {
 
     public func open() async throws {
         guard interface == nil else { return }
+        var claimed: IOUSBHostInterface?
         do {
             let iface = try IOUSBHostInterface(
                 __ioService: service, options: [], queue: nil, interestHandler: nil)
+            claimed = iface
             try iface.selectAlternateSetting(0)
             self.outPipe = try iface.copyPipe(withAddress: Self.endpointOut)
             self.inPipe = try iface.copyPipe(withAddress: Self.endpointIn)
             self.interface = iface
         } catch {
+            // A pipe holds a STRONG reference to its interface. An orphaned pipe
+            // therefore keeps the exclusive IOService claim alive, and every
+            // later open() fails with "user client already created" for the rest
+            // of the process lifetime. Tear it down explicitly.
+            outPipe = nil
+            inPipe = nil
+            claimed?.destroy()
+            interface = nil
             throw JensenError.interfaceUnavailable(String(describing: error))
         }
     }
 
     public func close() async {
+        // Abort synchronously BEFORE destroy. destroy() tears down the user
+        // client, and a blocking __sendIORequest outstanding against these pipes
+        // would then be operating on a connection that no longer exists.
+        if let outPipe { try? outPipe.__abort(with: .synchronous) }
+        if let inPipe { try? inPipe.__abort(with: .synchronous) }
         outPipe = nil
         inPipe = nil
         interface?.destroy()
@@ -79,6 +85,19 @@ public actor IOUSBHostTransport: USBTransport {
         return Data(bytes: buffer.bytes, count: transferred)
     }
 
+    /// Carries the pipe and buffer into the detached closure.
+    ///
+    /// The `buffer` is genuinely exclusive: a fresh `NSMutableData` is allocated
+    /// per call, never stored in actor state, and read only after the
+    /// continuation resumes. The `pipe` is NOT exclusive — it is actor state
+    /// that `close()` also reaches. Safety therefore rests on `close()` aborting
+    /// both pipes before `destroy()`, and on `JensenDevice.close()` holding the
+    /// FIFO gate so no transfer is in flight when it runs.
+    private struct UncheckedSendableBox: @unchecked Sendable {
+        let pipe: IOUSBHostPipe
+        let buffer: NSMutableData
+    }
+
     /// `__sendIORequest` blocks the calling thread, so it runs off the actor.
     @discardableResult
     private static func transfer(
@@ -87,23 +106,29 @@ public actor IOUSBHostTransport: USBTransport {
         timeout: TimeInterval,
         toleratesTimeout: Bool = false
     ) async throws -> Int {
-        let boxedPipe = UncheckedSendableBox(value: pipe)
-        let boxedBuffer = UncheckedSendableBox(value: buffer)
+        let box = UncheckedSendableBox(pipe: pipe, buffer: buffer)
         return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 var transferred = 0
                 do {
-                    try boxedPipe.value.__sendIORequest(
-                        with: boxedBuffer.value, bytesTransferred: &transferred,
+                    try box.pipe.__sendIORequest(
+                        with: box.buffer, bytesTransferred: &transferred,
                         completionTimeout: timeout)
                     continuation.resume(returning: transferred)
                 } catch {
-                    // A read that simply had nothing waiting is not an error.
-                    if toleratesTimeout {
-                        continuation.resume(returning: 0)
-                    } else {
+                    // ONLY a genuine timeout means "nothing arrived". Anything
+                    // else — kIOReturnNoDevice on unplug, a stalled pipe — must
+                    // propagate, or an absent device reads as a merely idle one
+                    // and every command spins out its full budget before failing.
+                    guard toleratesTimeout,
+                          (error as NSError).code == kIOReturnTimeout else {
                         continuation.resume(throwing: error)
+                        return
                     }
+                    // Bytes already moved off the endpoint are consumed even on a
+                    // timeout. Reporting 0 would silently discard them and desync
+                    // the stream.
+                    continuation.resume(returning: transferred)
                 }
             }
         }

@@ -46,10 +46,12 @@ struct CLI {
             let transport = try IOUSBHostTransport.openFirstAvailable()
             let device = JensenDevice(transport: transport)
             try await device.open()
-            defer { Task { await device.close() } }
 
             let body = try await device.send(.getDeviceInfo, timeout: .seconds(5))
             print("device info body (\(body.count) bytes): \(body.map { String(format: "%02x", $0) }.joined())")
+            // Awaited, not `defer { Task { ... } }` — the process exits before a
+            // detached task runs, so destroy() would never execute.
+            await device.close()
             print("INFO OK")
 
         default:
