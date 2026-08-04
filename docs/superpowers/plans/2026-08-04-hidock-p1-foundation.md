@@ -2067,7 +2067,7 @@ Append inside the actor:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `swift test --filter TransferTests`
-Expected: PASS, 6 tests
+Expected: PASS, 10 tests
 
 - [ ] **Step 5: Add the `pull` command to the CLI**
 
@@ -2638,6 +2638,12 @@ public struct Library: Sendable {
         }
     }
 
+    /// The sidecar recorded for this recording, if one is on disk.
+    public func sidecar(for file: FileInfo) -> Sidecar? {
+        guard let data = try? Data(contentsOf: sidecarURL(for: file)) else { return nil }
+        return try? Self.decoder.decode(Sidecar.self, from: data)
+    }
+
     static func fileSize(at url: URL) -> Int? {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
     }
@@ -2930,12 +2936,17 @@ actor FakeDevice: SyncDevice {
     var files: [FileInfo]
     var payloads: [String: Data]
     var failTransfersFor: Set<String>
+    /// Simulates a device that accepts DELETE_FILE but does not act on it —
+    /// the case a status byte we cannot parse would hide.
+    var ignoreDeletes: Bool
     private(set) var deletedNames: [String] = []
 
-    init(files: [FileInfo], payloads: [String: Data], failTransfersFor: Set<String> = []) {
+    init(files: [FileInfo], payloads: [String: Data],
+         failTransfersFor: Set<String> = [], ignoreDeletes: Bool = false) {
         self.files = files
         self.payloads = payloads
         self.failTransfersFor = failTransfersFor
+        self.ignoreDeletes = ignoreDeletes
     }
 
     func listFiles() async throws -> [FileInfo] { files }
@@ -2952,7 +2963,12 @@ actor FakeDevice: SyncDevice {
         progress(data.count, file.lengthBytes)
     }
 
-    func deleteFile(named name: String) async throws { deletedNames.append(name) }
+    func deleteFile(named name: String) async throws {
+        deletedNames.append(name)
+        // A real device drops the file from its listing. Modelling that is what
+        // lets deleteFromDevice's confirmation step be tested at all.
+        if !ignoreDeletes { files.removeAll { $0.name == name } }
+    }
 }
 ```
 
@@ -3050,6 +3066,78 @@ private func file(_ name: String, _ bytes: Int, sig: String) -> FileInfo {
     }
 }
 
+/// The spec's headline safety property: sync copies, it never deletes. The
+/// fake records every delete it is asked for, and this is the assertion that
+/// makes recording it mean something.
+@Test func syncNeverDeletesFromTheDevice() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let b = file("20260804150000REC002.mp3", 3, sig: "sb")
+    let device = FakeDevice(files: [a, b],
+                            payloads: [a.name: Data([1, 2, 3, 4]), b.name: Data([5, 6, 7])])
+
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }   // re-sync too
+
+    #expect(await device.deletedNames.isEmpty)
+}
+
+/// Actors are reentrant, so two overlapping syncs would compute the same
+/// pending set and race on the same staging file.
+@Test func aSecondConcurrentSyncIsRejected() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])])
+
+    async let first = engine.sync(device: device, serial: "SN1") { _ in }
+    async let second = engine.sync(device: device, serial: "SN1") { _ in }
+    let outcomes = await [try? first, try? second]
+
+    #expect(outcomes.compactMap { $0 }.count == 1)   // exactly one ran
+}
+
+/// Reclaim must re-verify at call time. A file removed from disk after
+/// reclaimable() listed it must NOT be deleted from the device.
+@Test func reclaimSkipsFilesNoLongerOnDisk() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, library, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])])
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+
+    #expect(try await engine.reclaimable(device: device).count == 1)
+
+    // Pull the local copy out from under it.
+    try FileManager.default.removeItem(at: library.destinationURL(for: a))
+
+    let result = try await engine.deleteFromDevice([a], device: device)
+    #expect(result.deleted.isEmpty)
+    #expect(result.skipped == [a.name])
+    #expect(await device.deletedNames.isEmpty)
+}
+
+/// A device that accepts the command but still lists the file afterwards must
+/// be reported as failed, not deleted. The DELETE_FILE response format is
+/// unverified, so the listing is the only trustworthy confirmation.
+@Test func reclaimReportsFailureWhenTheDeviceStillListsTheFile() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])],
+                            ignoreDeletes: true)
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+
+    let result = try await engine.deleteFromDevice([a], device: device)
+    #expect(result.deleted.isEmpty)
+    #expect(result.failed == [a.name])
+}
+
 @Test func progressReportsEachPhase() async throws {
     let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
     let (engine, _, _) = try makeEngine(root: root)
@@ -3093,6 +3181,18 @@ public protocol SyncDevice: Sendable, Actor {
 public enum SyncError: Error, Equatable {
     case libraryUnreachable
     case insufficientSpace(needed: Int)
+    case alreadyRunning
+}
+
+/// Outcome of a reclaim. Names rather than FileInfo, so the menubar can report
+/// it without holding device state.
+public struct DeleteResult: Sendable, Equatable {
+    /// Confirmed gone from the device's own file listing.
+    public var deleted: [String] = []
+    /// Not deleted because they no longer verify as present on disk.
+    public var skipped: [String] = []
+    /// The device errored, or still lists the file afterwards.
+    public var failed: [String] = []
 }
 
 public enum SyncProgress: Sendable {
@@ -3111,6 +3211,12 @@ public actor SyncEngine {
     private let library: Library
     private let index: LibraryIndex
 
+    /// Guards against overlapping runs. `sync` is an actor method with `await`
+    /// points, and Swift actors are reentrant, so Task 9's auto-sync-on-attach
+    /// and a manual trigger could otherwise interleave — computing the same
+    /// pending set and racing on the same `.incoming` staging file.
+    private var isSyncing = false
+
     public init(library: Library, index: LibraryIndex) {
         self.library = library
         self.index = index
@@ -3122,15 +3228,34 @@ public actor SyncEngine {
         serial: String,
         progress: @Sendable (SyncProgress) -> Void
     ) async throws -> SyncResult {
-        guard library.isReachable() else { throw SyncError.libraryUnreachable }
+        guard !isSyncing else { throw SyncError.alreadyRunning }
+        isSyncing = true
+        defer { isSyncing = false }
+
+        guard library.isReachable() else {
+            progress(.finished(downloaded: 0, skipped: 0, failed: 0))
+            throw SyncError.libraryUnreachable
+        }
 
         progress(.listing)
-        let files = try await device.listFiles()
+        let files: [FileInfo]
+        do {
+            files = try await device.listFiles()
+        } catch {
+            // Always emit a terminal event, or a UI driven off progress hangs
+            // on "listing" forever.
+            progress(.finished(downloaded: 0, skipped: 0, failed: 0))
+            throw error
+        }
 
         // Oldest first, so an interrupted sync still makes forward progress
         // through the backlog rather than repeatedly retrying the newest file.
+        // Signature breaks ties: Array.sorted is not documented stable, and every
+        // undated file maps to .distantPast, so without it their relative order
+        // is arbitrary between runs.
         let ordered = files.sorted {
-            ($0.recordedAt ?? .distantPast) < ($1.recordedAt ?? .distantPast)
+            let l = ($0.recordedAt ?? .distantPast), r = ($1.recordedAt ?? .distantPast)
+            return l == r ? $0.signature < $1.signature : l < r
         }
 
         var result = SyncResult()
@@ -3179,10 +3304,13 @@ public actor SyncEngine {
     /// are still on disk at the expected length.
     private func isAlreadySynced(_ file: FileInfo) -> Bool {
         guard index.contains(signature: file.signature) else { return false }
-        let url = library.destinationURL(for: file)
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = attrs[.size] as? Int else { return false }
-        return size == file.lengthBytes
+        guard let size = Library.fileSize(at: library.destinationURL(for: file)) else {
+            return false
+        }
+        // Compare against the LOCALLY recorded length where one exists. A check
+        // that gates a destructive action should trust local truth, not the
+        // device's own claim about what it is holding.
+        return size == (library.sidecar(for: file)?.lengthBytes ?? file.lengthBytes)
     }
 
     /// Reclaim. Only ever called from the explicit menubar action.
@@ -3191,16 +3319,50 @@ public actor SyncEngine {
         try await device.listFiles().filter { isAlreadySynced($0) }
     }
 
-    public func deleteFromDevice(_ files: [FileInfo], device: any SyncDevice) async throws -> Int {
-        var deleted = 0
-        for file in files where isAlreadySynced(file) {
-            try await device.deleteFile(named: file.name)
-            deleted += 1
+    /// Deletes from the device, then CONFIRMS against the device's own listing.
+    ///
+    /// The DELETE_FILE response body layout has never been verified against
+    /// hardware, so a status code in it cannot be trusted. Rather than guess at
+    /// one, this checks the outcome: whatever the device still lists is still
+    /// there. Format-independent, and it is the only command in the project
+    /// that destroys data.
+    ///
+    /// Per-file isolation like `sync`: one device error does not abandon the
+    /// rest, and the caller can tell deleted from skipped from failed.
+    public func deleteFromDevice(
+        _ files: [FileInfo], device: any SyncDevice
+    ) async throws -> DeleteResult {
+        var result = DeleteResult()
+        var requested: [FileInfo] = []
+
+        for file in files {
+            // Re-verified HERE, at call time, not trusted from the index. A file
+            // removed from disk since `reclaimable()` must not be deleted.
+            guard isAlreadySynced(file) else {
+                result.skipped.append(file.name)
+                continue
+            }
+            do {
+                try await device.deleteFile(named: file.name)
+                requested.append(file)
+            } catch {
+                result.failed.append(file.name)
+            }
         }
-        return deleted
+
+        guard !requested.isEmpty else { return result }
+
+        let stillPresent = Set((try? await device.listFiles())?.map(\.signature) ?? [])
+        for file in requested {
+            if stillPresent.contains(file.signature) {
+                result.failed.append(file.name)
+            } else {
+                result.deleted.append(file.name)
+            }
+        }
+        return result
     }
 }
-```
 
 - [ ] **Step 4: Conform `JensenDevice` to `SyncDevice`**
 
@@ -3221,7 +3383,7 @@ extension JensenDevice: SyncDevice {}
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `swift test --filter SyncEngineTests`
-Expected: PASS, 6 tests
+Expected: PASS, 10 tests
 
 - [ ] **Step 6: Run the whole suite**
 
