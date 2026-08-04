@@ -2302,6 +2302,11 @@ private func sampleFile(name: String = "20260804143022REC001.mp3", length: Int =
     try Data([1, 2, 3, 4]).write(to: incoming)
     let written = try lib.commit(incoming: incoming, file: file, deviceSerial: "SN1")
 
+    // commit must CONSUME the staging file. If it ever stops doing so,
+    // .incoming/ accumulates junk forever and nothing else would notice.
+    #expect(FileManager.default.fileExists(atPath: incoming.path) == false)
+    #expect(FileManager.default.fileExists(atPath: lib.destinationURL(for: file).path))
+
     let decoded = try #require(lib.scanSidecars().first)
     #expect(decoded.signature == written.signature)
     #expect(decoded.deviceFilename == file.name)
