@@ -1793,7 +1793,9 @@ Append inside the actor:
         if let failure {
             try? fm.removeItem(at: url)
             buffer.removeAll(keepingCapacity: true)
-            await drain()
+            // drainLocked, NOT drain(): transferFile already holds the gate and
+            // the public drain() takes it. Calling it here self-deadlocks.
+            await drainLocked(maxDuration: .milliseconds(500))
             throw failure
         }
         guard received == file.lengthBytes else {
