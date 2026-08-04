@@ -3399,6 +3399,7 @@ public actor SyncEngine {
         return result
     }
 }
+```
 
 - [ ] **Step 4: Conform `JensenDevice` to `SyncDevice`**
 
@@ -3419,7 +3420,7 @@ extension JensenDevice: SyncDevice {}
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `swift test --filter SyncEngineTests`
-Expected: PASS, 10 tests
+Expected: PASS, 11 tests
 
 - [ ] **Step 6: Run the whole suite**
 
