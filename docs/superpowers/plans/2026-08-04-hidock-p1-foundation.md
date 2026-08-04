@@ -1323,7 +1323,7 @@ private func fileListEntry(
     return d
 }
 
-@Test func parsesDeviceInfo() throws {
+@Test func parsesDeviceInfoWithPaddedSerial() throws {
     var body = Data([0x00, 0x01, 0x04, 0x03])               // version
     body.append(contentsOf: Array("SN12345".utf8))
     body.append(contentsOf: [UInt8](repeating: 0, count: 16 - 7))
@@ -1331,6 +1331,22 @@ private func fileListEntry(
     #expect(info.versionCode == "1.4.3")
     #expect(info.versionNumber == 0x00010403)
     #expect(info.serialNumber == "SN12345")
+}
+
+/// Golden case captured from a real HiDock P1 on firmware 1.4.5, 2026-08-04.
+/// The body is 17 bytes: a 13-character serial with no padding, NOT the
+/// 16-byte padded field the reference implementations assume. Requiring 20
+/// bytes here would throw shortBody on every connect to real hardware.
+@Test func parsesDeviceInfoFromRealHardware() throws {
+    let body = Data([
+        0x00, 0x01, 0x04, 0x05,
+        0x48, 0x44, 0x50, 0x31, 0x32, 0x35, 0x34, 0x35, 0x30, 0x36, 0x30, 0x32, 0x37,
+    ])
+    #expect(body.count == 17)
+    let info = try ResponseParsers.deviceInfo(body)
+    #expect(info.versionCode == "1.4.5")
+    #expect(info.versionNumber == 0x00010405)
+    #expect(info.serialNumber == "HDP1254506027")
 }
 
 @Test func deviceInfoThrowsOnShortBody() {
@@ -1450,13 +1466,19 @@ import Foundation
 public enum ResponseParsers {
 
     public static func deviceInfo(_ body: Data) throws -> DeviceInfo {
-        guard body.count >= 20 else {
-            throw JensenError.shortBody(command: 1, expected: 20, got: body.count)
+        // 4 version bytes plus a serial of at least one character.
+        //
+        // The reference implementations assume a fixed 16-byte serial field
+        // (20 bytes total). A real P1 on firmware 1.4.5 returns a 13-character
+        // serial with NO padding, so the body is 17 bytes. Requiring 20 would
+        // throw shortBody on every connect. Measured 2026-08-04.
+        guard body.count >= 5 else {
+            throw JensenError.shortBody(command: 1, expected: 5, got: body.count)
         }
         let b = [UInt8](body)
         let versionNumber = UInt32(b[0]) << 24 | UInt32(b[1]) << 16 | UInt32(b[2]) << 8 | UInt32(b[3])
         let versionCode = "\(b[1]).\(b[2]).\(b[3])"
-        let serial = String(decoding: b[4..<20].filter { $0 > 0 }, as: UTF8.self)
+        let serial = String(decoding: b[4 ..< min(20, b.count)].filter { $0 > 0 }, as: UTF8.self)
         return DeviceInfo(versionCode: versionCode, versionNumber: versionNumber, serialNumber: serial)
     }
 
@@ -1582,7 +1604,7 @@ Append inside the actor:
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `swift test --filter ResponseParserTests`
-Expected: PASS, 11 tests
+Expected: PASS, 12 tests
 
 - [ ] **Step 7: Add the `list` command to the CLI**
 
