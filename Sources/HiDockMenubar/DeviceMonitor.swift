@@ -72,17 +72,46 @@ public final class DeviceMonitor: @unchecked Sendable {
         }
     }
 
+    /// Idempotent, and safe to call from `deinit` on any thread.
+    ///
+    /// The handles are copied out and cleared synchronously, then released on
+    /// the main queue — the queue IOKit delivers callbacks on. Releasing an
+    /// iterator while `drain` is mid-walk on that queue would be a
+    /// use-after-free, and `deinit` carries no main-thread guarantee. Capturing
+    /// the handles by value rather than `self` also means the teardown block
+    /// never touches a deallocating object.
     public func stop() {
-        if matchedIterator != 0 { IOObjectRelease(matchedIterator); matchedIterator = 0 }
-        if terminatedIterator != 0 { IOObjectRelease(terminatedIterator); terminatedIterator = 0 }
-        if let notifyPort { IONotificationPortDestroy(notifyPort) }
-        notifyPort = nil
+        // nonisolated(unsafe): these are handed to a @Sendable closure below so
+        // it can cross to the main queue. IONotificationPortRef and
+        // NSObjectProtocol aren't Sendable, but they're captured by value here
+        // (not shared mutable state) and the teardown closure is the only thing
+        // that ever touches them again, so there is nothing left to race.
+        nonisolated(unsafe) let port = notifyPort
+        let matched = matchedIterator
+        let terminated = terminatedIterator
+        nonisolated(unsafe) let sleepObs = sleepObserver
+        nonisolated(unsafe) let wakeObs = wakeObserver
 
-        let center = NSWorkspace.shared.notificationCenter
-        if let sleepObserver { center.removeObserver(sleepObserver) }
-        if let wakeObserver { center.removeObserver(wakeObserver) }
+        notifyPort = nil
+        matchedIterator = 0
+        terminatedIterator = 0
         sleepObserver = nil
         wakeObserver = nil
+
+        let teardown: @Sendable () -> Void = {
+            if matched != 0 { IOObjectRelease(matched) }
+            if terminated != 0 { IOObjectRelease(terminated) }
+            if let port { IONotificationPortDestroy(port) }
+            let center = NSWorkspace.shared.notificationCenter
+            if let sleepObs { center.removeObserver(sleepObs) }
+            if let wakeObs { center.removeObserver(wakeObs) }
+        }
+
+        if Thread.isMainThread {
+            teardown()
+        } else {
+            DispatchQueue.main.async(execute: teardown)
+        }
     }
 
     /// Emits at most one event per callback, regardless of how many

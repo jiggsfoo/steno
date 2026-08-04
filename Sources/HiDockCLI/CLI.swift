@@ -112,6 +112,11 @@ struct CLI {
             print("PULL OK")
 
         case "watch":
+            // Line-buffer stdout. print() BLOCK-buffers to a pipe or file, so every
+            // event is lost unflushed when the process is killed — `watch > log`
+            // produces an empty file and the monitor looks broken when it is not.
+            setvbuf(stdout, nil, _IOLBF, 0)
+
             print("Watching for HiDock P1 attach/detach. Ctrl-C to stop.")
             let monitor = DeviceMonitor { event in
                 let stamp = ISO8601DateFormatter().string(from: Date())
@@ -121,14 +126,21 @@ struct CLI {
                 }
             }
             monitor.start()
-            // The monitor delivers on the main queue, so keep the run loop alive.
-            // RunLoop.run() is unavailable from async contexts, and CLI.main() is
-            // async throws, so the blocking call is isolated in a synchronous
-            // nested function.
-            func runForever() {
-                RunLoop.main.run()
+
+            // withExtendedLifetime is load-bearing, not defensive. Nothing else holds a
+            // strong reference — IOKit keeps only an unretained pointer — so ARC may
+            // release `monitor` at its last syntactic use, running deinit -> stop() and
+            // tearing down every notification before the process even parks. The
+            // initial rescan() would still print ATTACHED, so the tool would look like
+            // it worked while being permanently deaf to attach and detach.
+            withExtendedLifetime(monitor) {
+                // RunLoop.main.run() is `noasync`, so it cannot be called directly from
+                // an async main. The Swift concurrency runtime parks the real main
+                // thread in dispatch_main() and drains DispatchQueue.main, which is
+                // where IOKit delivers, so this only needs to not return.
+                func parkForever() { RunLoop.main.run() }
+                parkForever()
             }
-            runForever()
 
         default:
             print("usage: hidock-cli [probe|info|list|pull <name>|watch]")
