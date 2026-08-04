@@ -82,11 +82,17 @@ public struct Library: Sendable {
         // Refuse to clobber a DIFFERENT recording. Signature is identity, so a
         // matching signature is the same file being re-synced and is safe to
         // replace; anything else is a collision and must not be destroyed.
-        if fm.fileExists(atPath: sidecarDestination.path),
-           let existing = try? Self.decoder.decode(
-               Sidecar.self, from: Data(contentsOf: sidecarDestination)),
-           existing.signature != file.signature {
-            throw LibraryError.destinationOccupied(destination.path, existing.signature)
+        //
+        // Fails CLOSED: a sidecar that exists but will not decode might describe
+        // any recording at all, so refuse rather than overwrite on an assumption.
+        if fm.fileExists(atPath: sidecarDestination.path) {
+            guard let data = try? Data(contentsOf: sidecarDestination),
+                  let existing = try? Self.decoder.decode(Sidecar.self, from: data) else {
+                throw LibraryError.destinationOccupied(destination.path, "unreadable sidecar")
+            }
+            guard existing.signature == file.signature else {
+                throw LibraryError.destinationOccupied(destination.path, existing.signature)
+            }
         }
 
         try fm.createDirectory(at: destination.deletingLastPathComponent(),
@@ -108,13 +114,18 @@ public struct Library: Sendable {
         let stagedSidecar = incoming.appendingPathExtension("json")
         try Self.encoder.encode(sidecar).write(to: stagedSidecar)
 
-        if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
-        if fm.fileExists(atPath: sidecarDestination.path) { try fm.removeItem(at: sidecarDestination) }
-        try fm.moveItem(at: stagedSidecar, to: sidecarDestination)
+        // Replace atomically rather than delete-then-move. Deleting first opens
+        // a window where a failure between the delete and the move destroys a
+        // previously-synced recording outright, leaving neither audio nor
+        // sidecar — the exact loss this ordering exists to prevent.
+        let wasAlreadyPresent = fm.fileExists(atPath: destination.path)
+        try Self.install(stagedSidecar, at: sidecarDestination)
         do {
-            try fm.moveItem(at: incoming, to: destination)
+            try Self.install(incoming, at: destination)
         } catch {
-            try? fm.removeItem(at: sidecarDestination)   // never leave an orphan sidecar
+            // Only clean up a sidecar we newly created. On a re-sync the previous
+            // audio is still in place, and removing its sidecar would orphan it.
+            if !wasAlreadyPresent { try? fm.removeItem(at: sidecarDestination) }
             throw error
         }
         return sidecar
@@ -131,6 +142,17 @@ public struct Library: Sendable {
             return url.lastPathComponent
         }
         return urlParts.dropFirst(rootParts.count).joined(separator: "/")
+    }
+
+    /// Same-volume atomic install. `replaceItemAt` when something is already
+    /// there, `moveItem` when not — never a delete followed by a move.
+    static func install(_ source: URL, at destination: URL) throws {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: destination.path) {
+            _ = try fm.replaceItemAt(destination, withItemAt: source)
+        } else {
+            try fm.moveItem(at: source, to: destination)
+        }
     }
 
     static func fileSize(at url: URL) -> Int? {

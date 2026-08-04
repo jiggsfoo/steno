@@ -147,6 +147,52 @@ private func sampleFile(name: String = "20260804143022REC001.mp3", length: Int =
     #expect(decoded.relativePath.hasPrefix("2026-08-04/"))
 }
 
+/// Re-syncing the SAME recording must be safe. The overwrite path previously
+/// deleted the old audio and sidecar before installing the new ones, so a
+/// failure in between destroyed a recording that was already safely stored.
+@Test func resyncingTheSameRecordingReplacesItCleanly() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let lib = Library(root: root)
+    let file = sampleFile()
+
+    func commitOnce(_ bytes: Data) throws -> Sidecar {
+        let incoming = lib.incomingURL(for: file)
+        try FileManager.default.createDirectory(
+            at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try bytes.write(to: incoming)
+        return try lib.commit(incoming: incoming, file: file, deviceSerial: "SN1")
+    }
+
+    _ = try commitOnce(Data([1, 2, 3, 4]))
+    _ = try commitOnce(Data([5, 6, 7, 8]))
+
+    let audio = lib.destinationURL(for: file)
+    #expect(try Data(contentsOf: audio) == Data([5, 6, 7, 8]))
+    #expect(try lib.scanSidecars().count == 1)          // exactly one, not two
+}
+
+/// A sidecar that exists but will not decode might describe any recording, so
+/// commit must refuse rather than overwrite on an assumption.
+@Test func commitRefusesWhenTheExistingSidecarIsUnreadable() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let lib = Library(root: root)
+    let file = sampleFile()
+
+    let sidecarPath = lib.sidecarURL(for: file)
+    try FileManager.default.createDirectory(
+        at: sidecarPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("not json at all".utf8).write(to: sidecarPath)
+
+    let incoming = lib.incomingURL(for: file)
+    try FileManager.default.createDirectory(
+        at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data([1, 2, 3, 4]).write(to: incoming)
+
+    #expect(throws: (any Error).self) {
+        _ = try lib.commit(incoming: incoming, file: file, deviceSerial: "SN1")
+    }
+}
+
 @Test func reachabilityIsFalseForMissingRoot() {
     let lib = Library(root: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"))
     #expect(lib.isReachable() == false)
