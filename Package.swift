@@ -8,6 +8,7 @@ let package = Package(
         .library(name: "HiDockKit", targets: ["HiDockKit"]),
         .executable(name: "hidock-cli", targets: ["HiDockCLI"]),
         .library(name: "HiDockMenubar", targets: ["HiDockMenubar"]),
+        .executable(name: "HiDockApp", targets: ["HiDockApp"]),
     ],
     targets: [
         .target(name: "HiDockKit"),
@@ -25,5 +26,14 @@ let package = Package(
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .testTarget(name: "HiDockMenubarTests", dependencies: ["HiDockMenubar", "HiDockKit"]),
+        // Thin shell: @main plus the bundle plist. All logic and views live in
+        // HiDockMenubar (see the comment above) so they stay testable. The
+        // plist is copied into the .app bundle by Scripts/make-app.sh, not
+        // processed by SPM, hence the exclude.
+        .executableTarget(
+            name: "HiDockApp",
+            dependencies: ["HiDockMenubar", "HiDockKit"],
+            exclude: ["Info.plist"]
+        ),
     ]
 )
