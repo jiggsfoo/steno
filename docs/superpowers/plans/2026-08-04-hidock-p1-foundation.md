@@ -2247,7 +2247,8 @@ private func sampleFile(name: String = "20260804143022REC001.mp3", length: Int =
                             signature: first.signature, version: 1, recordedAt: first.recordedAt)
     let clobberPath = lib.destinationURL(for: impostor)
     let sidecarPath = clobberPath.deletingPathExtension().appendingPathExtension("json")
-    var stored = try JSONDecoder().decode(Sidecar.self, from: Data(contentsOf: sidecarPath))
+    let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+    var stored = try dec.decode(Sidecar.self, from: Data(contentsOf: sidecarPath))
     stored.signature = "a-completely-different-recording"
     let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
     try enc.encode(stored).write(to: sidecarPath)
@@ -2583,18 +2584,26 @@ public struct Library: Sendable {
         let stagedSidecar = incoming.appendingPathExtension("json")
         try Self.encoder.encode(sidecar).write(to: stagedSidecar)
 
-        // Replace atomically rather than delete-then-move. Deleting first opens
-        // a window where a failure between the delete and the move destroys a
-        // previously-synced recording outright, leaving neither audio nor
-        // sidecar — the exact loss this ordering exists to prevent.
-        let wasAlreadyPresent = fm.fileExists(atPath: destination.path)
-        try Self.install(stagedSidecar, at: sidecarDestination)
+        // AUDIO FIRST, then the sidecar. Two files cannot be installed
+        // atomically, so the question is not how to avoid an intermediate state
+        // but which intermediate state is safer. This ordering was reversed
+        // twice before settling here; the reasoning is worth keeping.
+        //
+        // Audio-first worst case: audio present, sidecar missing or stale.
+        // scanSidecars does not see it, so the next sync re-downloads and
+        // re-commits over the same path. Redundant work, self-healing, and
+        // nothing on disk ever lies.
+        //
+        // Sidecar-first worst case: a sidecar describing a recording that was
+        // never installed, sitting beside different audio. That does NOT
+        // self-heal, and the library's source of truth is then simply wrong.
+        //
+        // A redundant download is a far better failure than a confident lie.
+        try Self.install(incoming, at: destination)
         do {
-            try Self.install(incoming, at: destination)
+            try Self.install(stagedSidecar, at: sidecarDestination)
         } catch {
-            // Only clean up a sidecar we newly created. On a re-sync the previous
-            // audio is still in place, and removing its sidecar would orphan it.
-            if !wasAlreadyPresent { try? fm.removeItem(at: sidecarDestination) }
+            try? fm.removeItem(at: stagedSidecar)
             throw error
         }
         return sidecar
@@ -2617,10 +2626,16 @@ public struct Library: Sendable {
     /// there, `moveItem` when not — never a delete followed by a move.
     static func install(_ source: URL, at destination: URL) throws {
         let fm = FileManager.default
-        if fm.fileExists(atPath: destination.path) {
-            _ = try fm.replaceItemAt(destination, withItemAt: source)
-        } else {
+        guard fm.fileExists(atPath: destination.path) else {
             try fm.moveItem(at: source, to: destination)
+            return
+        }
+        // replaceItemAt may report a different resulting URL on some volumes.
+        // Everything here lives under a plain local root, but verify rather than
+        // assume: a silent rename would hide the file from scanSidecars.
+        let result = try fm.replaceItemAt(destination, withItemAt: source)
+        if let result, result.standardizedFileURL != destination.standardizedFileURL {
+            try fm.moveItem(at: result, to: destination)
         }
     }
 
