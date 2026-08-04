@@ -93,6 +93,9 @@ private func fileListEntry(
     d.append(contentsOf: [UInt8](repeating: 0, count: 6))
     d.append(contentsOf: [UInt8](repeating: 0xCC, count: 16))
     let result = try ResponseParsers.fileList(d)
+    // Assert the count first: indexing straight into [0] would TRAP the whole
+    // suite on a regression to zero entries instead of failing this one test.
+    try #require(result.files.count == 1)
     #expect(result.files[0].name == "a.mp3")
 }
 
@@ -108,6 +111,32 @@ private func fileListEntry(
         let f = FileInfo(name: name, lengthBytes: 1, signature: "s", version: 1, recordedAt: nil)
         #expect(f.preferredExtension == expected)
     }
+}
+
+/// Golden case from real hardware, 2026-08-04: body `20 26 08 04 14 04 27`
+/// captured at local wall clock 14:04:28.
+@Test func parsesDeviceTimeFromRealHardware() throws {
+    let body = Data([0x20, 0x26, 0x08, 0x04, 0x14, 0x04, 0x27])
+    let date = try #require(ResponseParsers.deviceTime(body))
+    let c = Calendar.current.dateComponents(
+        [.year, .month, .day, .hour, .minute, .second], from: date)
+    #expect(c.year == 2026 && c.month == 8 && c.day == 4)
+    #expect(c.hour == 14 && c.minute == 4 && c.second == 27)
+}
+
+/// Reading those same bytes as binary rather than BCD gives hour 20 and
+/// second 39. This pins the distinction.
+@Test func deviceTimeDecodesBcdNotBinary() throws {
+    let date = try #require(
+        ResponseParsers.deviceTime(Data([0x20, 0x26, 0x08, 0x04, 0x14, 0x04, 0x27])))
+    let c = Calendar.current.dateComponents([.hour, .second], from: date)
+    #expect(c.hour != 20)
+    #expect(c.second != 39)
+}
+
+@Test func deviceTimeRejectsInvalidBcdAndShortBodies() {
+    #expect(ResponseParsers.deviceTime(Data([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])) == nil)
+    #expect(ResponseParsers.deviceTime(Data([0x20, 0x26])) == nil)
 }
 
 @Test func parsesCardInfo() throws {
