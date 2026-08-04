@@ -53,6 +53,11 @@ public final class LibraryIndex: @unchecked Sendable {
 
     public func upsert(_ s: Sidecar) throws {
         lock.lock(); defer { lock.unlock() }
+        try upsertLocked(s)
+    }
+
+    /// Caller must already hold `lock`.
+    private func upsertLocked(_ s: Sidecar) throws {
         var stmt: OpaquePointer?
         let sql = """
             INSERT INTO recordings
@@ -92,28 +97,49 @@ public final class LibraryIndex: @unchecked Sendable {
     }
 
     public func recent(limit: Int) throws -> [Sidecar] {
-        try query("SELECT * FROM recordings ORDER BY recorded_at DESC LIMIT \(limit);")
+        // Bound and bound: a negative limit means UNLIMITED in SQLite, so an
+        // interpolated -1 would quietly return the whole library.
+        try query("SELECT * FROM recordings ORDER BY recorded_at DESC LIMIT ?;",
+                  limit: max(0, limit))
     }
 
     public func all() throws -> [Sidecar] {
         try query("SELECT * FROM recordings ORDER BY recorded_at DESC;")
     }
 
+    /// Holds the lock for the WHOLE call, inside one transaction.
+    ///
+    /// Dropping the lock between the DELETE and the re-inserts would let a
+    /// concurrent `contains(signature:)` observe an empty table and report
+    /// not-synced, which makes SyncEngine re-download files already on disk.
+    /// The transaction also collapses one implicit commit per row.
     public func rebuild(from sidecars: [Sidecar]) throws {
-        lock.lock()
-        let result = sqlite3_exec(db, "DELETE FROM recordings;", nil, nil, nil)
-        lock.unlock()
-        guard result == SQLITE_OK else { throw LibraryIndexError.writeFailed(lastMessage()) }
-        for s in sidecars { try upsert(s) }
+        lock.lock(); defer { lock.unlock() }
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil) == SQLITE_OK else {
+            throw LibraryIndexError.writeFailed(lastMessage())
+        }
+        do {
+            guard sqlite3_exec(db, "DELETE FROM recordings;", nil, nil, nil) == SQLITE_OK else {
+                throw LibraryIndexError.writeFailed(lastMessage())
+            }
+            for s in sidecars { try upsertLocked(s) }
+            guard sqlite3_exec(db, "COMMIT;", nil, nil, nil) == SQLITE_OK else {
+                throw LibraryIndexError.writeFailed(lastMessage())
+            }
+        } catch {
+            sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+            throw error
+        }
     }
 
-    private func query(_ sql: String) throws -> [Sidecar] {
+    private func query(_ sql: String, limit: Int? = nil) throws -> [Sidecar] {
         lock.lock(); defer { lock.unlock() }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw LibraryIndexError.prepareFailed(lastMessage())
         }
         defer { sqlite3_finalize(stmt) }
+        if let limit { sqlite3_bind_int(stmt, 1, Int32(clamping: limit)) }
 
         var out: [Sidecar] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
