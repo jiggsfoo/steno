@@ -91,13 +91,30 @@ Known but deliberately unused in this spec: `GET/SET_SETTINGS(11/12)`,
 Bluetooth commands (`4097`-`4104`), firmware upgrade (`8/9`), `FORMAT_CARD(17)`,
 `RESTORE_FACTORY_SETTINGS(19)`, `FACTORY_RESET(61451)`.
 
-**Recording formats.** Firmware 1.4.3 records MP3 96 kbps or WAV 768 kbps, both of which
-macOS plays natively. Older firmware produced `.hda`. Bytes are stored exactly as the
-device sends them, with no transcoding. Device filenames are timestamp-based
-(`2025May13-160405-Rec59.hda`, `20250513160405REC001.wav`).
+**Recording formats. Corrected 2026-08-04 against real hardware.** This section
+originally assumed firmware 1.4.3 wrote `.mp3`/`.wav` and that `.hda` was a legacy format
+needing a WAV-header wrapper. Both assumptions were wrong.
+
+Angelo's P1 runs firmware **1.4.5** and writes `.hda` for every recording. A pulled `.hda`
+proved to be **plain MPEG-1 Layer III**: de-framing the transfer yields exactly the
+device-reported byte count, and `afinfo` reports `1 ch, 48000 Hz, .mp3`, 96 kbps, with a
+correct duration. `file(1)` agrees: `MPEG ADTS, layer III, v1, 96 kbps, 48 kHz, Monaural`.
+
+So no wrapper and no transcoding are needed. `.hda` is MP3 under a proprietary extension,
+and correcting the extension on write is sufficient for Finder, QuickLook and AVFoundation.
+Bytes are stored exactly as the device sends them; the original device filename is kept in
+the sidecar. Device filenames are timestamp-based (`2026Aug04-135302-Wip02.hda`).
 
 **Sizing note.** WAV 768 kbps is roughly 170 MB for a 30-minute recording. Transfers must
-stream to disk, never buffer in memory.
+stream to disk, never buffer in memory. At the observed MP3 96 kbps a 30-minute recording
+is a far more modest ~21 MB, but the streaming requirement stands: the WAV mode exists in
+firmware and a long meeting is still large enough that buffering it is wasteful.
+
+**Transfer framing, verified 2026-08-04.** `TRANSFER_FILE` payloads arrive as ordinary
+Jensen packets (command 5, echoing the request sequence), not as a raw byte stream. A
+single bulk read coalesces several: a 53,568-byte recording arrived as 7 packets in ONE
+53,652-byte read. The device layer's decode loop must therefore drain multiple packets per
+buffer, which it does.
 
 ## Architecture
 
@@ -306,7 +323,7 @@ To confirm during step 1. Each has a defined fallback, so none of them blocks th
 | P1 enumerates with one of the listed VID/PID pairs | Read the actual pair from `system_profiler SPUSBDataType` and add it. |
 | Interface 0 is claimable from a non-sandboxed app via `IOUSBHost` | Fall back to the legacy `IOKit`/`IOUSBLib` plugin interface. Same endpoints, gnarlier C interop. |
 | Device responds to `GET_DEVICE_INFO` after a 300 ms settle | Increase the settle delay, or retry the first command. |
-| Recordings on the device are `.mp3` or `.wav` | If `.hda` files are present, add a WAV-header wrapper in this spec rather than deferring it. |
+| ~~Recordings on the device are `.mp3` or `.wav`~~ **RESOLVED 2026-08-04: they are `.hda`, which is MP3.** | No wrapper needed. `FileInfo.preferredExtension` maps `.hda` to `.mp3`; bytes untouched. |
 | P1 also enumerates as a USB Audio Class device | Only affects spec 3. If it does not, audio routing needs a CoreAudio HAL plugin fed by `REALTIME_TRANSFER(34)`, which is substantially more work. |
 
 ## Open decisions deferred to later specs

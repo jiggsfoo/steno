@@ -1441,6 +1441,20 @@ private func fileListEntry(
     #expect(result.files[0].name == "a.mp3")
 }
 
+/// Real filenames captured from a P1 on firmware 1.4.5, 2026-08-04.
+@Test func hdaRecordingsAreRenamedToMp3() {
+    let f = FileInfo(name: "2026Aug04-135302-Wip02.hda", lengthBytes: 53568,
+                     signature: "c74e0ac92b1708ddd40045f6b938d75c", version: 5, recordedAt: nil)
+    #expect(f.preferredExtension == "mp3")
+}
+
+@Test func nonHdaExtensionsArePreserved() {
+    for (name, expected) in [("a.mp3", "mp3"), ("b.WAV", "wav"), ("c.hda", "mp3")] {
+        let f = FileInfo(name: name, lengthBytes: 1, signature: "s", version: 1, recordedAt: nil)
+        #expect(f.preferredExtension == expected)
+    }
+}
+
 @Test func parsesCardInfo() throws {
     let body = Data([0, 0, 0x30, 0x00,  0, 0, 0x78, 0x00,  0, 0, 0, 1])
     let info = try ResponseParsers.cardInfo(body)
@@ -1499,6 +1513,21 @@ public struct CardInfo: Sendable, Equatable {
     public let status: Int
 
     public var usedMiB: Int { max(0, capacityMiB - freeMiB) }
+}
+
+extension FileInfo {
+    /// The device names its MP3 recordings `.hda`, but the bytes are plain
+    /// MPEG-1 Layer III. Verified on hardware 2026-08-04: a pulled `.hda`
+    /// de-frames to exactly the device-reported length and `afinfo` reports
+    /// `1 ch, 48000 Hz, .mp3`, 96 kbps, with a correct duration.
+    ///
+    /// Nothing is transcoded and no header is wrapped — ONLY the extension is
+    /// corrected, so Finder, QuickLook and AVURLAsset can all read the file.
+    /// The original device filename is preserved in the sidecar.
+    public var preferredExtension: String {
+        let raw = (name as NSString).pathExtension.lowercased()
+        return raw == "hda" ? "mp3" : raw
+    }
 }
 ```
 
@@ -1648,7 +1677,7 @@ Append inside the actor:
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `swift test --filter ResponseParserTests`
-Expected: PASS, 12 tests
+Expected: PASS, 14 tests
 
 - [ ] **Step 7: Add the `list` command to the CLI**
 
@@ -1693,7 +1722,10 @@ Update the usage string to `[probe|info|list]`.
 Run: `swift run hidock-cli list`
 Expected: `LIST OK`, firmware version matching the device, and one line per recording.
 
-Record the observed file extensions. **If any file ends in `.hda`, stop and report** — the spec's fallback applies and a WAV-header wrapper must be added to this task.
+Record the observed file extensions. **`.hda` is expected and already handled.** Confirmed
+on hardware 2026-08-04: `.hda` payloads are plain MPEG-1 Layer III (96 kbps, 48 kHz mono),
+so `FileInfo.preferredExtension` maps them to `.mp3` and nothing is transcoded. If you see
+an extension that is neither `.hda`, `.mp3` nor `.wav`, stop and report that.
 
 **Also record the `device time body` hex line verbatim in the task report.** Its layout is unverified, and Task 10 deliberately never writes the clock until it is confirmed against these real bytes.
 
@@ -1984,11 +2016,20 @@ private func sampleFile(name: String = "20260804143022REC001.mp3", length: Int =
              version: 1, recordedAt: ResponseParsers.recordedAt(fromFilename: name))
 }
 
-@Test func destinationIsDateFolderedWithDeviceExtension() {
+@Test func destinationIsDateFolderedWithCorrectedExtension() {
     let lib = Library(root: URL(fileURLWithPath: "/tmp/x"))
     let url = lib.destinationURL(for: sampleFile())
     #expect(url.deletingLastPathComponent().lastPathComponent == "2026-08-04")
     #expect(url.lastPathComponent == "143022.mp3")
+}
+
+/// A device-named `.hda` must land as `.mp3`; the bytes are already MP3.
+@Test func hdaRecordingLandsAsMp3() {
+    let lib = Library(root: URL(fileURLWithPath: "/tmp/x"))
+    let file = FileInfo(name: "2026Aug04-135302-Wip02.hda", lengthBytes: 53568,
+                        signature: "sig", version: 5,
+                        recordedAt: ResponseParsers.recordedAt(fromFilename: "2026Aug04-135302-Wip02.hda"))
+    #expect(lib.destinationURL(for: file).lastPathComponent == "135302.mp3")
 }
 
 @Test func commitMovesFileAndWritesSidecar() throws {
@@ -2162,9 +2203,10 @@ public struct Library: Sendable {
             .appendingPathComponent("\(file.signature).part")
     }
 
-    /// `<root>/YYYY-MM-DD/HHMMSS.<device extension>`
+    /// `<root>/YYYY-MM-DD/HHMMSS.<corrected extension>`
+    /// Uses `preferredExtension`, so a device-named `.hda` lands as `.mp3`.
     public func destinationURL(for file: FileInfo) -> URL {
-        let ext = (file.name as NSString).pathExtension
+        let ext = file.preferredExtension
         let date = file.recordedAt ?? Date()
         let folder = Self.dayFormatter.string(from: date)
         let stem = Self.timeFormatter.string(from: date)
@@ -2413,7 +2455,7 @@ public enum LibraryIndexError: Error {
 - [ ] **Step 7: Run tests to verify they pass**
 
 Run: `swift test --filter LibraryTests && swift test --filter LibraryIndexTests`
-Expected: PASS, 4 + 5 tests
+Expected: PASS, 5 + 5 tests
 
 - [ ] **Step 8: Commit**
 
