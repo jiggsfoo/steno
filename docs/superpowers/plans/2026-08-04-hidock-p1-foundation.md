@@ -146,6 +146,7 @@ Proves the single riskiest assumption in the spec: that a non-sandboxed Swift bi
 
 ```swift
 // Tests/HiDockKitTests/DeviceMatchingTests.swift
+import Foundation
 import Testing
 @testable import HiDockKit
 
@@ -157,9 +158,18 @@ import Testing
     #expect(HiDockDeviceMatching.vendorIDs.sorted() == [0x10d6, 0x3887])
 }
 
-@Test func matchingDictionaryIsBuiltForInterfaceZero() {
+/// The dictionary is a bare class match on purpose. Narrowing it with an
+/// `interfaceNumber` criterion matches nothing on macOS 27; interface 0 is
+/// selected in Swift by `isHiDockP1Interface` instead.
+@Test func matchingDictionaryIsABareInterfaceClassMatch() {
     let dict = HiDockDeviceMatching.matchingDictionary() as NSDictionary
-    #expect(dict["bInterfaceNumber"] as? Int == 0)
+    #expect(dict["IOProviderClass"] as? String == "IOUSBHostInterface")
+    #expect(dict["bInterfaceNumber"] == nil)
+}
+
+/// A service handle of 0 is never a device, and the filter must not trap on it.
+@Test func isHiDockP1InterfaceRejectsNullService() {
+    #expect(HiDockDeviceMatching.isHiDockP1Interface(0) == false)
 }
 ```
 
@@ -194,13 +204,14 @@ let package = Package(
 ```swift
 import Foundation
 
-public enum JensenError: Error, Equatable {
+public enum JensenError: Error, Equatable, Sendable {
     case deviceNotFound
     case interfaceUnavailable(String)
     case invalidHeader
     case timeout(command: UInt16)
     case shortBody(command: UInt16, expected: Int, got: Int)
     case transferIncomplete(expected: Int, got: Int)
+    case fileWriteFailed(String)
     case notConnected
 }
 ```
@@ -216,36 +227,32 @@ public enum HiDockDeviceMatching {
     public static let vendorIDs: [Int] = [0x10d6, 0x3887]
     public static let p1ProductIDs: [Int] = [0xaf0e, 0xb00e, 0x2040]
 
-    /// Matches interface 0 (the vendor-specific Jensen interface) directly.
-    /// macOS claims the audio interfaces separately, so this never contends with AppleUSBAudio.
+    /// Matches every USB interface; callers narrow with `isHiDockP1Interface`.
+    ///
+    /// This is deliberately a bare class match. Passing `interfaceNumber: 0`
+    /// to `IOUSBHostInterface.__createMatchingDictionary` produces a dictionary
+    /// that matches NOTHING on macOS 27 (build 26A5388g), even though the
+    /// device's registered `bInterfaceNumber` really is 0 — IOKit's property
+    /// matching compares CFNumber types strictly, not just numeric values.
+    /// Verified on hardware 2026-08-04: the predicate form returned 0 matches
+    /// while this form found the P1 and claimed it. Filter in Swift instead.
     public static func matchingDictionary() -> CFMutableDictionary {
-        let unmanaged = IOUSBHostInterface.__createMatchingDictionary(
-            withVendorID: nil,
-            productID: nil,
-            bcdDevice: nil,
-            interfaceNumber: NSNumber(value: 0),
-            configurationValue: nil,
-            interfaceClass: nil,
-            interfaceSubclass: nil,
-            interfaceProtocol: nil,
-            speed: nil,
-            productIDArray: nil)
-        return unmanaged.takeRetainedValue()
+        IOServiceMatching("IOUSBHostInterface")
     }
 
     /// Returns io_service_t handles for every attached P1 Jensen interface.
     /// Caller owns each handle and must IOObjectRelease it.
     public static func copyMatchingServices() -> [io_service_t] {
         var iterator: io_iterator_t = 0
-        let dict = matchingDictionary()
-        guard IOServiceGetMatchingServices(kIOMainPortDefault, dict, &iterator) == KERN_SUCCESS else {
+        guard IOServiceGetMatchingServices(
+            kIOMainPortDefault, matchingDictionary(), &iterator) == KERN_SUCCESS else {
             return []
         }
         defer { IOObjectRelease(iterator) }
 
         var services: [io_service_t] = []
         while case let svc = IOIteratorNext(iterator), svc != 0 {
-            if matchesHiDockP1(svc) {
+            if isHiDockP1Interface(svc) {
                 services.append(svc)
             } else {
                 IOObjectRelease(svc)
@@ -254,15 +261,20 @@ public enum HiDockDeviceMatching {
         return services
     }
 
-    private static func matchesHiDockP1(_ service: io_service_t) -> Bool {
+    /// True for interface 0 of an attached HiDock P1. Public because
+    /// DeviceMonitor must apply the same filter to notification callbacks:
+    /// the bare class match fires for every USB interface on the system.
+    public static func isHiDockP1Interface(_ service: io_service_t) -> Bool {
         guard let vid = intProperty(service, "idVendor"),
-              let pid = intProperty(service, "idProduct") else { return false }
-        return vendorIDs.contains(vid) && p1ProductIDs.contains(pid)
+              let pid = intProperty(service, "idProduct"),
+              let interfaceNumber = intProperty(service, "bInterfaceNumber") else { return false }
+        return vendorIDs.contains(vid) && p1ProductIDs.contains(pid) && interfaceNumber == 0
     }
 
     /// USB interface nubs inherit idVendor/idProduct from the parent device,
     /// so walk up the IOService plane when the property is not local.
-    static func intProperty(_ service: io_service_t, _ key: String) -> Int? {
+    /// Public because HiDockCLI (a separate module) calls it.
+    public static func intProperty(_ service: io_service_t, _ key: String) -> Int? {
         if let cf = IORegistryEntrySearchCFProperty(
             service, kIOServicePlane, key as CFString, kCFAllocatorDefault,
             IOOptionBits(kIORegistryIterateRecursively | kIORegistryIterateParents)) {
@@ -276,7 +288,7 @@ public enum HiDockDeviceMatching {
 - [ ] **Step 6: Run test to verify it passes**
 
 Run: `swift test --filter DeviceMatchingTests`
-Expected: PASS, 3 tests
+Expected: PASS, 4 tests
 
 - [ ] **Step 7: Write the probe CLI**
 
@@ -297,7 +309,8 @@ case "probe":
 
     guard let service = services.first else {
         print("No HiDock P1 found.")
-        print("Attached USB devices can be listed with: system_profiler SPUSBDataType")
+        // Note: SPUSBDataType returns nothing at all on macOS 27 (26A5388g).
+        print("Attached USB devices can be listed with: system_profiler SPUSBHostDataType")
         exit(1)
     }
 
@@ -332,7 +345,7 @@ default:
 Run: `swift run hidock-cli probe`
 Expected: `PROBE OK`
 
-If it prints `No HiDock P1 found`, run `system_profiler SPUSBDataType | grep -A5 -i hidock`, read the real vendor and product IDs, and add them to `DeviceMatching.swift` plus the Step 1 tests.
+If it prints `No HiDock P1 found`, run `system_profiler SPUSBHostDataType | grep -A12 -i hidock` (the older `SPUSBDataType` key returns nothing on macOS 27), read the real vendor and product IDs, and add them to `DeviceMatching.swift` plus the Step 1 tests.
 
 If the claim fails with an access error, the fallback documented in the spec applies: switch `IOUSBHostTransport` to the legacy `IOKit`/`IOUSBLib` plugin interface in Task 4. Endpoints and framing are unchanged. **Stop and report this before continuing.**
 
@@ -475,6 +488,25 @@ import Testing
     #expect(second.body == Data([2, 2]))
 }
 
+/// Pins the mask/shift arithmetic at the top of both packed fields without
+/// allocating a 16 MB buffer: a maximal declared length must be read back
+/// exactly and simply report needMoreData against a short buffer.
+@Test func decodeHandlesMaximalDeclaredLengthWithoutOverflow() throws {
+    var bytes: [UInt8] = [0x12, 0x34, 0x00, 0x01, 0, 0, 0, 0]
+    bytes += [0xFF, 0xFF, 0xFF, 0xFF]          // padding 255, body length 0xFFFFFF
+    #expect(try JensenPacket.decode(from: Data(bytes)) == .needMoreData)
+}
+
+/// The largest body length that still leaves the padding byte clear must
+/// round-trip with padding read back as zero.
+@Test func encodesLargestBodyThatKeepsPaddingByteClear() {
+    let body = Data(repeating: 0xAB, count: 300_000)
+    let bytes = [UInt8](JensenPacket(command: 5, sequence: 1, body: body).encoded())
+    #expect(bytes[8] == 0x00)                                    // padding stays clear
+    let declared = Int(bytes[9]) << 16 | Int(bytes[10]) << 8 | Int(bytes[11])
+    #expect(declared == 300_000)
+}
+
 /// Regression guard: Data slices keep their parent's indices, so any decoder
 /// that assumes a zero start index breaks on the second packet of a read.
 @Test func decodesFromASliceWithNonZeroStartIndex() throws {
@@ -537,7 +569,19 @@ public struct JensenPacket: Sendable, Equatable {
     public static let headerSize = 12
     private static let syncMarker: [UInt8] = [0x12, 0x34]
 
+    /// The wire format stores body length in 24 bits, with the top byte of the
+    /// same word reserved for padding length.
+    public static let maxBodyLength = 0x00FF_FFFF
+
     public func encoded() -> Data {
+        // A body this large is a programming error, not a runtime condition:
+        // requests carry filenames and small payloads, and bulk data flows the
+        // other way. Without this, an oversized body would silently spill into
+        // the padding byte and emit a corrupt frame.
+        precondition(
+            body.count <= Self.maxBodyLength,
+            "body of \(body.count) bytes exceeds the protocol maximum of \(Self.maxBodyLength)")
+
         var out = Data(capacity: Self.headerSize + body.count)
         out.append(contentsOf: Self.syncMarker)
         out.append(UInt8(truncatingIfNeeded: command >> 8))
@@ -598,7 +642,7 @@ public struct JensenPacket: Sendable, Equatable {
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `swift test --filter JensenPacketTests`
-Expected: PASS, 10 tests
+Expected: PASS, 12 tests
 
 - [ ] **Step 6: Commit**
 
@@ -611,8 +655,6 @@ git commit -m "feat(kit): Jensen packet codec with padding and slice handling"
 
 ### Task 3: Transport seam and JensenDevice actor
 
-The actor's serial executor is what enforces the protocol's single-outstanding-command invariant.
-
 **Files:**
 - Create: `Sources/HiDockKit/USBTransport.swift`
 - Create: `Sources/HiDockKit/JensenDevice.swift`
@@ -621,7 +663,14 @@ The actor's serial executor is what enforces the protocol's single-outstanding-c
 
 **Interfaces:**
 - Consumes: `JensenPacket`, `JensenCommand`, `JensenError`
-- Produces: `protocol USBTransport: Sendable { func open() async throws; func close() async; func write(_: Data) async throws; func read(maxLength: Int, timeout: Duration) async throws -> Data }`, `actor JensenDevice`, `JensenDevice.init(transport:)`, `JensenDevice.send(_: JensenCommand, body: Data, timeout: Duration) async throws -> Data`, `JensenDevice.open()`, `JensenDevice.close()`
+- Produces: `protocol USBTransport: Sendable, Actor { func open() async throws; func close() async; func write(_: Data) async throws; func read(maxLength: Int, timeout: Duration) async throws -> Data }`, `actor JensenDevice`, `JensenDevice.init(transport:)`, `JensenDevice.send(_:body:timeout:) async throws -> Data`, `JensenDevice.open()`, `JensenDevice.close()`, `JensenDevice.drain(maxDuration:)`
+
+#### Two hardware facts this task is built on
+
+Both were measured against a real P1 on 2026-08-04, not assumed.
+
+1. **The device echoes the request sequence.** Sequences `0x00000000`, `0x00000007`, `0x00003039`, and `0xDEADBEEF` all came back byte-identical in the response header. Responses are therefore matched on **(command id, sequence)**, not command id alone. This is what stops a late response from a timed-out command satisfying its own retry.
+2. **An actor does NOT serialize commands.** Swift actors are reentrant: isolation protects state between suspension points, it does not make an `async` method body atomic. Two concurrent callers will both reach `transport.write` before either reads a response, putting two commands on a wire that permits one. Serialization needs the explicit FIFO gate below. Do not delete it on the theory that the actor already covers it — it does not.
 
 - [ ] **Step 1: Write the fake transport**
 
@@ -630,19 +679,34 @@ The actor's serial executor is what enforces the protocol's single-outstanding-c
 import Foundation
 @testable import HiDockKit
 
-/// Scriptable transport. Each written command id maps to the responses the
-/// device would return, popped in order.
+/// Scriptable transport. Responses are keyed by command id and echo the
+/// request's sequence, matching real device behaviour.
 actor FakeTransport: USBTransport {
     struct Script: Sendable {
         var responses: [UInt16: [Data]] = [:]
+        /// Commands the device deliberately never answers.
         var readTimeoutFor: Set<UInt16> = []
+        /// Wall-clock cost of every read. Without this no test can exercise a
+        /// timeout path, which is how a whole class of bugs stayed invisible.
+        var readDelay: Duration = .zero
     }
 
-    private var script: Script
+    private let script: Script
     private var pending: [Data] = []
     private(set) var written: [JensenPacket] = []
     private(set) var openCount = 0
     private(set) var closeCount = 0
+
+    /// Incremented when a command is written while a previous command's
+    /// response is still unread. With the FIFO gate held this is impossible,
+    /// so it is the direct observable for "two commands on the wire at once".
+    /// Without it the gate is untestable through this fake: a FIFO queue hands
+    /// every caller its own response no matter how they interleave.
+    private(set) var overlappingWrites = 0
+
+    /// Largest `timeout` this transport was ever asked to read with. Pins the
+    /// per-read cap directly rather than inferring it from wall clock.
+    private(set) var maxReadTimeoutSeen: Duration = .zero
 
     init(script: Script) { self.script = script }
 
@@ -651,20 +715,39 @@ actor FakeTransport: USBTransport {
 
     func write(_ data: Data) async throws {
         guard case let .packet(p, _) = try JensenPacket.decode(from: data) else { return }
+        if !pending.isEmpty { overlappingWrites += 1 }
         written.append(p)
-        if script.readTimeoutFor.contains(p.command) { return }   // deliberately answer nothing
+        if script.readTimeoutFor.contains(p.command) { return }
         for body in script.responses[p.command] ?? [] {
             pending.append(JensenPacket(command: p.command, sequence: p.sequence, body: body).encoded())
         }
     }
 
+    /// Hands back at most `readSplit` bytes per call, so encoded packets
+    /// genuinely arrive across multiple reads and the device layer has to
+    /// reassemble them. A fake that always returned whole packets would let a
+    /// broken reassembler pass.
+    private static let readSplit = 64
+
     func read(maxLength: Int, timeout: Duration) async throws -> Data {
+        maxReadTimeoutSeen = max(maxReadTimeoutSeen, timeout)
+        if script.readDelay > .zero {
+            try? await Task.sleep(for: min(script.readDelay, timeout))
+        }
         guard !pending.isEmpty else { return Data() }
-        return pending.removeFirst()
+        let next = pending.removeFirst()
+        guard next.count > Self.readSplit else { return next }
+        pending.insert(next.dropFirst(Self.readSplit), at: 0)
+        return Data(next.prefix(Self.readSplit))
     }
 
-    /// Queue an unsolicited packet, simulating a late response arriving after a timeout.
-    func injectStrayResponse(command: UInt16, sequence: UInt32, body: Data) {
+    /// Queue an unsolicited packet, simulating a response that arrives after
+    /// its command already timed out. `delay` defers it so the late-arrival
+    /// case is exercised rather than the trivially-already-queued one.
+    func injectStrayResponse(
+        command: UInt16, sequence: UInt32, body: Data, after delay: Duration = .zero
+    ) async {
+        if delay > .zero { try? await Task.sleep(for: delay) }
         pending.append(JensenPacket(command: command, sequence: sequence, body: body).encoded())
     }
 }
@@ -682,8 +765,7 @@ import Testing
     let t = FakeTransport(script: .init(responses: [1: [Data([0xAB])]]))
     let device = JensenDevice(transport: t)
     try await device.open()
-    let body = try await device.send(.getDeviceInfo)
-    #expect(body == Data([0xAB]))
+    #expect(try await device.send(.getDeviceInfo) == Data([0xAB]))
 }
 
 @Test func sequenceNumbersIncrementPerCommand() async throws {
@@ -692,18 +774,16 @@ import Testing
     try await device.open()
     _ = try await device.send(.getDeviceInfo)
     _ = try await device.send(.getFileCount)
-    let written = await t.written
-    #expect(written.map(\.sequence) == [0, 1])
+    #expect(await t.written.map(\.sequence) == [0, 1])
 }
 
 @Test func reassemblesBodySplitAcrossReads() async throws {
-    // A response whose body is large enough that the fake returns it whole,
-    // but the device concatenates two packets into the same buffer.
+    // FakeTransport hands back 64 bytes per read, so this 300-byte body
+    // arrives across five reads and must be reassembled.
     let t = FakeTransport(script: .init(responses: [4: [Data(repeating: 0x7, count: 300)]]))
     let device = JensenDevice(transport: t)
     try await device.open()
-    let body = try await device.send(.getFileList)
-    #expect(body.count == 300)
+    #expect(try await device.send(.getFileList).count == 300)
 }
 
 @Test func timesOutWhenDeviceNeverAnswers() async throws {
@@ -711,38 +791,113 @@ import Testing
     let device = JensenDevice(transport: t)
     try await device.open()
     await #expect(throws: JensenError.timeout(command: 1)) {
-        _ = try await device.send(.getDeviceInfo, timeout: .milliseconds(50))
+        _ = try await device.send(.getDeviceInfo, timeout: .milliseconds(100))
     }
 }
 
-/// After a timeout the IN endpoint must be drained, or a late response
-/// would be matched against the *next* command and desync everything.
-@Test func drainsStrayResponseAfterTimeout() async throws {
+/// Pins the per-read cap directly. A wall-clock assertion cannot tell the fix
+/// from the bug: reverting to a full-budget read timeout leaves elapsed time
+/// unchanged on the common path, so an elapsed bound passes either way. What
+/// matters is the value actually handed to the transport.
+@Test func perReadTimeoutNeverExceedsTheCap() async throws {
+    let t = FakeTransport(script: .init(
+        responses: [:], readTimeoutFor: [1], readDelay: .milliseconds(400)))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    _ = try? await device.send(.getDeviceInfo, timeout: .seconds(5))
+    #expect(await t.maxReadTimeoutSeen <= .milliseconds(250))
+}
+
+/// A timed-out command must return rather than hang. The bound is generous on
+/// purpose: elapsed time legitimately exceeds the command timeout, because the
+/// error path then drains for three 50 ms quiet windows. That drain is required
+/// by C3/I1. This test documents its cost; it does NOT claim the timeout is an
+/// upper bound on elapsed time.
+@Test func timedOutCommandReturnsWithoutHanging() async throws {
+    let t = FakeTransport(script: .init(
+        responses: [:], readTimeoutFor: [1], readDelay: .milliseconds(400)))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    let start = ContinuousClock.now
+    _ = try? await device.send(.getDeviceInfo, timeout: .milliseconds(300))
+    #expect(ContinuousClock.now - start < .seconds(2))
+}
+
+/// A buffered reply whose command id matches but whose sequence does not is a
+/// leftover from a command that already timed out. It must be skipped rather
+/// than returned, and the scan must continue on to the real answer.
+///
+/// Sequence 99 is deliberately one this device never issues in this test. Do
+/// NOT inject a stray carrying the same sequence the next command will use:
+/// that is a genuine collision no matching scheme can resolve, and it models
+/// nothing real, since a retry always advances the sequence.
+@Test func staleResponseWithWrongSequenceIsSkipped() async throws {
+    let t = FakeTransport(script: .init(responses: [1: [Data([0x22])]]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    await t.injectStrayResponse(command: 1, sequence: 99, body: Data([0x11]))
+    let body = try await device.send(.getDeviceInfo, timeout: .seconds(1))
+    #expect(body == Data([0x22]))          // never the stale 0x11
+}
+
+/// A timeout must not strand a partial packet in the buffer. A stranded
+/// header's declared length would swallow every subsequent response, and
+/// because its sync marker is intact `invalidHeader` never fires to clear it.
+@Test func timeoutClearsBufferSoTheNextCommandSucceeds() async throws {
     let t = FakeTransport(script: .init(responses: [6: [Data([0, 0, 0, 3])]], readTimeoutFor: [1]))
     let device = JensenDevice(transport: t)
     try await device.open()
 
-    _ = try? await device.send(.getDeviceInfo, timeout: .milliseconds(50))
-    await t.injectStrayResponse(command: 1, sequence: 0, body: Data([0xDE, 0xAD]))
-    await device.drain()
+    await t.injectStrayResponse(command: 1, sequence: 0, body: Data(repeating: 0xEE, count: 40))
+    _ = try? await device.send(.getDeviceInfo, timeout: .milliseconds(100))
 
-    let body = try await device.send(.getFileCount)
-    #expect(body == Data([0, 0, 0, 3]))          // not the stray 0xDEAD
+    #expect(try await device.send(.getFileCount) == Data([0, 0, 0, 3]))
 }
 
-@Test func concurrentCallersAreSerialized() async throws {
-    let t = FakeTransport(script: .init(responses: [1: [Data([1])], 6: [Data([2])], 16: [Data([3])]]))
+/// drain() exists to catch a response that arrives LATE. Exiting on the first
+/// empty read misses exactly that case, because an empty read means "nothing
+/// in the last 50 ms", not "the endpoint is empty".
+@Test func drainConsumesALateArrivingResponse() async throws {
+    let t = FakeTransport(script: .init(responses: [6: [Data([0, 0, 0, 9])]]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    async let late: Void = t.injectStrayResponse(
+        command: 1, sequence: 0, body: Data([0xDE]), after: .milliseconds(120))
+    await device.drain(maxDuration: .milliseconds(600))
+    await late
+
+    #expect(try await device.send(.getFileCount) == Data([0, 0, 0, 9]))
+}
+
+/// Actors are reentrant, so this pins the property the explicit gate provides:
+/// every caller receives its OWN command's response, and no two commands are
+/// on the wire at once.
+@Test func concurrentCallersEachReceiveTheirOwnResponse() async throws {
+    let t = FakeTransport(script: .init(
+        responses: [1: [Data([0x11])], 6: [Data([0x66])], 16: [Data([0x16])]]))
     let device = JensenDevice(transport: t)
     try await device.open()
 
     async let a = device.send(.getDeviceInfo)
     async let b = device.send(.getFileCount)
     async let c = device.send(.getCardInfo)
-    _ = try await (a, b, c)
+    let (ra, rb, rc) = try await (a, b, c)
 
-    let written = await t.written
-    #expect(written.count == 3)
-    #expect(Set(written.map(\.sequence)) == [0, 1, 2])   // no reuse
+    #expect(ra == Data([0x11]))
+    #expect(rb == Data([0x66]))
+    #expect(rc == Data([0x16]))
+    #expect(await t.written.count == 3)
+    #expect(Set(await t.written.map(\.sequence)).count == 3)
+
+    // The load-bearing assertion. Response correctness alone does not prove
+    // serialization -- the fake's FIFO queue satisfies it even with the gate
+    // removed. Overlapping writes are the direct observable, and reach zero
+    // only when exactly one command is ever on the wire.
+    #expect(await t.overlappingWrites == 0)
 }
 
 @Test func openAndCloseForwardToTransport() async throws {
@@ -770,6 +925,7 @@ public protocol USBTransport: Sendable, Actor {
     func close() async
     func write(_ data: Data) async throws
     /// Returns an empty Data when nothing arrived before the timeout.
+    /// Empty means "nothing in this window", NOT "the endpoint is empty".
     func read(maxLength: Int, timeout: Duration) async throws -> Data
 }
 ```
@@ -784,9 +940,14 @@ public actor JensenDevice {
     private var sequence: UInt32 = 0
     private var buffer = Data()
 
-    /// Bulk reads are capped at this size. The device streams file data in
-    /// chunks well under this, and oversizing costs nothing but a temp buffer.
+    // FIFO gate. Swift actors are reentrant, so actor isolation alone does NOT
+    // keep one command on the wire at a time — a caller suspended at
+    // `transport.write` releases the actor and lets the next caller in.
+    private var isBusy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+
     private static let readChunk = 64 * 1024
+    private static let maxReadWindow = Duration.milliseconds(250)
 
     public init(transport: any USBTransport) {
         self.transport = transport
@@ -800,10 +961,28 @@ public actor JensenDevice {
         try? await Task.sleep(for: .milliseconds(300))
     }
 
+    /// Takes the gate. Closing while a command is in flight tears down the USB
+    /// user client under a blocking transfer on another thread.
     public func close() async {
+        await acquire()
+        defer { release() }
         await transport.close()
         buffer.removeAll(keepingCapacity: true)
+        sequence = 0
     }
+
+    // MARK: - Serialization
+
+    private func acquire() async {
+        guard isBusy else { isBusy = true; return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    private func release() {
+        if waiters.isEmpty { isBusy = false } else { waiters.removeFirst().resume() }
+    }
+
+    // MARK: - Commands
 
     @discardableResult
     public func send(
@@ -815,35 +994,66 @@ public actor JensenDevice {
     }
 
     func sendRaw(_ command: UInt16, body: Data, timeout: Duration) async throws -> Data {
-        let seq = sequence
-        sequence &+= 1
-        try await transport.write(
-            JensenPacket(command: command, sequence: seq, body: body).encoded())
-        return try await awaitResponse(command: command, timeout: timeout)
+        await acquire()
+        defer { release() }
+        return try await perform(command: command, body: body, timeout: timeout)
     }
 
-    /// Reads until a packet whose command id matches arrives, or the deadline passes.
-    /// Packets for other commands are discarded as stale.
-    private func awaitResponse(command: UInt16, timeout: Duration) async throws -> Data {
-        let deadline = ContinuousClock.now.advanced(by: timeout)
-
-        while true {
-            if let packet = try takeBufferedPacket(matching: command) { return packet }
-
-            guard ContinuousClock.now < deadline else {
-                throw JensenError.timeout(command: command)
-            }
-
-            let chunk = try await transport.read(maxLength: Self.readChunk, timeout: timeout)
-            if chunk.isEmpty {
-                try await Task.sleep(for: .milliseconds(5))
-                continue
-            }
-            buffer.append(chunk)
+    /// Caller must already hold the gate.
+    ///
+    /// Deliberately does NOT drain before writing. `drain` issues a read with a
+    /// 50 ms timeout before re-checking its own deadline, so even a 1 ms budget
+    /// blocks for up to 50 ms against a quiet endpoint — on every command. The
+    /// endpoint is left clean by the error path below instead.
+    private func perform(command: UInt16, body: Data, timeout: Duration) async throws -> Data {
+        let seq = sequence
+        sequence &+= 1
+        do {
+            try await transport.write(
+                JensenPacket(command: command, sequence: seq, body: body).encoded())
+            return try await awaitResponse(command: command, sequence: seq, timeout: timeout)
+        } catch {
+            // A failed command must leave nothing behind: a stranded partial
+            // packet would swallow the next response, and a late reply would
+            // be waiting on the endpoint for whoever comes next.
+            buffer.removeAll(keepingCapacity: true)
+            await drainLocked(maxDuration: .milliseconds(500))
+            throw error
         }
     }
 
-    private func takeBufferedPacket(matching command: UInt16) throws -> Data? {
+    /// Matches on (command, sequence). The device echoes the request sequence,
+    /// verified on hardware, so a stale reply to an abandoned command is
+    /// distinguishable from the answer to its retry.
+    private func awaitResponse(
+        command: UInt16, sequence expected: UInt32, timeout: Duration
+    ) async throws -> Data {
+        let deadline = ContinuousClock.now.advanced(by: timeout)
+
+        while true {
+            if let body = try takeBufferedPacket(command: command, sequence: expected) {
+                return body
+            }
+
+            let remaining = ContinuousClock.now.duration(to: deadline)
+            guard remaining > .zero else { throw JensenError.timeout(command: command) }
+
+            // Never read for longer than the command has left, or the call
+            // could run to roughly twice its stated timeout.
+            let chunk = try await transport.read(
+                maxLength: Self.readChunk, timeout: min(remaining, Self.maxReadWindow))
+            if chunk.isEmpty {
+                // Deliberately `try`, not `try?`. Swallowing cancellation here
+                // strips the backoff and spins this loop while holding the gate
+                // until the deadline.
+                try await Task.sleep(for: .milliseconds(5))
+            } else {
+                buffer.append(chunk)
+            }
+        }
+    }
+
+    private func takeBufferedPacket(command: UInt16, sequence expected: UInt32) throws -> Data? {
         while !buffer.isEmpty {
             let result: JensenPacket.DecodeResult
             do {
@@ -856,21 +1066,39 @@ public actor JensenDevice {
 
             guard case let .packet(packet, consumed) = result else { return nil }
             buffer.removeFirst(consumed)
-            if packet.command == command { return packet.body }
-            // else: stale response for an earlier command, drop it and keep looking
+            if packet.command == command && packet.sequence == expected { return packet.body }
+            // else: a reply to an abandoned command. Drop it and keep looking.
         }
         return nil
     }
 
     /// Reads and discards anything still queued on the IN endpoint.
-    /// Must be called after a timeout before issuing the next command.
+    ///
+    /// Requires several consecutive quiet windows rather than one, because a
+    /// single empty read only means nothing arrived in the last 50 ms. The
+    /// response this exists to catch is precisely the one that arrives late.
     public func drain(maxDuration: Duration = .milliseconds(500)) async {
+        await acquire()
+        defer { release() }
+        await drainLocked(maxDuration: maxDuration)
+    }
+
+    /// Caller must already hold the gate. `perform`'s error path calls this
+    /// directly, since it is still inside its own gated section.
+    private func drainLocked(maxDuration: Duration) async {
         buffer.removeAll(keepingCapacity: true)
         let deadline = ContinuousClock.now.advanced(by: maxDuration)
+        var consecutiveEmpty = 0
+
         while ContinuousClock.now < deadline {
-            guard let chunk = try? await transport.read(
-                maxLength: Self.readChunk, timeout: .milliseconds(50)),
-                  !chunk.isEmpty else { return }
+            let chunk = (try? await transport.read(
+                maxLength: Self.readChunk, timeout: .milliseconds(50))) ?? Data()
+            if chunk.isEmpty {
+                consecutiveEmpty += 1
+                if consecutiveEmpty >= 3 { return }
+            } else {
+                consecutiveEmpty = 0
+            }
         }
     }
 }
@@ -879,13 +1107,13 @@ public actor JensenDevice {
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `swift test --filter JensenDeviceTests`
-Expected: PASS, 7 tests
+Expected: PASS, 10 tests
 
 - [ ] **Step 7: Commit**
 
 ```bash
 git add Sources/HiDockKit/USBTransport.swift Sources/HiDockKit/JensenDevice.swift Tests/HiDockKitTests/FakeTransport.swift Tests/HiDockKitTests/JensenDeviceTests.swift
-git commit -m "feat(kit): USBTransport seam and JensenDevice actor with drain-after-timeout"
+git commit -m "feat(kit): USBTransport seam and JensenDevice with FIFO command gate"
 ```
 
 ---
@@ -930,25 +1158,45 @@ public actor IOUSBHostTransport: USBTransport {
         return IOUSBHostTransport(service: first)
     }
 
+    /// Correct and required, not a double-release. IOUSBHostObject's header
+    /// states it "will keep a reference to the io_service_t and release it
+    /// after the IOUSBHostObject has been released" — the init borrows, it
+    /// does not consume. The caller's own reference is still the caller's to
+    /// free. Verified against the SDK header 2026-08-04. Do not remove.
     deinit {
         IOObjectRelease(service)
     }
 
     public func open() async throws {
         guard interface == nil else { return }
+        var claimed: IOUSBHostInterface?
         do {
             let iface = try IOUSBHostInterface(
                 __ioService: service, options: [], queue: nil, interestHandler: nil)
+            claimed = iface
             try iface.selectAlternateSetting(0)
             self.outPipe = try iface.copyPipe(withAddress: Self.endpointOut)
             self.inPipe = try iface.copyPipe(withAddress: Self.endpointIn)
             self.interface = iface
         } catch {
+            // A pipe holds a STRONG reference to its interface. An orphaned pipe
+            // therefore keeps the exclusive IOService claim alive, and every
+            // later open() fails with "user client already created" for the rest
+            // of the process lifetime. Tear it down explicitly.
+            outPipe = nil
+            inPipe = nil
+            claimed?.destroy()
+            interface = nil
             throw JensenError.interfaceUnavailable(String(describing: error))
         }
     }
 
     public func close() async {
+        // Abort synchronously BEFORE destroy. destroy() tears down the user
+        // client, and a blocking __sendIORequest outstanding against these pipes
+        // would then be operating on a connection that no longer exists.
+        if let outPipe { try? outPipe.__abort(with: .synchronous) }
+        if let inPipe { try? inPipe.__abort(with: .synchronous) }
         outPipe = nil
         inPipe = nil
         interface?.destroy()
@@ -972,6 +1220,19 @@ public actor IOUSBHostTransport: USBTransport {
         return Data(bytes: buffer.bytes, count: transferred)
     }
 
+    /// Carries the pipe and buffer into the detached closure.
+    ///
+    /// The `buffer` is genuinely exclusive: a fresh `NSMutableData` is allocated
+    /// per call, never stored in actor state, and read only after the
+    /// continuation resumes. The `pipe` is NOT exclusive — it is actor state
+    /// that `close()` also reaches. Safety therefore rests on `close()` aborting
+    /// both pipes before `destroy()`, and on `JensenDevice.close()` holding the
+    /// FIFO gate so no transfer is in flight when it runs.
+    private struct UncheckedSendableBox: @unchecked Sendable {
+        let pipe: IOUSBHostPipe
+        let buffer: NSMutableData
+    }
+
     /// `__sendIORequest` blocks the calling thread, so it runs off the actor.
     @discardableResult
     private static func transfer(
@@ -980,20 +1241,29 @@ public actor IOUSBHostTransport: USBTransport {
         timeout: TimeInterval,
         toleratesTimeout: Bool = false
     ) async throws -> Int {
-        try await withCheckedThrowingContinuation { continuation in
+        let box = UncheckedSendableBox(pipe: pipe, buffer: buffer)
+        return try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
                 var transferred = 0
                 do {
-                    try pipe.__sendIORequest(
-                        with: buffer, bytesTransferred: &transferred, completionTimeout: timeout)
+                    try box.pipe.__sendIORequest(
+                        with: box.buffer, bytesTransferred: &transferred,
+                        completionTimeout: timeout)
                     continuation.resume(returning: transferred)
                 } catch {
-                    // A read that simply had nothing waiting is not an error.
-                    if toleratesTimeout {
-                        continuation.resume(returning: 0)
-                    } else {
+                    // ONLY a genuine timeout means "nothing arrived". Anything
+                    // else — kIOReturnNoDevice on unplug, a stalled pipe — must
+                    // propagate, or an absent device reads as a merely idle one
+                    // and every command spins out its full budget before failing.
+                    guard toleratesTimeout,
+                          (error as NSError).code == kIOReturnTimeout else {
                         continuation.resume(throwing: error)
+                        return
                     }
+                    // Bytes already moved off the endpoint are consumed even on a
+                    // timeout. Reporting 0 would silently discard them and desync
+                    // the stream.
+                    continuation.resume(returning: transferred)
                 }
             }
         }
@@ -1015,10 +1285,13 @@ case "info":
     let transport = try IOUSBHostTransport.openFirstAvailable()
     let device = JensenDevice(transport: transport)
     try await device.open()
-    defer { Task { await device.close() } }
+
 
     let body = try await device.send(.getDeviceInfo, timeout: .seconds(5))
     print("device info body (\(body.count) bytes): \(body.map { String(format: "%02x", $0) }.joined())")
+    // Awaited, not `defer { Task { ... } }` — the process exits before a
+    // detached task runs, so destroy() would never execute.
+    await device.close()
     print("INFO OK")
 
 default:
@@ -1095,7 +1368,7 @@ private func fileListEntry(
     return d
 }
 
-@Test func parsesDeviceInfo() throws {
+@Test func parsesDeviceInfoWithPaddedSerial() throws {
     var body = Data([0x00, 0x01, 0x04, 0x03])               // version
     body.append(contentsOf: Array("SN12345".utf8))
     body.append(contentsOf: [UInt8](repeating: 0, count: 16 - 7))
@@ -1103,6 +1376,22 @@ private func fileListEntry(
     #expect(info.versionCode == "1.4.3")
     #expect(info.versionNumber == 0x00010403)
     #expect(info.serialNumber == "SN12345")
+}
+
+/// Golden case captured from a real HiDock P1 on firmware 1.4.5, 2026-08-04.
+/// The body is 17 bytes: a 13-character serial with no padding, NOT the
+/// 16-byte padded field the reference implementations assume. Requiring 20
+/// bytes here would throw shortBody on every connect to real hardware.
+@Test func parsesDeviceInfoFromRealHardware() throws {
+    let body = Data([
+        0x00, 0x01, 0x04, 0x05,
+        0x48, 0x44, 0x50, 0x31, 0x32, 0x35, 0x34, 0x35, 0x30, 0x36, 0x30, 0x32, 0x37,
+    ])
+    #expect(body.count == 17)
+    let info = try ResponseParsers.deviceInfo(body)
+    #expect(info.versionCode == "1.4.5")
+    #expect(info.versionNumber == 0x00010405)
+    #expect(info.serialNumber == "HDP1254506027")
 }
 
 @Test func deviceInfoThrowsOnShortBody() {
@@ -1150,7 +1439,50 @@ private func fileListEntry(
     d.append(contentsOf: [UInt8](repeating: 0, count: 6))
     d.append(contentsOf: [UInt8](repeating: 0xCC, count: 16))
     let result = try ResponseParsers.fileList(d)
+    // Assert the count first: indexing straight into [0] would TRAP the whole
+    // suite on a regression to zero entries instead of failing this one test.
+    try #require(result.files.count == 1)
     #expect(result.files[0].name == "a.mp3")
+}
+
+/// Real filenames captured from a P1 on firmware 1.4.5, 2026-08-04.
+@Test func hdaRecordingsAreRenamedToMp3() {
+    let f = FileInfo(name: "2026Aug04-135302-Wip02.hda", lengthBytes: 53568,
+                     signature: "c74e0ac92b1708ddd40045f6b938d75c", version: 5, recordedAt: nil)
+    #expect(f.preferredExtension == "mp3")
+}
+
+@Test func nonHdaExtensionsArePreserved() {
+    for (name, expected) in [("a.mp3", "mp3"), ("b.WAV", "wav"), ("c.hda", "mp3")] {
+        let f = FileInfo(name: name, lengthBytes: 1, signature: "s", version: 1, recordedAt: nil)
+        #expect(f.preferredExtension == expected)
+    }
+}
+
+/// Golden case from real hardware, 2026-08-04: body `20 26 08 04 14 04 27`
+/// captured at local wall clock 14:04:28.
+@Test func parsesDeviceTimeFromRealHardware() throws {
+    let body = Data([0x20, 0x26, 0x08, 0x04, 0x14, 0x04, 0x27])
+    let date = try #require(ResponseParsers.deviceTime(body))
+    let c = Calendar.current.dateComponents(
+        [.year, .month, .day, .hour, .minute, .second], from: date)
+    #expect(c.year == 2026 && c.month == 8 && c.day == 4)
+    #expect(c.hour == 14 && c.minute == 4 && c.second == 27)
+}
+
+/// Reading those same bytes as binary rather than BCD gives hour 20 and
+/// second 39. This pins the distinction.
+@Test func deviceTimeDecodesBcdNotBinary() throws {
+    let date = try #require(
+        ResponseParsers.deviceTime(Data([0x20, 0x26, 0x08, 0x04, 0x14, 0x04, 0x27])))
+    let c = Calendar.current.dateComponents([.hour, .second], from: date)
+    #expect(c.hour != 20)
+    #expect(c.second != 39)
+}
+
+@Test func deviceTimeRejectsInvalidBcdAndShortBodies() {
+    #expect(ResponseParsers.deviceTime(Data([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])) == nil)
+    #expect(ResponseParsers.deviceTime(Data([0x20, 0x26])) == nil)
 }
 
 @Test func parsesCardInfo() throws {
@@ -1212,6 +1544,21 @@ public struct CardInfo: Sendable, Equatable {
 
     public var usedMiB: Int { max(0, capacityMiB - freeMiB) }
 }
+
+extension FileInfo {
+    /// The device names its MP3 recordings `.hda`, but the bytes are plain
+    /// MPEG-1 Layer III. Verified on hardware 2026-08-04: a pulled `.hda`
+    /// de-frames to exactly the device-reported length and `afinfo` reports
+    /// `1 ch, 48000 Hz, .mp3`, 96 kbps, with a correct duration.
+    ///
+    /// Nothing is transcoded and no header is wrapped — ONLY the extension is
+    /// corrected, so Finder, QuickLook and AVURLAsset can all read the file.
+    /// The original device filename is preserved in the sidecar.
+    public var preferredExtension: String {
+        let raw = (name as NSString).pathExtension.lowercased()
+        return raw == "hda" ? "mp3" : raw
+    }
+}
 ```
 
 - [ ] **Step 4: Write `ResponseParsers.swift`**
@@ -1222,14 +1569,58 @@ import Foundation
 public enum ResponseParsers {
 
     public static func deviceInfo(_ body: Data) throws -> DeviceInfo {
-        guard body.count >= 20 else {
-            throw JensenError.shortBody(command: 1, expected: 20, got: body.count)
+        // 4 version bytes plus a serial of at least one character.
+        //
+        // The reference implementations assume a fixed 16-byte serial field
+        // (20 bytes total). A real P1 on firmware 1.4.5 returns a 13-character
+        // serial with NO padding, so the body is 17 bytes. Requiring 20 would
+        // throw shortBody on every connect. Measured 2026-08-04.
+        guard body.count >= 5 else {
+            throw JensenError.shortBody(command: 1, expected: 5, got: body.count)
         }
         let b = [UInt8](body)
         let versionNumber = UInt32(b[0]) << 24 | UInt32(b[1]) << 16 | UInt32(b[2]) << 8 | UInt32(b[3])
         let versionCode = "\(b[1]).\(b[2]).\(b[3])"
-        let serial = String(decoding: b[4..<20].filter { $0 > 0 }, as: UTF8.self)
+        // Truncate at the first NUL rather than filtering all zero bytes out:
+        // filtering would splice trailing junk onto the serial instead of
+        // ending it at the terminator.
+        let serial = String(decoding: b[4...].prefix(while: { $0 > 0 }), as: UTF8.self)
         return DeviceInfo(versionCode: versionCode, versionNumber: versionNumber, serialNumber: serial)
+    }
+
+    /// The device clock, BCD-encoded.
+    ///
+    /// Verified against hardware 2026-08-04: body `20 26 08 04 14 04 27` was
+    /// read at local wall clock 14:04:28, one second of read latency apart.
+    /// Each byte carries two BCD digits, so 0x14 is 14, not 20. Reading these
+    /// bytes as plain binary yields year 8230, hour 20, second 39 — which is
+    /// exactly what the original guessed parser produced.
+    ///
+    /// READ ONLY. Do NOT infer that SET_DEVICE_TIME accepts the same layout.
+    /// That is an assumption, and writing a wrong one corrupts the clock that
+    /// names every recording.
+    public static func deviceTime(_ body: Data) -> Date? {
+        guard body.count >= 7 else { return nil }
+        let b = [UInt8](body)
+
+        func bcd(_ v: UInt8) -> Int? {
+            let hi = Int(v >> 4), lo = Int(v & 0x0F)
+            guard hi <= 9, lo <= 9 else { return nil }   // not valid BCD
+            return hi * 10 + lo
+        }
+
+        guard let century = bcd(b[0]), let yearInCentury = bcd(b[1]),
+              let month = bcd(b[2]), let day = bcd(b[3]),
+              let hour = bcd(b[4]), let minute = bcd(b[5]),
+              let second = bcd(b[6]) else { return nil }
+
+        let year = century * 100 + yearInCentury
+        guard (2020...2100).contains(year) else { return nil }
+
+        var c = DateComponents()
+        c.year = year; c.month = month; c.day = day
+        c.hour = hour; c.minute = minute; c.second = second
+        return Calendar.current.date(from: c)
     }
 
     public static func cardInfo(_ body: Data) throws -> CardInfo {
@@ -1255,25 +1646,24 @@ public enum ResponseParsers {
         }
 
         while pos < b.count {
-            let start = pos
             guard pos + 4 <= b.count else { break }
             let version = b[pos]; pos += 1
 
             let nameLength = Int(b[pos]) << 16 | Int(b[pos + 1]) << 8 | Int(b[pos + 2])
             pos += 3
 
-            guard pos + nameLength <= b.count else { pos = start; break }
+            guard pos + nameLength <= b.count else { break }
             let name = String(decoding: b[pos ..< pos + nameLength].filter { $0 > 0 }, as: UTF8.self)
             pos += nameLength
 
-            guard pos + 4 <= b.count else { pos = start; break }
+            guard pos + 4 <= b.count else { break }
             let length = Int(b[pos]) << 24 | Int(b[pos + 1]) << 16 | Int(b[pos + 2]) << 8 | Int(b[pos + 3])
             pos += 4
 
-            guard pos + 6 <= b.count else { pos = start; break }
+            guard pos + 6 <= b.count else { break }
             pos += 6                                        // padding
 
-            guard pos + 16 <= b.count else { pos = start; break }
+            guard pos + 16 <= b.count else { break }
             let signature = b[pos ..< pos + 16].map { String(format: "%02x", $0) }.joined()
             pos += 16
 
@@ -1307,9 +1697,14 @@ public enum ResponseParsers {
     }
 
     /// e.g. 20260804143022REC001.wav
+    ///
+    /// Anchored to the start of the name. Unanchored, `firstMatch` would take
+    /// the first 12-digit run anywhere in the filename, so a name carrying an
+    /// unrelated digit run ahead of the timestamp would silently misfile the
+    /// recording by parsing the wrong instant.
     private static func parseNumericForm(_ s: String) -> Date? {
-        let pattern = /(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/
-        guard let m = s.firstMatch(of: pattern) else { return nil }
+        let pattern = /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})/
+        guard let m = s.prefixMatch(of: pattern) else { return nil }
         return makeDate(year: Int(m.1), month: Int(m.2), day: Int(m.3),
                         hour: Int(m.4), minute: Int(m.5), second: Int(m.6))
     }
@@ -1354,7 +1749,7 @@ Append inside the actor:
 - [ ] **Step 6: Run tests to verify they pass**
 
 Run: `swift test --filter ResponseParserTests`
-Expected: PASS, 11 tests
+Expected: PASS, 16 tests
 
 - [ ] **Step 7: Add the `list` command to the CLI**
 
@@ -1365,10 +1760,19 @@ case "list":
     let transport = try IOUSBHostTransport.openFirstAvailable()
     let device = JensenDevice(transport: transport)
     try await device.open()
-    defer { Task { await device.close() } }
+
 
     let info = try await device.deviceInfo()
     print("firmware \(info.versionCode)  serial \(info.serialNumber)")
+
+    // The GET_DEVICE_TIME body layout is NOT documented in either reference
+    // implementation. Dump it raw so the real format can be read off the
+    // device before anything ever writes SET_DEVICE_TIME.
+    if let timeBody = try? await device.send(.getDeviceTime, timeout: .seconds(5)) {
+        let hex = timeBody.map { String(format: "%02x", $0) }.joined(separator: " ")
+        print("device time body (\(timeBody.count) bytes): \(hex)")
+        print("  ^ compare against the wall clock now: \(Date())")
+    }
 
     let card = try await device.cardInfo()
     print("storage: \(card.usedMiB) MiB used of \(card.capacityMiB) MiB")
@@ -1390,7 +1794,12 @@ Update the usage string to `[probe|info|list]`.
 Run: `swift run hidock-cli list`
 Expected: `LIST OK`, firmware version matching the device, and one line per recording.
 
-Record the observed file extensions. **If any file ends in `.hda`, stop and report** — the spec's fallback applies and a WAV-header wrapper must be added to this task.
+Record the observed file extensions. **`.hda` is expected and already handled.** Confirmed
+on hardware 2026-08-04: `.hda` payloads are plain MPEG-1 Layer III (96 kbps, 48 kHz mono),
+so `FileInfo.preferredExtension` maps them to `.mp3` and nothing is transcoded. If you see
+an extension that is neither `.hda`, `.mp3` nor `.wav`, stop and report that.
+
+**Also record the `device time body` hex line verbatim in the task report.** Its layout is unverified, and Task 10 deliberately never writes the clock until it is confirmed against these real bytes.
 
 - [ ] **Step 9: Commit**
 
@@ -1466,14 +1875,70 @@ private func makeFile(length: Int) -> FileInfo {
     #expect(box.seen.count >= 2)
 }
 
+/// The gate must be released even when a transfer fails, or the device wedges
+/// permanently. Also the regression test for transferFile calling the GATED
+/// public drain() instead of drainLocked — that self-deadlocks, and this test
+/// would hang rather than fail.
+@Test func gateSurvivesAFailedTransfer() async throws {
+    let t = FakeTransport(script: .init(responses: [
+        5: [Data(repeating: 1, count: 100)],
+        1: [Data(repeating: 0, count: 20)],
+    ]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    _ = try? await device.transferFile(
+        makeFile(length: 1000), to: url, chunkTimeout: .milliseconds(200)) { _, _ in }
+
+    // Any gated command completing proves the gate came back.
+    #expect(try await device.send(.getDeviceInfo, timeout: .seconds(2)).count == 20)
+}
+
+/// A failed transfer must not destroy a good file already at the destination.
+@Test func failedTransferLeavesAnExistingFileIntact() async throws {
+    let t = FakeTransport(script: .init(responses: [5: [Data(repeating: 1, count: 100)]]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let original = Data("already here".utf8)
+    try original.write(to: url)
+
+    _ = try? await device.transferFile(
+        makeFile(length: 1000), to: url, chunkTimeout: .milliseconds(200)) { _, _ in }
+
+    #expect(try Data(contentsOf: url) == original)
+}
+
+/// A device sending more than it advertised must not overflow the file.
+@Test func overLongStreamIsClampedToTheAdvertisedLength() async throws {
+    let t = FakeTransport(script: .init(responses: [5: [Data(repeating: 9, count: 500)]]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    try await device.transferFile(
+        makeFile(length: 200), to: url, chunkTimeout: .seconds(2)) { _, _ in }
+
+    #expect(try Data(contentsOf: url).count == 200)
+}
+
 @Test func transferThrowsAndRemovesPartialOnShortStream() async throws {
     let t = FakeTransport(script: .init(responses: [5: [Data(repeating: 1, count: 100)]]))
     let device = JensenDevice(transport: t)
     try await device.open()
 
     let url = tempURL()
+    // Pass a short chunkTimeout explicitly. The default is 30 s, and this test
+    // deliberately starves the stream, so it would otherwise sit out the whole
+    // deadline -- a 30-second unit test that slows every later task's run.
     await #expect(throws: JensenError.transferIncomplete(expected: 1000, got: 100)) {
-        try await device.transferFile(makeFile(length: 1000), to: url) { _, _ in }
+        try await device.transferFile(
+            makeFile(length: 1000), to: url, chunkTimeout: .milliseconds(200)) { _, _ in }
     }
     #expect(FileManager.default.fileExists(atPath: url.path) == false)
 }
@@ -1490,45 +1955,64 @@ Append inside the actor:
 
 ```swift
     /// Streams a recording to `url`. Never buffers the whole file in memory.
-    /// Throws `transferIncomplete` and deletes the partial file if the byte
-    /// count does not match what the device reported.
+    ///
+    /// Contract: on return, either `url` holds the complete, length-verified
+    /// recording, or `url` is exactly as it was before the call. Bytes land in
+    /// a sibling `.part` file and are moved into place only after verification,
+    /// so an interrupted transfer can neither destroy a good file already at
+    /// the destination nor leave a truncated one where a library scan would
+    /// mistake it for complete.
     public func transferFile(
         _ file: FileInfo,
         to url: URL,
         chunkTimeout: Duration = .seconds(30),
         progress: @Sendable (Int, Int) -> Void
     ) async throws {
+        await acquire()
+        defer { release() }
+
         let fm = FileManager.default
-        try? fm.removeItem(at: url)
-        fm.createFile(atPath: url.path, contents: nil)
-        guard let handle = try? FileHandle(forWritingTo: url) else {
-            throw JensenError.interfaceUnavailable("cannot open \(url.path) for writing")
+        let staging = url.appendingPathExtension("part")
+        try? fm.removeItem(at: staging)
+        guard fm.createFile(atPath: staging.path, contents: nil),
+              let handle = try? FileHandle(forWritingTo: staging) else {
+            throw JensenError.fileWriteFailed(staging.path)
         }
 
+        let seq = sequence
+        sequence &+= 1
         var received = 0
         var failure: (any Error)?
 
         do {
-            let seq = sequence
-            sequence &+= 1
-            let body = Data(file.name.utf8)
             try await transport.write(
                 JensenPacket(command: JensenCommand.transferFile.rawValue,
-                             sequence: seq, body: body).encoded())
+                             sequence: seq, body: Data(file.name.utf8)).encoded())
 
-            let deadline = ContinuousClock.now.advanced(by: chunkTimeout)
+            // Resets on every received chunk. A single deadline for the whole
+            // transfer would cap a large recording by link speed; this bounds
+            // the gap *between* chunks instead.
+            var deadline = ContinuousClock.now.advanced(by: chunkTimeout)
             while received < file.lengthBytes {
                 if let chunk = try takeBufferedPacket(
-                    matching: JensenCommand.transferFile.rawValue), !chunk.isEmpty {
+                    command: JensenCommand.transferFile.rawValue, sequence: seq),
+                    !chunk.isEmpty {
+                    // Clamp: a device sending more than it advertised must not
+                    // overflow the file.
                     let slice = chunk.prefix(file.lengthBytes - received)
                     try handle.write(contentsOf: slice)
                     received += slice.count
                     progress(received, file.lengthBytes)
+                    deadline = ContinuousClock.now.advanced(by: chunkTimeout)
                     continue
                 }
 
-                guard ContinuousClock.now < deadline else { break }
-                let raw = try await transport.read(maxLength: 64 * 1024, timeout: chunkTimeout)
+                let remaining = ContinuousClock.now.duration(to: deadline)
+                guard remaining > .zero else { break }
+                // Never read for longer than the gap budget has left, or a read
+                // entered just before the deadline doubles the stated timeout.
+                let raw = try await transport.read(
+                    maxLength: 64 * 1024, timeout: min(remaining, Self.maxReadWindow))
                 if raw.isEmpty {
                     try await Task.sleep(for: .milliseconds(5))
                 } else {
@@ -1539,15 +2023,43 @@ Append inside the actor:
             failure = error
         }
 
-        try? handle.close()
+        if failure == nil && received == file.lengthBytes {
+            // Only place a close failure can still mean "success, but short".
+            do {
+                try handle.synchronize()
+                try handle.close()
+            } catch {
+                failure = error
+            }
+        } else {
+            try? handle.close()
+        }
+
+        // Clear the buffer and endpoint on SUCCESS as well as failure. A device
+        // that sent more than it advertised would otherwise leave bytes that
+        // corrupt the next command's response.
+        await drainLocked(maxDuration: .milliseconds(150))
 
         if let failure {
-            try? fm.removeItem(at: url)
+            try? fm.removeItem(at: staging)
             throw failure
         }
         guard received == file.lengthBytes else {
-            try? fm.removeItem(at: url)
+            try? fm.removeItem(at: staging)
             throw JensenError.transferIncomplete(expected: file.lengthBytes, got: received)
+        }
+
+        // The destination is not touched until here. A failure to rename still
+        // leaves `url` exactly as it was, but must not strand the staging file.
+        do {
+            if fm.fileExists(atPath: url.path) {
+                _ = try fm.replaceItemAt(url, withItemAt: staging)
+            } else {
+                try fm.moveItem(at: staging, to: url)
+            }
+        } catch {
+            try? fm.removeItem(at: staging)
+            throw error
         }
     }
 ```
@@ -1555,7 +2067,7 @@ Append inside the actor:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `swift test --filter TransferTests`
-Expected: PASS, 3 tests
+Expected: PASS, 10 tests
 
 - [ ] **Step 5: Add the `pull` command to the CLI**
 
@@ -1569,15 +2081,18 @@ case "pull":
     let transport = try IOUSBHostTransport.openFirstAvailable()
     let device = JensenDevice(transport: transport)
     try await device.open()
-    defer { Task { await device.close() } }
+
 
     let files = try await device.listFiles()
     guard let file = files.first(where: { $0.name == target }) else {
         print("not found on device: \(target)"); exit(1)
     }
 
+    // Write with the corrected extension so the result is directly playable.
+    // The device names MP3 recordings `.hda`; the bytes need no conversion.
+    let stem = (file.name as NSString).deletingPathExtension
     let out = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        .appendingPathComponent(file.name)
+        .appendingPathComponent("\(stem).\(file.preferredExtension)")
     try await device.transferFile(file, to: out) { done, total in
         let pct = total > 0 ? done * 100 / total : 0
         FileHandle.standardError.write(Data("\r\(pct)% (\(done)/\(total))".utf8))
@@ -1592,11 +2107,18 @@ Update the usage string to `[probe|info|list|pull <name>]`.
 
 Run:
 ```bash
-swift run hidock-cli list                       # copy a filename
-swift run hidock-cli pull <that-filename>
-afplay <that-filename>                          # must be audible
+swift run hidock-cli list                    # copy a device filename
+swift run hidock-cli pull 2026Aug04-135302-Wip02.hda
+ls -l 2026Aug04-135302-Wip02.mp3             # must be exactly 53568 bytes
+afinfo 2026Aug04-135302-Wip02.mp3            # expect ~4.46 s, 96 kbps, 48 kHz mono
+afplay 2026Aug04-135302-Wip02.mp3            # must be audible
 ```
-Expected: `PULL OK`, and the file plays. Confirm the on-disk byte size matches the size `list` reported.
+Expected: `PULL OK`; the on-disk size matches the byte count `list` reported exactly; `afinfo`
+reads it as MP3; the audio is audible. Note the output is `.mp3` even though the device
+names it `.hda` — the bytes are unchanged, only the extension is corrected.
+
+Then pull the largest file (`2026Aug04-135322-Wip04.hda`, 91296 bytes) as well, to exercise
+a transfer that spans more packets.
 
 - [ ] **Step 7: Commit**
 
@@ -1626,10 +2148,15 @@ git commit -m "feat(kit): streaming file transfer with verification and hidock-c
 Add to `targets:`:
 
 ```swift
-        .executableTarget(
+        // A LIBRARY, not an executable. All app logic and views live here so the
+        // test target can @testable import it. Task 10 adds a thin `HiDockApp`
+        // executable target carrying only @main and Info.plist. Declaring this
+        // executable now would fail to link (no main entry point yet) and would
+        // make the test target depend on an executable, which SPM handles
+        // awkwardly.
+        .target(
             name: "HiDockMenubar",
             dependencies: ["HiDockKit"],
-            resources: [.copy("Info.plist")],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .testTarget(name: "HiDockMenubarTests", dependencies: ["HiDockMenubar", "HiDockKit"]),
@@ -1638,7 +2165,7 @@ Add to `targets:`:
 Add to `products:`:
 
 ```swift
-        .executable(name: "HiDockMenubar", targets: ["HiDockMenubar"]),
+        .library(name: "HiDockMenubar", targets: ["HiDockMenubar"]),
 ```
 
 - [ ] **Step 2: Write the failing tests**
@@ -1661,16 +2188,112 @@ private func sampleFile(name: String = "20260804143022REC001.mp3", length: Int =
              version: 1, recordedAt: ResponseParsers.recordedAt(fromFilename: name))
 }
 
-@Test func destinationIsDateFolderedWithDeviceExtension() {
+@Test func destinationIsDateFolderedWithSignatureSuffix() {
     let lib = Library(root: URL(fileURLWithPath: "/tmp/x"))
     let url = lib.destinationURL(for: sampleFile())
     #expect(url.deletingLastPathComponent().lastPathComponent == "2026-08-04")
-    #expect(url.lastPathComponent == "143022.mp3")
+    #expect(url.lastPathComponent.hasPrefix("143022-"))
+    #expect(url.pathExtension == "mp3")
 }
 
-@Test func commitMovesFileAndWritesSidecar() throws {
-    let root = tempRoot()
-    defer { try? FileManager.default.removeItem(at: root) }
+/// A device-named `.hda` must land as `.mp3`; the bytes are already MP3.
+@Test func hdaRecordingLandsAsMp3() {
+    let lib = Library(root: URL(fileURLWithPath: "/tmp/x"))
+    let name = "2026Aug04-135302-Wip02.hda"
+    let file = FileInfo(name: name, lengthBytes: 53568, signature: "c74e0ac92b1708dd",
+                        version: 5, recordedAt: ResponseParsers.recordedAt(fromFilename: name))
+    #expect(lib.destinationURL(for: file).lastPathComponent == "135302-c74e0ac9.mp3")
+}
+
+/// Two recordings in the same second must NOT resolve to one path. Keyed on
+/// timestamp alone they did, and commit deleted before it moved — silently
+/// destroying the earlier recording.
+@Test func sameSecondRecordingsGetDistinctPaths() {
+    let lib = Library(root: URL(fileURLWithPath: "/tmp/x"))
+    let a = sampleFile(name: "20260804143022REC001.mp3")
+    let b = FileInfo(name: "20260804143022REC002.mp3", lengthBytes: 9, signature: "ffffffffffff",
+                     version: 1, recordedAt: a.recordedAt)
+    #expect(lib.destinationURL(for: a) != lib.destinationURL(for: b))
+}
+
+/// An unparseable filename must still resolve to a STABLE path. The old
+/// fallback was `Date()`, so every undated recording collided with every
+/// other one and moved on every sync.
+@Test func undatedRecordingsGetStableDistinctPaths() {
+    let lib = Library(root: URL(fileURLWithPath: "/tmp/x"))
+    let a = FileInfo(name: "mystery.hda", lengthBytes: 1, signature: "aaaaaaaaaaaaaaaaaaaa",
+                     version: 1, recordedAt: nil)
+    let b = FileInfo(name: "other.hda", lengthBytes: 1, signature: "bbbbbbbbbbbbbbbbbbbb",
+                     version: 1, recordedAt: nil)
+    #expect(lib.destinationURL(for: a) == lib.destinationURL(for: a))   // stable
+    #expect(lib.destinationURL(for: a) != lib.destinationURL(for: b))   // distinct
+    #expect(lib.destinationURL(for: a).deletingLastPathComponent().lastPathComponent == "undated")
+}
+
+/// commit must refuse to overwrite a DIFFERENT recording rather than destroy it.
+@Test func commitRefusesToClobberADifferentRecording() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let lib = Library(root: root)
+
+    let first = sampleFile()
+    let incoming = lib.incomingURL(for: first)
+    try FileManager.default.createDirectory(
+        at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data([1, 2, 3, 4]).write(to: incoming)
+    _ = try lib.commit(incoming: incoming, file: first, deviceSerial: "SN1")
+
+    // Same computed path, different signature: force the collision by hand.
+    let impostor = FileInfo(name: first.name, lengthBytes: 4,
+                            signature: first.signature, version: 1, recordedAt: first.recordedAt)
+    let clobberPath = lib.destinationURL(for: impostor)
+    let sidecarPath = clobberPath.deletingPathExtension().appendingPathExtension("json")
+    let dec = JSONDecoder(); dec.dateDecodingStrategy = .iso8601
+    var stored = try dec.decode(Sidecar.self, from: Data(contentsOf: sidecarPath))
+    stored.signature = "a-completely-different-recording"
+    let enc = JSONEncoder(); enc.dateEncodingStrategy = .iso8601
+    try enc.encode(stored).write(to: sidecarPath)
+
+    let second = lib.incomingURL(for: impostor)
+    try Data([9, 9, 9, 9]).write(to: second)
+    #expect(throws: (any Error).self) {
+        _ = try lib.commit(incoming: second, file: impostor, deviceSerial: "SN1")
+    }
+    // The original audio must still be there and unchanged.
+    #expect(try Data(contentsOf: clobberPath) == Data([1, 2, 3, 4]))
+}
+
+/// The index is a DERIVED cache. This is the invariant that makes that true:
+/// a full folder walk must reconstruct it exactly.
+@Test func indexIsFullyReconstructableFromAFolderWalk() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let lib = Library(root: root)
+    let index = try LibraryIndex(url: root.appendingPathComponent("index.sqlite"))
+
+    var committed: [Sidecar] = []
+    for name in ["20260804143022REC001.mp3", "20260805090000REC002.wav"] {
+        let f = sampleFile(name: name)
+        let incoming = lib.incomingURL(for: f)
+        try FileManager.default.createDirectory(
+            at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data([1, 2, 3, 4]).write(to: incoming)
+        let sc = try lib.commit(incoming: incoming, file: f, deviceSerial: "SN1")
+        committed.append(sc)
+        try index.upsert(sc)
+    }
+
+    // Nuke the index entirely, then rebuild it from disk alone.
+    try index.rebuild(from: [])
+    #expect(try index.all().isEmpty)
+    try index.rebuild(from: lib.scanSidecars())
+
+    #expect(Set(try index.all().map(\.signature)) == Set(committed.map(\.signature)))
+    for sc in committed { #expect(index.contains(signature: sc.signature)) }
+}
+
+/// The sidecar is the source of truth, so every field must survive the round
+/// trip to disk — including relativePath, which reveal-in-Finder depends on.
+@Test func sidecarRoundTripsEveryFieldThroughDisk() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
     let lib = Library(root: root)
     let file = sampleFile()
 
@@ -1678,35 +2301,72 @@ private func sampleFile(name: String = "20260804143022REC001.mp3", length: Int =
     try FileManager.default.createDirectory(
         at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
     try Data([1, 2, 3, 4]).write(to: incoming)
+    let written = try lib.commit(incoming: incoming, file: file, deviceSerial: "SN1")
 
-    let sidecar = try lib.commit(incoming: incoming, file: file, deviceSerial: "SN1")
-
-    let audio = lib.destinationURL(for: file)
-    #expect(FileManager.default.fileExists(atPath: audio.path))
+    // commit must CONSUME the staging file. If it ever stops doing so,
+    // .incoming/ accumulates junk forever and nothing else would notice.
     #expect(FileManager.default.fileExists(atPath: incoming.path) == false)
+    #expect(FileManager.default.fileExists(atPath: lib.destinationURL(for: file).path))
 
-    let json = audio.deletingPathExtension().appendingPathExtension("json")
-    #expect(FileManager.default.fileExists(atPath: json.path))
-    #expect(sidecar.signature == file.signature)
-    #expect(sidecar.lengthBytes == 4)
-    #expect(sidecar.deviceSerial == "SN1")
+    let decoded = try #require(lib.scanSidecars().first)
+    #expect(decoded.signature == written.signature)
+    #expect(decoded.deviceFilename == file.name)
+    #expect(decoded.relativePath == written.relativePath)
+    #expect(decoded.lengthBytes == 4)                       // measured on disk, not device-reported
+    #expect(decoded.deviceSerial == "SN1")
+    #expect(decoded.deviceModel == "hidock-p1")
+    #expect(decoded.timeZoneIdentifier == TimeZone.current.identifier)
+
+    // relativePath must actually locate the file under the root.
+    let resolved = root.appendingPathComponent(decoded.relativePath)
+    #expect(FileManager.default.fileExists(atPath: resolved.path))
+    #expect(decoded.relativePath.hasPrefix("2026-08-04/"))
 }
 
-@Test func scanSidecarsFindsEveryCommittedRecording() throws {
-    let root = tempRoot()
-    defer { try? FileManager.default.removeItem(at: root) }
+/// Re-syncing the SAME recording must be safe. The overwrite path previously
+/// deleted the old audio and sidecar before installing the new ones, so a
+/// failure in between destroyed a recording that was already safely stored.
+@Test func resyncingTheSameRecordingReplacesItCleanly() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
     let lib = Library(root: root)
+    let file = sampleFile()
 
-    for name in ["20260804143022REC001.mp3", "20260805090000REC002.wav"] {
-        let f = sampleFile(name: name)
-        let incoming = lib.incomingURL(for: f)
+    func commitOnce(_ bytes: Data) throws -> Sidecar {
+        let incoming = lib.incomingURL(for: file)
         try FileManager.default.createDirectory(
             at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try Data([1, 2, 3, 4]).write(to: incoming)
-        _ = try lib.commit(incoming: incoming, file: f, deviceSerial: "SN1")
+        try bytes.write(to: incoming)
+        return try lib.commit(incoming: incoming, file: file, deviceSerial: "SN1")
     }
 
-    #expect(try lib.scanSidecars().count == 2)
+    _ = try commitOnce(Data([1, 2, 3, 4]))
+    _ = try commitOnce(Data([5, 6, 7, 8]))
+
+    let audio = lib.destinationURL(for: file)
+    #expect(try Data(contentsOf: audio) == Data([5, 6, 7, 8]))
+    #expect(try lib.scanSidecars().count == 1)          // exactly one, not two
+}
+
+/// A sidecar that exists but will not decode might describe any recording, so
+/// commit must refuse rather than overwrite on an assumption.
+@Test func commitRefusesWhenTheExistingSidecarIsUnreadable() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let lib = Library(root: root)
+    let file = sampleFile()
+
+    let sidecarPath = lib.sidecarURL(for: file)
+    try FileManager.default.createDirectory(
+        at: sidecarPath.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("not json at all".utf8).write(to: sidecarPath)
+
+    let incoming = lib.incomingURL(for: file)
+    try FileManager.default.createDirectory(
+        at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data([1, 2, 3, 4]).write(to: incoming)
+
+    #expect(throws: (any Error).self) {
+        _ = try lib.commit(incoming: incoming, file: file, deviceSerial: "SN1")
+    }
 }
 
 @Test func reachabilityIsFalseForMissingRoot() {
@@ -1839,56 +2499,157 @@ public struct Library: Sendable {
             .appendingPathComponent("\(file.signature).part")
     }
 
-    /// `<root>/YYYY-MM-DD/HHMMSS.<device extension>`
+    /// `<root>/YYYY-MM-DD/HHMMSS-<sig8>.<corrected extension>`
+    ///
+    /// PURE — no I/O, and the same FileInfo always resolves to the same path.
+    /// SyncEngine's diff checks the filesystem at this path, so it must be
+    /// derivable without consulting the disk.
+    ///
+    /// The signature prefix is not decoration. Keyed on timestamp alone, two
+    /// recordings sharing a second collide, and every recording whose filename
+    /// does not parse collides with every other one, because the fallback was
+    /// `Date()`. Combined with a commit that deleted the destination first, that
+    /// silently and permanently destroyed the earlier recording.
     public func destinationURL(for file: FileInfo) -> URL {
-        let ext = (file.name as NSString).pathExtension
-        let date = file.recordedAt ?? Date()
-        let folder = Self.dayFormatter.string(from: date)
-        let stem = Self.timeFormatter.string(from: date)
-        return root.appendingPathComponent(folder)
+        let ext = file.preferredExtension
+        let short = String(file.signature.prefix(8))
+
+        guard let date = file.recordedAt else {
+            // No parseable timestamp. Key entirely on the signature so the path
+            // is stable across runs; `Date()` here would give one recording a
+            // different path on every sync.
+            let stem = String(file.signature.prefix(16))
+            return root.appendingPathComponent("undated")
+                .appendingPathComponent(ext.isEmpty ? stem : "\(stem).\(ext)")
+        }
+
+        let stem = "\(Self.timeFormatter.string(from: date))-\(short)"
+        return root.appendingPathComponent(Self.dayFormatter.string(from: date))
             .appendingPathComponent(ext.isEmpty ? stem : "\(stem).\(ext)")
     }
 
     public func sidecarURL(for file: FileInfo) -> URL {
-        destinationURL(for: file).deletingPathExtension().appendingPathExtension("json")
+        Self.sidecarURL(forAudio: destinationURL(for: file))
+    }
+
+    static func sidecarURL(forAudio url: URL) -> URL {
+        url.deletingPathExtension().appendingPathExtension("json")
     }
 
     /// Moves a verified download into place and writes its sidecar.
-    /// Duration is measured from the audio header, not inferred from bitrate.
+    ///
+    /// The audio is installed BEFORE the sidecar. See the comment at the
+    /// install site for why: neither ordering is atomic across two files, and
+    /// audio-first fails into a self-healing state while sidecar-first fails
+    /// into a sidecar that lies about what is on disk.
     @discardableResult
     public func commit(incoming: URL, file: FileInfo, deviceSerial: String) throws -> Sidecar {
         let destination = destinationURL(for: file)
+        let sidecarDestination = Self.sidecarURL(forAudio: destination)
         let fm = FileManager.default
+
+        // Refuse to clobber a DIFFERENT recording. Signature is identity, so a
+        // matching signature is the same file being re-synced and is safe to
+        // replace; anything else is a collision and must not be destroyed.
+        //
+        // Fails CLOSED: a sidecar that exists but will not decode might describe
+        // any recording at all, so refuse rather than overwrite on an assumption.
+        if fm.fileExists(atPath: sidecarDestination.path) {
+            guard let data = try? Data(contentsOf: sidecarDestination),
+                  let existing = try? Self.decoder.decode(Sidecar.self, from: data) else {
+                throw LibraryError.destinationOccupied(destination.path, "unreadable sidecar")
+            }
+            guard existing.signature == file.signature else {
+                throw LibraryError.destinationOccupied(destination.path, existing.signature)
+            }
+        }
+
         try fm.createDirectory(at: destination.deletingLastPathComponent(),
                                withIntermediateDirectories: true)
-        if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
-        try fm.moveItem(at: incoming, to: destination)
 
+        // Measure from the staged file; it is byte-identical to the destination.
         let sidecar = Sidecar(
             signature: file.signature,
             deviceFilename: file.name,
-            relativePath: destination.path.replacingOccurrences(
-                of: root.path.hasSuffix("/") ? root.path : root.path + "/", with: ""),
-            lengthBytes: file.lengthBytes,
-            durationSeconds: Self.measureDuration(of: destination),
+            relativePath: Self.relativePath(of: destination, under: root),
+            lengthBytes: Self.fileSize(at: incoming) ?? file.lengthBytes,
+            durationSeconds: Self.measureDuration(of: incoming),
             recordedAt: file.recordedAt,
             syncedAt: Date(),
             deviceSerial: deviceSerial,
             deviceModel: "hidock-p1",
             timeZoneIdentifier: TimeZone.current.identifier)
 
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(sidecar).write(to: sidecarURL(for: file))
+        let stagedSidecar = incoming.appendingPathExtension("json")
+        try Self.encoder.encode(sidecar).write(to: stagedSidecar)
+
+        // AUDIO FIRST, then the sidecar. Two files cannot be installed
+        // atomically, so the question is not how to avoid an intermediate state
+        // but which intermediate state is safer. This ordering was reversed
+        // twice before settling here; the reasoning is worth keeping.
+        //
+        // Audio-first worst case: audio present, sidecar missing or stale.
+        // scanSidecars does not see it, so the next sync re-downloads and
+        // re-commits over the same path. Redundant work, self-healing, and
+        // nothing on disk ever lies.
+        //
+        // Sidecar-first worst case: a sidecar describing a recording that was
+        // never installed, sitting beside different audio. That does NOT
+        // self-heal, and the library's source of truth is then simply wrong.
+        //
+        // A redundant download is a far better failure than a confident lie.
+        try Self.install(incoming, at: destination)
+        do {
+            try Self.install(stagedSidecar, at: sidecarDestination)
+        } catch {
+            try? fm.removeItem(at: stagedSidecar)
+            throw error
+        }
         return sidecar
+    }
+
+    /// Path relative to `root`, by path components rather than string
+    /// replacement — the latter replaces every occurrence and silently yields
+    /// an absolute path when the prefix does not match.
+    static func relativePath(of url: URL, under root: URL) -> String {
+        let rootParts = root.standardizedFileURL.pathComponents
+        let urlParts = url.standardizedFileURL.pathComponents
+        guard urlParts.count > rootParts.count,
+              Array(urlParts.prefix(rootParts.count)) == rootParts else {
+            return url.lastPathComponent
+        }
+        return urlParts.dropFirst(rootParts.count).joined(separator: "/")
+    }
+
+    /// Same-volume atomic install. `replaceItemAt` when something is already
+    /// there, `moveItem` when not — never a delete followed by a move.
+    static func install(_ source: URL, at destination: URL) throws {
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: destination.path) else {
+            try fm.moveItem(at: source, to: destination)
+            return
+        }
+        // replaceItemAt may report a different resulting URL on some volumes.
+        // Everything here lives under a plain local root, but verify rather than
+        // assume: a silent rename would hide the file from scanSidecars.
+        let result = try fm.replaceItemAt(destination, withItemAt: source)
+        if let result, result.standardizedFileURL != destination.standardizedFileURL {
+            try fm.moveItem(at: result, to: destination)
+        }
+    }
+
+    /// The sidecar recorded for this recording, if one is on disk.
+    public func sidecar(for file: FileInfo) -> Sidecar? {
+        guard let data = try? Data(contentsOf: sidecarURL(for: file)) else { return nil }
+        return try? Self.decoder.decode(Sidecar.self, from: data)
+    }
+
+    static func fileSize(at url: URL) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int
     }
 
     public func scanSidecars() throws -> [Sidecar] {
         guard isReachable() else { return [] }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-
         var results: [Sidecar] = []
         let enumerator = FileManager.default.enumerator(
             at: root, includingPropertiesForKeys: nil,
@@ -1897,7 +2658,7 @@ public struct Library: Sendable {
         while let url = enumerator?.nextObject() as? URL {
             guard url.pathExtension == "json" else { continue }
             guard let data = try? Data(contentsOf: url),
-                  let sidecar = try? decoder.decode(Sidecar.self, from: data) else { continue }
+                  let sidecar = try? Self.decoder.decode(Sidecar.self, from: data) else { continue }
             results.append(sidecar)
         }
         return results
@@ -1909,17 +2670,42 @@ public struct Library: Sendable {
         return seconds.isFinite && seconds > 0 ? seconds : nil
     }
 
+    // en_US_POSIX is required for fixed-format dates. Under a non-Gregorian
+    // Locale.current (Buddhist, Japanese) `yyyy` renders a different year and
+    // the on-disk folder layout becomes locale-dependent.
     private static let dayFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
         f.dateFormat = "yyyy-MM-dd"
         return f
     }()
 
     private static let timeFormatter: DateFormatter = {
         let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
         f.dateFormat = "HHmmss"
         return f
     }()
+
+    static let encoder: JSONEncoder = {
+        let e = JSONEncoder()
+        e.outputFormatting = [.prettyPrinted, .sortedKeys]
+        e.dateEncodingStrategy = .iso8601
+        return e
+    }()
+
+    static let decoder: JSONDecoder = {
+        let d = JSONDecoder()
+        d.dateDecodingStrategy = .iso8601
+        return d
+    }()
+}
+
+public enum LibraryError: Error, Equatable {
+    /// A different recording already occupies the computed path.
+    case destinationOccupied(String, String)
 }
 ```
 
@@ -1981,6 +2767,11 @@ public final class LibraryIndex: @unchecked Sendable {
 
     public func upsert(_ s: Sidecar) throws {
         lock.lock(); defer { lock.unlock() }
+        try upsertLocked(s)
+    }
+
+    /// Caller must already hold `lock`.
+    private func upsertLocked(_ s: Sidecar) throws {
         var stmt: OpaquePointer?
         let sql = """
             INSERT INTO recordings
@@ -2020,28 +2811,49 @@ public final class LibraryIndex: @unchecked Sendable {
     }
 
     public func recent(limit: Int) throws -> [Sidecar] {
-        try query("SELECT * FROM recordings ORDER BY recorded_at DESC LIMIT \(limit);")
+        // Bound and bound: a negative limit means UNLIMITED in SQLite, so an
+        // interpolated -1 would quietly return the whole library.
+        try query("SELECT * FROM recordings ORDER BY recorded_at DESC LIMIT ?;",
+                  limit: max(0, limit))
     }
 
     public func all() throws -> [Sidecar] {
         try query("SELECT * FROM recordings ORDER BY recorded_at DESC;")
     }
 
+    /// Holds the lock for the WHOLE call, inside one transaction.
+    ///
+    /// Dropping the lock between the DELETE and the re-inserts would let a
+    /// concurrent `contains(signature:)` observe an empty table and report
+    /// not-synced, which makes SyncEngine re-download files already on disk.
+    /// The transaction also collapses one implicit commit per row.
     public func rebuild(from sidecars: [Sidecar]) throws {
-        lock.lock()
-        let result = sqlite3_exec(db, "DELETE FROM recordings;", nil, nil, nil)
-        lock.unlock()
-        guard result == SQLITE_OK else { throw LibraryIndexError.writeFailed(lastMessage()) }
-        for s in sidecars { try upsert(s) }
+        lock.lock(); defer { lock.unlock() }
+        guard sqlite3_exec(db, "BEGIN IMMEDIATE;", nil, nil, nil) == SQLITE_OK else {
+            throw LibraryIndexError.writeFailed(lastMessage())
+        }
+        do {
+            guard sqlite3_exec(db, "DELETE FROM recordings;", nil, nil, nil) == SQLITE_OK else {
+                throw LibraryIndexError.writeFailed(lastMessage())
+            }
+            for s in sidecars { try upsertLocked(s) }
+            guard sqlite3_exec(db, "COMMIT;", nil, nil, nil) == SQLITE_OK else {
+                throw LibraryIndexError.writeFailed(lastMessage())
+            }
+        } catch {
+            sqlite3_exec(db, "ROLLBACK;", nil, nil, nil)
+            throw error
+        }
     }
 
-    private func query(_ sql: String) throws -> [Sidecar] {
+    private func query(_ sql: String, limit: Int? = nil) throws -> [Sidecar] {
         lock.lock(); defer { lock.unlock() }
         var stmt: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw LibraryIndexError.prepareFailed(lastMessage())
         }
         defer { sqlite3_finalize(stmt) }
+        if let limit { sqlite3_bind_int(stmt, 1, Int32(clamping: limit)) }
 
         var out: [Sidecar] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
@@ -2090,7 +2902,7 @@ public enum LibraryIndexError: Error {
 - [ ] **Step 7: Run tests to verify they pass**
 
 Run: `swift test --filter LibraryTests && swift test --filter LibraryIndexTests`
-Expected: PASS, 4 + 5 tests
+Expected: PASS, 10 + 5 tests
 
 - [ ] **Step 8: Commit**
 
@@ -2124,17 +2936,31 @@ actor FakeDevice: SyncDevice {
     var files: [FileInfo]
     var payloads: [String: Data]
     var failTransfersFor: Set<String>
+    /// Simulates a device that accepts DELETE_FILE but does not act on it —
+    /// the case a status byte we cannot parse would hide.
+    var ignoreDeletes: Bool
+    /// Simulates the confirmation listing failing after deletes were issued.
+    var failListAfterDelete: Bool
     private(set) var deletedNames: [String] = []
 
-    init(files: [FileInfo], payloads: [String: Data], failTransfersFor: Set<String> = []) {
+    init(files: [FileInfo], payloads: [String: Data],
+         failTransfersFor: Set<String> = [], ignoreDeletes: Bool = false,
+         failListAfterDelete: Bool = false) {
         self.files = files
         self.payloads = payloads
         self.failTransfersFor = failTransfersFor
+        self.ignoreDeletes = ignoreDeletes
+        self.failListAfterDelete = failListAfterDelete
     }
 
-    func listFiles() async throws -> [FileInfo] { files }
+    func listFiles() async throws -> [FileInfo] {
+        if failListAfterDelete && !deletedNames.isEmpty {
+            throw JensenError.timeout(command: 4)
+        }
+        return files
+    }
 
-    func transferFile(_ file: FileInfo, to url: URL,
+    func transferFile(_ file: FileInfo, to url: URL, chunkTimeout: Duration,
                       progress: @Sendable (Int, Int) -> Void) async throws {
         if failTransfersFor.contains(file.name) {
             throw JensenError.transferIncomplete(expected: file.lengthBytes, got: 0)
@@ -2146,7 +2972,12 @@ actor FakeDevice: SyncDevice {
         progress(data.count, file.lengthBytes)
     }
 
-    func deleteFile(named name: String) async throws { deletedNames.append(name) }
+    func deleteFile(named name: String) async throws {
+        deletedNames.append(name)
+        // A real device drops the file from its listing. Modelling that is what
+        // lets deleteFromDevice's confirmation step be tested at all.
+        if !ignoreDeletes { files.removeAll { $0.name == name } }
+    }
 }
 ```
 
@@ -2244,6 +3075,95 @@ private func file(_ name: String, _ bytes: Int, sig: String) -> FileInfo {
     }
 }
 
+/// The spec's headline safety property: sync copies, it never deletes. The
+/// fake records every delete it is asked for, and this is the assertion that
+/// makes recording it mean something.
+@Test func syncNeverDeletesFromTheDevice() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let b = file("20260804150000REC002.mp3", 3, sig: "sb")
+    let device = FakeDevice(files: [a, b],
+                            payloads: [a.name: Data([1, 2, 3, 4]), b.name: Data([5, 6, 7])])
+
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }   // re-sync too
+
+    #expect(await device.deletedNames.isEmpty)
+}
+
+/// Actors are reentrant, so two overlapping syncs would compute the same
+/// pending set and race on the same staging file.
+@Test func aSecondConcurrentSyncIsRejected() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])])
+
+    async let first = engine.sync(device: device, serial: "SN1") { _ in }
+    async let second = engine.sync(device: device, serial: "SN1") { _ in }
+    let outcomes = await [try? first, try? second]
+
+    #expect(outcomes.compactMap { $0 }.count == 1)   // exactly one ran
+}
+
+/// Reclaim must re-verify at call time. A file removed from disk after
+/// reclaimable() listed it must NOT be deleted from the device.
+@Test func reclaimSkipsFilesNoLongerOnDisk() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, library, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])])
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+
+    #expect(try await engine.reclaimable(device: device).count == 1)
+
+    // Pull the local copy out from under it.
+    try FileManager.default.removeItem(at: library.destinationURL(for: a))
+
+    let result = try await engine.deleteFromDevice([a], device: device)
+    #expect(result.deleted.isEmpty)
+    #expect(result.skipped == [a.name])
+    #expect(await device.deletedNames.isEmpty)
+}
+
+/// A device that accepts the command but still lists the file afterwards must
+/// be reported as failed, not deleted. The DELETE_FILE response format is
+/// unverified, so the listing is the only trustworthy confirmation.
+@Test func reclaimReportsFailureWhenTheDeviceStillListsTheFile() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])],
+                            ignoreDeletes: true)
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+
+    let result = try await engine.deleteFromDevice([a], device: device)
+    #expect(result.deleted.isEmpty)
+    #expect(result.failed == [a.name])
+}
+
+/// If the confirmation listing fails we know nothing about what happened, so
+/// every file must be reported as failed. Reporting them deleted would
+/// overstate a destructive action on precisely the evidence we could not get.
+@Test func reclaimReportsFailureWhenConfirmationCannotBeObtained() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])],
+                            failListAfterDelete: true)
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+
+    let result = try await engine.deleteFromDevice([a], device: device)
+    #expect(result.deleted.isEmpty)
+    #expect(result.failed == [a.name])
+}
+
 @Test func progressReportsEachPhase() async throws {
     let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
     let (engine, _, _) = try makeEngine(root: root)
@@ -2272,9 +3192,14 @@ import Foundation
 import HiDockKit
 
 /// The subset of JensenDevice the engine needs, so tests can fake it.
+///
+/// `chunkTimeout` is part of the requirement on purpose: Swift matches a
+/// protocol witness on its full declaration name, and a default argument does
+/// not synthesize the shorter form. Omitting it here makes
+/// `extension JensenDevice: SyncDevice {}` fail to compile.
 public protocol SyncDevice: Sendable, Actor {
     func listFiles() async throws -> [FileInfo]
-    func transferFile(_ file: FileInfo, to url: URL,
+    func transferFile(_ file: FileInfo, to url: URL, chunkTimeout: Duration,
                       progress: @Sendable (Int, Int) -> Void) async throws
     func deleteFile(named name: String) async throws
 }
@@ -2282,6 +3207,18 @@ public protocol SyncDevice: Sendable, Actor {
 public enum SyncError: Error, Equatable {
     case libraryUnreachable
     case insufficientSpace(needed: Int)
+    case alreadyRunning
+}
+
+/// Outcome of a reclaim. Names rather than FileInfo, so the menubar can report
+/// it without holding device state.
+public struct DeleteResult: Sendable, Equatable {
+    /// Confirmed gone from the device's own file listing.
+    public var deleted: [String] = []
+    /// Not deleted because they no longer verify as present on disk.
+    public var skipped: [String] = []
+    /// The device errored, or still lists the file afterwards.
+    public var failed: [String] = []
 }
 
 public enum SyncProgress: Sendable {
@@ -2300,6 +3237,12 @@ public actor SyncEngine {
     private let library: Library
     private let index: LibraryIndex
 
+    /// Guards against overlapping runs. `sync` is an actor method with `await`
+    /// points, and Swift actors are reentrant, so Task 9's auto-sync-on-attach
+    /// and a manual trigger could otherwise interleave — computing the same
+    /// pending set and racing on the same `.incoming` staging file.
+    private var isSyncing = false
+
     public init(library: Library, index: LibraryIndex) {
         self.library = library
         self.index = index
@@ -2311,15 +3254,34 @@ public actor SyncEngine {
         serial: String,
         progress: @Sendable (SyncProgress) -> Void
     ) async throws -> SyncResult {
-        guard library.isReachable() else { throw SyncError.libraryUnreachable }
+        guard !isSyncing else { throw SyncError.alreadyRunning }
+        isSyncing = true
+        defer { isSyncing = false }
+
+        guard library.isReachable() else {
+            progress(.finished(downloaded: 0, skipped: 0, failed: 0))
+            throw SyncError.libraryUnreachable
+        }
 
         progress(.listing)
-        let files = try await device.listFiles()
+        let files: [FileInfo]
+        do {
+            files = try await device.listFiles()
+        } catch {
+            // Always emit a terminal event, or a UI driven off progress hangs
+            // on "listing" forever.
+            progress(.finished(downloaded: 0, skipped: 0, failed: 0))
+            throw error
+        }
 
         // Oldest first, so an interrupted sync still makes forward progress
         // through the backlog rather than repeatedly retrying the newest file.
+        // Signature breaks ties: Array.sorted is not documented stable, and every
+        // undated file maps to .distantPast, so without it their relative order
+        // is arbitrary between runs.
         let ordered = files.sorted {
-            ($0.recordedAt ?? .distantPast) < ($1.recordedAt ?? .distantPast)
+            let l = ($0.recordedAt ?? .distantPast), r = ($1.recordedAt ?? .distantPast)
+            return l == r ? $0.signature < $1.signature : l < r
         }
 
         var result = SyncResult()
@@ -2332,11 +3294,18 @@ public actor SyncEngine {
                     throw SyncError.insufficientSpace(needed: file.lengthBytes)
                 }
 
+                // transferFile stages internally too, so bytes actually land in
+                // `<sig>.part.part` before being moved here. Redundant but
+                // harmless: the engine's `.incoming` staging is what keeps a
+                // partial out of the library tree, and transferFile's is what
+                // makes the write atomic. Do not "simplify" either away.
                 let incoming = library.incomingURL(for: file)
                 try FileManager.default.createDirectory(
                     at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
 
-                try await device.transferFile(file, to: incoming) { done, total in
+                try await device.transferFile(
+                    file, to: incoming, chunkTimeout: .seconds(30)
+                ) { done, total in
                     progress(.downloading(name: file.name, index: offset + 1,
                                           of: pending.count, bytesDone: done, bytesTotal: total))
                 }
@@ -2361,10 +3330,13 @@ public actor SyncEngine {
     /// are still on disk at the expected length.
     private func isAlreadySynced(_ file: FileInfo) -> Bool {
         guard index.contains(signature: file.signature) else { return false }
-        let url = library.destinationURL(for: file)
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = attrs[.size] as? Int else { return false }
-        return size == file.lengthBytes
+        guard let size = Library.fileSize(at: library.destinationURL(for: file)) else {
+            return false
+        }
+        // Compare against the LOCALLY recorded length where one exists. A check
+        // that gates a destructive action should trust local truth, not the
+        // device's own claim about what it is holding.
+        return size == (library.sidecar(for: file)?.lengthBytes ?? file.lengthBytes)
     }
 
     /// Reclaim. Only ever called from the explicit menubar action.
@@ -2373,13 +3345,58 @@ public actor SyncEngine {
         try await device.listFiles().filter { isAlreadySynced($0) }
     }
 
-    public func deleteFromDevice(_ files: [FileInfo], device: any SyncDevice) async throws -> Int {
-        var deleted = 0
-        for file in files where isAlreadySynced(file) {
-            try await device.deleteFile(named: file.name)
-            deleted += 1
+    /// Deletes from the device, then CONFIRMS against the device's own listing.
+    ///
+    /// The DELETE_FILE response body layout has never been verified against
+    /// hardware, so a status code in it cannot be trusted. Rather than guess at
+    /// one, this checks the outcome: whatever the device still lists is still
+    /// there. Format-independent, and it is the only command in the project
+    /// that destroys data.
+    ///
+    /// Per-file isolation like `sync`: one device error does not abandon the
+    /// rest, and the caller can tell deleted from skipped from failed.
+    public func deleteFromDevice(
+        _ files: [FileInfo], device: any SyncDevice
+    ) async throws -> DeleteResult {
+        var result = DeleteResult()
+        var requested: [FileInfo] = []
+
+        for file in files {
+            // Re-verified HERE, at call time, not trusted from the index. A file
+            // removed from disk since `reclaimable()` must not be deleted.
+            guard isAlreadySynced(file) else {
+                result.skipped.append(file.name)
+                continue
+            }
+            do {
+                try await device.deleteFile(named: file.name)
+                requested.append(file)
+            } catch {
+                result.failed.append(file.name)
+            }
         }
-        return deleted
+
+        guard !requested.isEmpty else { return result }
+
+        // If the confirmation listing itself fails we know NOTHING about what
+        // happened, so report everything as failed. `try?` here would yield an
+        // empty set and mark every file deleted — overstating a destructive
+        // action on exactly the evidence we failed to obtain. Understating what
+        // was deleted is recoverable; overstating it is not.
+        guard let remaining = try? await device.listFiles() else {
+            result.failed.append(contentsOf: requested.map(\.name))
+            return result
+        }
+
+        let stillPresent = Set(remaining.map(\.signature))
+        for file in requested {
+            if stillPresent.contains(file.signature) {
+                result.failed.append(file.name)
+            } else {
+                result.deleted.append(file.name)
+            }
+        }
+        return result
     }
 }
 ```
@@ -2403,7 +3420,7 @@ extension JensenDevice: SyncDevice {}
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `swift test --filter SyncEngineTests`
-Expected: PASS, 6 tests
+Expected: PASS, 11 tests
 
 - [ ] **Step 6: Run the whole suite**
 
@@ -2423,6 +3440,8 @@ git commit -m "feat(app): sync engine with verify-before-commit and per-file fai
 
 **Files:**
 - Create: `Sources/HiDockMenubar/DeviceMonitor.swift`
+- Modify: `Sources/HiDockCLI/CLI.swift` (add `watch`)
+- Modify: `Package.swift` (HiDockCLI depends on HiDockMenubar)
 
 **Interfaces:**
 - Consumes: `HiDockDeviceMatching`
@@ -2507,28 +3526,64 @@ public final class DeviceMonitor: @unchecked Sendable {
         }
     }
 
+    /// Idempotent, and safe to call from `deinit` on any thread.
+    ///
+    /// The handles are copied out and cleared synchronously, then released on
+    /// the main queue — the queue IOKit delivers callbacks on. Releasing an
+    /// iterator while `drain` is mid-walk on that queue would be a
+    /// use-after-free, and `deinit` carries no main-thread guarantee. Capturing
+    /// the handles by value rather than `self` also means the teardown block
+    /// never touches a deallocating object.
     public func stop() {
-        if matchedIterator != 0 { IOObjectRelease(matchedIterator); matchedIterator = 0 }
-        if terminatedIterator != 0 { IOObjectRelease(terminatedIterator); terminatedIterator = 0 }
-        if let notifyPort { IONotificationPortDestroy(notifyPort) }
-        notifyPort = nil
+        let port = notifyPort
+        let matched = matchedIterator
+        let terminated = terminatedIterator
+        let sleepObs = sleepObserver
+        let wakeObs = wakeObserver
 
-        let center = NSWorkspace.shared.notificationCenter
-        if let sleepObserver { center.removeObserver(sleepObserver) }
-        if let wakeObserver { center.removeObserver(wakeObserver) }
+        notifyPort = nil
+        matchedIterator = 0
+        terminatedIterator = 0
         sleepObserver = nil
         wakeObserver = nil
+
+        let teardown = {
+            if matched != 0 { IOObjectRelease(matched) }
+            if terminated != 0 { IOObjectRelease(terminated) }
+            if let port { IONotificationPortDestroy(port) }
+            let center = NSWorkspace.shared.notificationCenter
+            if let sleepObs { center.removeObserver(sleepObs) }
+            if let wakeObs { center.removeObserver(wakeObs) }
+        }
+
+        if Thread.isMainThread {
+            teardown()
+        } else {
+            DispatchQueue.main.async(execute: teardown)
+        }
     }
 
     /// Emits at most one event per callback, regardless of how many
     /// interfaces the iterator holds.
+    ///
+    /// The matching dictionary is a bare `IOUSBHostInterface` class match (see
+    /// `HiDockDeviceMatching.matchingDictionary`), so these callbacks fire for
+    /// EVERY USB interface on the system. Attach events must be filtered here
+    /// or plugging in a keyboard would kick off a sync.
+    ///
+    /// Termination is handled differently: a terminated service may no longer
+    /// expose `idVendor`, so the filter cannot be trusted on the way out.
+    /// Any termination triggers an authoritative rescan instead.
     private func drain(_ iterator: io_iterator_t, event: DeviceEvent) {
-        var sawAny = false
+        var sawRelevant = false
         while case let service = IOIteratorNext(iterator), service != 0 {
-            sawAny = true
+            if event == .detached || HiDockDeviceMatching.isHiDockP1Interface(service) {
+                sawRelevant = true
+            }
             IOObjectRelease(service)
         }
-        if sawAny { onChange(event) }
+        guard sawRelevant else { return }
+        if event == .detached { rescan() } else { onChange(.attached) }
     }
 
     public func rescan() {
@@ -2539,15 +3594,81 @@ public final class DeviceMonitor: @unchecked Sendable {
 }
 ```
 
-- [ ] **Step 2: Verify it compiles**
+- [ ] **Step 2: Add a `watch` command so the monitor is observable**
+
+`DeviceMonitor` is what triggers every sync, and IOKit match notifications
+cannot be unit-tested without hardware. Without this it would ship with no
+verification at all.
+
+In `Package.swift`, add `"HiDockMenubar"` to `HiDockCLI`'s dependencies.
+
+Add to `Sources/HiDockCLI/CLI.swift` before `default:`:
+
+```swift
+case "watch":
+    // Line-buffer stdout. print() BLOCK-buffers to a pipe or file, so every
+    // event is lost unflushed when the process is killed — `watch > log`
+    // produces an empty file and the monitor looks broken when it is not.
+    setvbuf(stdout, nil, _IOLBF, 0)
+
+    print("Watching for HiDock P1 attach/detach. Ctrl-C to stop.")
+    let monitor = DeviceMonitor { event in
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        switch event {
+        case .attached: print("\(stamp)  ATTACHED")
+        case .detached: print("\(stamp)  DETACHED")
+        }
+    }
+    monitor.start()
+
+    // withExtendedLifetime is load-bearing, not defensive. Nothing else holds a
+    // strong reference — IOKit keeps only an unretained pointer — so ARC may
+    // release `monitor` at its last syntactic use, running deinit -> stop() and
+    // tearing down every notification before the process even parks. The
+    // initial rescan() would still print ATTACHED, so the tool would look like
+    // it worked while being permanently deaf to attach and detach.
+    withExtendedLifetime(monitor) {
+        // RunLoop.main.run() is `noasync`, so it cannot be called directly from
+        // an async main. The Swift concurrency runtime parks the real main
+        // thread in dispatch_main() and drains DispatchQueue.main, which is
+        // where IOKit delivers, so this only needs to not return.
+        func parkForever() { RunLoop.main.run() }
+        parkForever()
+    }
+```
+
+Update the usage string to `[probe|info|list|pull <name>|watch]`.
+
+- [ ] **Step 3: Verify it builds and reports the current state**
 
 Run: `swift build`
 Expected: builds with no errors
 
-- [ ] **Step 3: Commit**
+Run: `swift run hidock-cli watch` with the P1 already plugged in.
+Expected: one `ATTACHED` line appears within a second or two, from the initial
+`rescan()`. Leave it running.
+
+**That first line proves only that the initial scan works — it says nothing
+about live notifications**, because `rescan()` runs synchronously inside
+`start()` before the process parks. Only the unplug in Step 4 exercises the
+notification path.
+
+- [ ] **Step 4: Hardware check (manual, needs the P1)**
+
+With `watch` running, unplug the P1 and plug it back in. Expected: a `DETACHED`
+line on unplug and an `ATTACHED` line on replug, each within a second or two,
+and **no spurious events from other USB devices** — the matching dictionary is a
+bare `IOUSBHostInterface` class match, so every USB interface on the system
+fires these callbacks and the filter in `drain` is what makes them meaningful.
+If plugging in an unrelated USB device produces a line, the filter is wrong.
+
+If the P1 cannot be unplugged, report that plainly and record which parts you
+did observe. Do not claim an unplug you did not perform.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add Sources/HiDockMenubar/DeviceMonitor.swift
+git add Package.swift Sources/HiDockMenubar/DeviceMonitor.swift Sources/HiDockCLI/CLI.swift
 git commit -m "feat(app): event-driven IOKit device monitor with sleep/wake handling"
 ```
 
@@ -2556,17 +3677,30 @@ git commit -m "feat(app): event-driven IOKit device monitor with sleep/wake hand
 ### Task 10: Menubar app
 
 **Files:**
-- Create: `Sources/HiDockMenubar/Info.plist`
+- Modify: `Package.swift` (add the `HiDockApp` executable target and product)
+- Create: `Sources/HiDockApp/Info.plist`
+- Create: `Sources/HiDockApp/HiDockApp.swift`
 - Create: `Sources/HiDockMenubar/AppModel.swift`
 - Create: `Sources/HiDockMenubar/MenuBarView.swift`
-- Create: `Sources/HiDockMenubar/HiDockApp.swift`
 - Create: `Scripts/make-app.sh`
+
+`HiDockApp` is a thin executable shell holding only `@main` and the bundle
+plist. Everything testable stays in the `HiDockMenubar` library.
+
+Add to `Package.swift`:
+
+```swift
+        // products:
+        .executable(name: "HiDockApp", targets: ["HiDockApp"]),
+        // targets:
+        .executableTarget(name: "HiDockApp", dependencies: ["HiDockMenubar", "HiDockKit"]),
+```
 
 **Interfaces:**
 - Consumes: `DeviceMonitor`, `SyncEngine`, `Library`, `LibraryIndex`, `JensenDevice`, `IOUSBHostTransport`
 - Produces: `@MainActor @Observable final class AppModel`, `AppModel.status: DeviceStatus`, `AppModel.recent: [Sidecar]`, `AppModel.syncMessage: String?`, `AppModel.start()`, `enum DeviceStatus`
 
-- [ ] **Step 1: Write `Info.plist`**
+- [ ] **Step 1: Write `Sources/HiDockApp/Info.plist`**
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -2578,7 +3712,7 @@ git commit -m "feat(app): event-driven IOKit device monitor with sleep/wake hand
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleExecutable</key><string>HiDockMenubar</string>
+    <key>CFBundleExecutable</key><string>HiDockApp</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>LSUIElement</key><true/>
 </dict>
@@ -2610,8 +3744,12 @@ public final class AppModel {
 
     public var libraryRoot: URL {
         didSet {
+            guard libraryRoot != oldValue else { return }
             UserDefaults.standard.set(libraryRoot.path, forKey: Self.rootKey)
-            reloadRecent()
+            // Rebuild, not just reload: the index still holds rows for the OLD
+            // root, and the menubar would resolve those relative paths against
+            // the new one and open nothing.
+            rebuildIndex()
         }
     }
 
@@ -2619,6 +3757,7 @@ public final class AppModel {
     private var monitor: DeviceMonitor?
     private var index: LibraryIndex?
     private var syncTask: Task<Void, Never>?
+    private var syncGeneration = 0
     private var retryDelay: Duration = .seconds(2)
 
     public init() {
@@ -2643,8 +3782,10 @@ public final class AppModel {
     }
 
     private static func indexURL() -> URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("HiDock/index.sqlite")
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support")
+        return base.appendingPathComponent("HiDock/index.sqlite")
     }
 
     private func handle(_ event: DeviceEvent) {
@@ -2671,18 +3812,55 @@ public final class AppModel {
     }
 
     private func startSync() {
-        guard let index else { return }
+        guard let index, !isReclaiming else { return }
         let library = Library(root: libraryRoot)
         let engine = SyncEngine(library: library, index: index)
 
+        // Identity token. A fast unplug/replug can cancel sync A, start sync B,
+        // and only THEN have A's unwind clear `syncTask` — reopening the guard
+        // while B is still running and letting a wake- or retry-rescan start a
+        // second concurrent sync against the same device. Clearing only when the
+        // generation still matches closes that.
+        // Clear stale state before a fresh attempt. lastError is now rendered,
+        // so a drift warning or failure count from a previous attach would
+        // otherwise sit in the menu forever, describing something that is no
+        // longer true.
+        lastError = nil
+        lastNotice = nil
+
+        syncGeneration &+= 1
+        let generation = syncGeneration
+
         syncTask = Task { [weak self] in
-            defer { Task { @MainActor in self?.syncTask = nil } }
+            defer {
+                Task { @MainActor in
+                    guard let self, self.syncGeneration == generation else { return }
+                    self.syncTask = nil
+                }
+            }
+
+            let device: JensenDevice
             do {
                 let transport = try IOUSBHostTransport.openFirstAvailable()
-                let device = JensenDevice(transport: transport)
+                device = JensenDevice(transport: transport)
                 try await device.open()
-                defer { Task { await device.close() } }
+            } catch let error as JensenError {
+                await MainActor.run { self?.handleConnectionFailure(error) }
+                return
+            } catch {
+                await MainActor.run { self?.status = .unavailable(error.localizedDescription) }
+                return
+            }
 
+            // Swift has no async `defer`, and `defer { Task { ... } }` does NOT
+            // work here — it is fire-and-forget and may never run. The device
+            // MUST be closed on every path: `close()` aborts in-flight pipes and
+            // destroys the user client, and an interface left claimed makes every
+            // later open() fail with "user client already created" for the rest of
+            // the process's life. The app would sync once and then be dead until
+            // relaunch. So: capture the error, close unconditionally, then handle.
+            var caught: (any Error)?
+            do {
                 let info = try await device.deviceInfo()
                 let card = try await device.cardInfo()
                 await MainActor.run {
@@ -2692,10 +3870,20 @@ public final class AppModel {
                                               capacityMiB: card.capacityMiB)
                 }
 
-                try await Self.syncClock(device: device)
+                if let drift = await Self.readClockDrift(device: device), abs(drift) > 60 {
+                    await MainActor.run {
+                        self?.lastError = "Device clock is off by "
+                            + "\(Int(abs(drift) / 60)) min. Recording timestamps may be wrong."
+                    }
+                }
 
+                // `progress` is a synchronous `@Sendable` callback invoked from
+                // SyncEngine's own actor, so forwarding it needs its own hop back
+                // to MainActor. Rebinding `self` to a fresh local first gives the
+                // region checker a value it can send.
+                let selfForProgress = self
                 _ = try await engine.sync(device: device, serial: info.serialNumber) { progress in
-                    Task { @MainActor in self?.apply(progress) }
+                    Task { @MainActor in selfForProgress?.apply(progress) }
                 }
 
                 let refreshed = try? await device.cardInfo()
@@ -2705,38 +3893,37 @@ public final class AppModel {
                                               freeMiB: refreshed?.freeMiB ?? card.freeMiB,
                                               capacityMiB: refreshed?.capacityMiB ?? card.capacityMiB)
                 }
-            } catch let error as JensenError {
-                await MainActor.run { self?.handleConnectionFailure(error) }
             } catch {
-                await MainActor.run {
-                    self?.status = .unavailable(error.localizedDescription)
-                    self?.lastError = error.localizedDescription
+                caught = error
+            }
+
+            await device.close()
+
+            if let caught {
+                if let jensen = caught as? JensenError {
+                    await MainActor.run { self?.handleConnectionFailure(jensen) }
+                } else {
+                    await MainActor.run {
+                        self?.status = .unavailable(caught.localizedDescription)
+                        self?.lastError = caught.localizedDescription
+                    }
                 }
             }
         }
     }
 
     /// The device clock names the recordings, so drift means mislabelled notes.
-    private static func syncClock(device: JensenDevice) async throws {
-        let body = try await device.send(.getDeviceTime, timeout: .seconds(5))
-        guard body.count >= 7 else { return }
-        let b = [UInt8](body)
-        var c = DateComponents()
-        c.year = Int(b[0]) << 8 | Int(b[1])
-        c.month = Int(b[2]); c.day = Int(b[3])
-        c.hour = Int(b[4]); c.minute = Int(b[5]); c.second = Int(b[6])
-        guard let deviceTime = Calendar.current.date(from: c) else { return }
-
-        if abs(deviceTime.timeIntervalSinceNow) > 60 {
-            let now = Calendar.current.dateComponents(
-                [.year, .month, .day, .hour, .minute, .second], from: Date())
-            let payload = Data([
-                UInt8(truncatingIfNeeded: (now.year ?? 2026) >> 8),
-                UInt8(truncatingIfNeeded: now.year ?? 2026),
-                UInt8(now.month ?? 1), UInt8(now.day ?? 1),
-                UInt8(now.hour ?? 0), UInt8(now.minute ?? 0), UInt8(now.second ?? 0)])
-            _ = try? await device.send(.setDeviceTime, body: payload, timeout: .seconds(5))
-        }
+    ///
+    /// READ ONLY, DELIBERATELY. The GET_DEVICE_TIME body layout below is an
+    /// educated guess and appears in neither reference implementation. Reading
+    /// a wrong layout yields a nonsense date and is harmless; *writing* one
+    /// would set the clock that names every future recording to garbage.
+    /// Task 5's hardware check dumps the real bytes. Do not call
+    /// SET_DEVICE_TIME until this parse is confirmed against them.
+    private static func readClockDrift(device: JensenDevice) async -> TimeInterval? {
+        guard let body = try? await device.send(.getDeviceTime, timeout: .seconds(5)),
+              let deviceTime = ResponseParsers.deviceTime(body) else { return nil }
+        return deviceTime.timeIntervalSinceNow
     }
 
     private func handleConnectionFailure(_ error: JensenError) {
@@ -2828,6 +4015,21 @@ struct MenuBarView: View {
                 .foregroundStyle(.red)
             Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
         }
+
+        // Rendered regardless of status. Clock-drift warnings and "N recordings
+        // failed to sync" were being written and never shown to anyone.
+        if let error = model.lastError {
+            Text(error)
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .lineLimit(3)
+        }
+        if let notice = model.lastNotice {
+            Text(notice)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+        }
     }
 
     @ViewBuilder
@@ -2879,9 +4081,10 @@ struct MenuBarView: View {
 }
 ```
 
-- [ ] **Step 4: Write `HiDockApp.swift`**
+- [ ] **Step 4: Write `Sources/HiDockApp/HiDockApp.swift`**
 
 ```swift
+import HiDockMenubar
 import SwiftUI
 
 @main
@@ -2913,12 +4116,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$(swift build --configuration "$CONFIG" --show-bin-path)"
 APP="$ROOT/build/HiDock.app"
 
-swift build --configuration "$CONFIG" --product HiDockMenubar
+swift build --configuration "$CONFIG" --product HiDockApp
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN/HiDockMenubar" "$APP/Contents/MacOS/HiDockMenubar"
-cp "$ROOT/Sources/HiDockMenubar/Info.plist" "$APP/Contents/Info.plist"
+cp "$BIN/HiDockApp" "$APP/Contents/MacOS/HiDockApp"
+cp "$ROOT/Sources/HiDockApp/Info.plist" "$APP/Contents/Info.plist"
 codesign --force --deep --sign - "$APP"
 
 echo "Built $APP"
@@ -2967,31 +4170,61 @@ Append to the class:
 ```swift
     public var reclaimCandidates: [FileInfo] = []
     public var isLoadingReclaim = false
+    /// Neutral outcome message. `lastError` is for problems; this is for
+    /// "it worked", which the reclaim flow otherwise had no way to say.
+    public var lastNotice: String?
+    /// Reclaim holds the USB interface too. Without this, an attach or a retry
+    /// rescan can call startSync mid-reclaim and fail on "user client already
+    /// created". The guard has to run in BOTH directions.
+    private var isReclaiming = false
 
     /// Lists only recordings verified present on disk at the expected byte
     /// length, checked at call time rather than trusted from the index.
     public func loadReclaimable() {
-        guard let index, syncTask == nil else { return }
+        // Clear first: a stale list left from a previous Cancel would otherwise
+        // be presented as if it were current.
+        reclaimCandidates = []
+        lastNotice = nil
+
+        guard let index, syncTask == nil, !isReclaiming else {
+            lastError = "Can't check the device while a sync is running. Try again in a moment."
+            return
+        }
+        isReclaiming = true
         isLoadingReclaim = true
         let engine = SyncEngine(library: Library(root: libraryRoot), index: index)
 
         Task { [weak self] in
-            defer { Task { @MainActor in self?.isLoadingReclaim = false } }
             do {
                 let transport = try IOUSBHostTransport.openFirstAvailable()
                 let device = JensenDevice(transport: transport)
                 try await device.open()
-                defer { Task { await device.close() } }
+            
                 let candidates = try await engine.reclaimable(device: device)
-                await MainActor.run { self?.reclaimCandidates = candidates }
+                await device.close()
+                await MainActor.run {
+                    self?.reclaimCandidates = candidates
+                    self?.isLoadingReclaim = false
+                    self?.isReclaiming = false
+                }
             } catch {
-                await MainActor.run { self?.lastError = error.localizedDescription }
+                await MainActor.run {
+                    self?.lastError = error.localizedDescription
+                    self?.isLoadingReclaim = false
+                    self?.isReclaiming = false
+                }
             }
         }
     }
 
     public func reclaim(_ files: [FileInfo]) {
-        guard let index, syncTask == nil, !files.isEmpty else { return }
+        guard let index, syncTask == nil, !isReclaiming, !files.isEmpty else {
+            lastError = "Can't delete right now. Try again in a moment."
+            return
+        }
+        isReclaiming = true
+        lastError = nil
+        lastNotice = nil
         let engine = SyncEngine(library: Library(root: libraryRoot), index: index)
 
         Task { [weak self] in
@@ -2999,11 +4232,34 @@ Append to the class:
                 let transport = try IOUSBHostTransport.openFirstAvailable()
                 let device = JensenDevice(transport: transport)
                 try await device.open()
-                defer { Task { await device.close() } }
-                _ = try await engine.deleteFromDevice(files, device: device)
-                await MainActor.run { self?.reclaimCandidates = [] }
+            
+                let result = try await engine.deleteFromDevice(files, device: device)
+                await device.close()
+                await MainActor.run {
+                    self?.reclaimCandidates = []
+                    self?.isReclaiming = false
+                    // Report ALL three outcomes. A file reported `failed` may
+                    // still be on the device, and a fully-`skipped` run used to
+                    // look identical to a successful one.
+                    var problems: [String] = []
+                    if !result.failed.isEmpty {
+                        problems.append("\(result.failed.count) could not be deleted")
+                    }
+                    if !result.skipped.isEmpty {
+                        problems.append("\(result.skipped.count) skipped (no verified local copy)")
+                    }
+                    if problems.isEmpty {
+                        self?.lastNotice = "Freed \(result.deleted.count) recording(s) from the P1."
+                    } else {
+                        self?.lastError = "Deleted \(result.deleted.count). "
+                            + problems.joined(separator: ", ") + "."
+                    }
+                }
             } catch {
-                await MainActor.run { self?.lastError = error.localizedDescription }
+                await MainActor.run {
+                    self?.lastError = error.localizedDescription
+                    self?.isReclaiming = false
+                }
             }
         }
     }
@@ -3019,6 +4275,9 @@ struct SettingsView: View {
     @Bindable var model: AppModel
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var loginItemError: String?
+    /// Suppresses the onChange that the revert below would otherwise re-trigger,
+    /// issuing a spurious opposite-direction register/unregister.
+    @State private var isSyncingToggle = false
 
     var body: some View {
         Form {
@@ -3035,8 +4294,17 @@ struct SettingsView: View {
             Section("Startup") {
                 Toggle("Launch at login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, enabled in
+                        guard !isSyncingToggle else { return }
                         setLoginItem(enabled)
                     }
+                    // SwiftUI's Settings scene can retain its root view across
+                    // window open/close, so a change made in System Settings
+                    // would otherwise leave this stale.
+                    .onAppear { refreshLoginItemState() }
+                if SMAppService.mainApp.status == .requiresApproval {
+                    Text("Waiting for approval in System Settings > Login Items.")
+                        .font(.caption).foregroundStyle(.orange)
+                }
                 if let loginItemError {
                     Text(loginItemError).font(.caption).foregroundStyle(.red)
                 }
@@ -3057,11 +4325,21 @@ struct SettingsView: View {
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
+        panel.canCreateDirectories = true
         panel.allowsMultipleSelection = false
         panel.directoryURL = model.libraryRoot
+        // LSUIElement apps are not activated by default, so without this the
+        // panel can open behind the frontmost application.
+        NSApp.activate(ignoringOtherApps: true)
         if panel.runModal() == .OK, let url = panel.url {
             model.libraryRoot = url
         }
+    }
+
+    private func refreshLoginItemState() {
+        isSyncingToggle = true
+        launchAtLogin = SMAppService.mainApp.status == .enabled
+        isSyncingToggle = false
     }
 
     private func setLoginItem(_ enabled: Bool) {
@@ -3074,7 +4352,7 @@ struct SettingsView: View {
             loginItemError = nil
         } catch {
             loginItemError = error.localizedDescription
-            launchAtLogin = SMAppService.mainApp.status == .enabled
+            refreshLoginItemState()
         }
     }
 }
@@ -3090,6 +4368,7 @@ struct ReclaimView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var selected: Set<String> = []
+    @State private var showConfirm = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -3122,12 +4401,29 @@ struct ReclaimView: View {
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Delete \(selected.count) from device") {
+                    .keyboardShortcut(.cancelAction)
+
+                // Deliberately NOT .defaultAction. Deleting from the device is
+                // irreversible, and Select-all sits one click away — Return
+                // should never be able to wipe the P1. A confirmation dialog
+                // stands between the button and the deletion.
+                Button("Delete \(selected.count) from device\u{2026}") {
+                    showConfirm = true
+                }
+                .disabled(selected.isEmpty)
+            }
+            .confirmationDialog(
+                "Delete \(selected.count) recording(s) from the P1?",
+                isPresented: $showConfirm, titleVisibility: .visible
+            ) {
+                Button("Delete from device", role: .destructive) {
                     model.reclaim(model.reclaimCandidates.filter { selected.contains($0.signature) })
                     dismiss()
                 }
-                .disabled(selected.isEmpty)
-                .keyboardShortcut(.defaultAction)
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Your local copies in the library are not affected. "
+                     + "This cannot be undone on the device.")
             }
         }
         .padding()
@@ -3203,7 +4499,7 @@ git commit -m "feat(app): settings, login item, and verified reclaim flow"
 | Actor, one command in flight | 3 |
 | Drain after timeout | 3 |
 | IOUSBHost transport | 4 |
-| Clock drift correction | 10 (`syncClock`) |
+| Clock drift detection | 10 (`readClockDrift`, read-only — see deviation 4) |
 | File list, count, card info | 5 |
 | Streaming transfer, no RAM buffering | 6 |
 | Library layout + sidecars | 7 |
@@ -3226,6 +4522,7 @@ git commit -m "feat(app): settings, login item, and verified reclaim flow"
 1. Duration is measured with `AVURLAsset` after download rather than inferred from a `fileVersion` bitrate table. More accurate, and nothing before download needs a duration.
 2. Battery (`GET_BATTERY_STATUS`, 4100) is plumbed through `DeviceStatus` but reported as `nil`. Its body format is not in the reference implementation. Task 5's hardware check should capture the raw bytes so it can be parsed in a follow-up. The menubar simply omits the battery line when `nil`, so nothing is broken by this.
 3. The app is built by `Scripts/make-app.sh` rather than an Xcode project, so every step is scriptable.
+4. **The spec's "correct clock drift" requirement ships as detect-and-warn, not correct.** The `GET_DEVICE_TIME`/`SET_DEVICE_TIME` body layout is documented in neither reference implementation, so the parse in `readClockDrift` is a guess. A wrong read is harmless; a wrong write would corrupt the clock that names every recording. Task 5's hardware check dumps the real bytes, and enabling the write is a small follow-up once they are known. Decided with Angelo before execution, 2026-08-04.
 
 **Placeholder scan:** clean. Every code step contains complete, compiling code. The three hardware checks that can fail (Tasks 1, 4, 5) each specify a concrete fallback and an explicit stop-and-report instruction.
 
