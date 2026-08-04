@@ -100,6 +100,12 @@ public final class AppModel: @unchecked Sendable {
         let library = Library(root: libraryRoot)
         let engine = SyncEngine(library: library, index: index)
 
+        // Clear stale state before a fresh attempt. lastError is now rendered,
+        // so a drift warning or failure count from a previous attach would
+        // otherwise sit in the menu forever, describing something that is no
+        // longer true.
+        lastError = nil
+
         // Identity token. A fast unplug/replug can cancel sync A, start sync B,
         // and only THEN have A's unwind clear `syncTask` — reopening the guard
         // while B is still running and letting a wake- or retry-rescan start a
@@ -245,6 +251,89 @@ public final class AppModel: @unchecked Sendable {
         case let .finished(downloaded, _, failed):
             if failed > 0 { lastError = "\(failed) recording(s) failed to sync" }
             if downloaded > 0 { reloadRecent() }
+        }
+    }
+
+    public var reclaimCandidates: [FileInfo] = []
+    public var isLoadingReclaim = false
+
+    /// Lists only recordings verified present on disk at the expected byte
+    /// length, checked at call time rather than trusted from the index.
+    public func loadReclaimable() {
+        guard let index, syncTask == nil else { return }
+        isLoadingReclaim = true
+        let engine = SyncEngine(library: Library(root: libraryRoot), index: index)
+
+        Task { [weak self] in
+            defer { Task { @MainActor in self?.isLoadingReclaim = false } }
+            do {
+                let transport = try IOUSBHostTransport.openFirstAvailable()
+                let device = JensenDevice(transport: transport)
+                try await device.open()
+
+                // Same discipline as startSync: the device MUST be closed on
+                // every path once open() succeeds, or the claimed interface
+                // makes every later open() (including the next sync) fail with
+                // "user client already created" for the rest of the process's
+                // life. open() itself already tears down on ITS OWN failure, so
+                // close() only belongs on the success side of that call.
+                var caught: (any Error)?
+                var candidates: [FileInfo] = []
+                do {
+                    candidates = try await engine.reclaimable(device: device)
+                } catch {
+                    caught = error
+                }
+                await device.close()
+
+                if let caught {
+                    await MainActor.run { self?.lastError = caught.localizedDescription }
+                } else {
+                    await MainActor.run { self?.reclaimCandidates = candidates }
+                }
+            } catch {
+                await MainActor.run { self?.lastError = error.localizedDescription }
+            }
+        }
+    }
+
+    public func reclaim(_ files: [FileInfo]) {
+        guard let index, syncTask == nil, !files.isEmpty else { return }
+        let engine = SyncEngine(library: Library(root: libraryRoot), index: index)
+
+        Task { [weak self] in
+            do {
+                let transport = try IOUSBHostTransport.openFirstAvailable()
+                let device = JensenDevice(transport: transport)
+                try await device.open()
+
+                // See loadReclaimable: close on every path once open() succeeds.
+                var caught: (any Error)?
+                var result = DeleteResult()
+                do {
+                    result = try await engine.deleteFromDevice(files, device: device)
+                } catch {
+                    caught = error
+                }
+                await device.close()
+
+                await MainActor.run {
+                    if let caught {
+                        self?.lastError = caught.localizedDescription
+                    } else if !result.failed.isEmpty {
+                        // deleteFromDevice re-verifies against the device's own
+                        // listing after deleting, so a name here means the
+                        // device still reports the file present (or the
+                        // confirmation listing itself failed) — surface it
+                        // rather than silently reporting success.
+                        self?.lastError = "\(result.failed.count) recording(s) "
+                            + "could not be confirmed deleted from the device"
+                    }
+                    self?.reclaimCandidates = []
+                }
+            } catch {
+                await MainActor.run { self?.lastError = error.localizedDescription }
+            }
         }
     }
 }

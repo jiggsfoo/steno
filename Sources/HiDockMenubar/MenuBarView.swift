@@ -3,6 +3,7 @@ import SwiftUI
 
 public struct MenuBarView: View {
     @Bindable var model: AppModel
+    @State private var showReclaim = false
 
     public init(model: AppModel) {
         self.model = model
@@ -84,6 +85,9 @@ public struct MenuBarView: View {
         Button("Reveal in Finder") {
             NSWorkspace.shared.open(model.libraryRoot)
         }
+        Button("Free up space on P1...") { showReclaim = true }
+            .disabled(model.status == .disconnected)
+            .sheet(isPresented: $showReclaim) { ReclaimView(model: model) }
         SettingsLink { Text("Settings...") }
         Button("Quit HiDock") { NSApplication.shared.terminate(nil) }
     }
