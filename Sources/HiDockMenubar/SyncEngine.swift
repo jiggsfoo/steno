@@ -17,6 +17,18 @@ public protocol SyncDevice: Sendable, Actor {
 public enum SyncError: Error, Equatable {
     case libraryUnreachable
     case insufficientSpace(needed: Int)
+    case alreadyRunning
+}
+
+/// Outcome of a reclaim. Names rather than FileInfo, so the menubar can report
+/// it without holding device state.
+public struct DeleteResult: Sendable, Equatable {
+    /// Confirmed gone from the device's own file listing.
+    public var deleted: [String] = []
+    /// Not deleted because they no longer verify as present on disk.
+    public var skipped: [String] = []
+    /// The device errored, or still lists the file afterwards.
+    public var failed: [String] = []
 }
 
 public enum SyncProgress: Sendable {
@@ -35,6 +47,12 @@ public actor SyncEngine {
     private let library: Library
     private let index: LibraryIndex
 
+    /// Guards against overlapping runs. `sync` is an actor method with `await`
+    /// points, and Swift actors are reentrant, so Task 9's auto-sync-on-attach
+    /// and a manual trigger could otherwise interleave — computing the same
+    /// pending set and racing on the same `.incoming` staging file.
+    private var isSyncing = false
+
     public init(library: Library, index: LibraryIndex) {
         self.library = library
         self.index = index
@@ -46,15 +64,34 @@ public actor SyncEngine {
         serial: String,
         progress: @Sendable (SyncProgress) -> Void
     ) async throws -> SyncResult {
-        guard library.isReachable() else { throw SyncError.libraryUnreachable }
+        guard !isSyncing else { throw SyncError.alreadyRunning }
+        isSyncing = true
+        defer { isSyncing = false }
+
+        guard library.isReachable() else {
+            progress(.finished(downloaded: 0, skipped: 0, failed: 0))
+            throw SyncError.libraryUnreachable
+        }
 
         progress(.listing)
-        let files = try await device.listFiles()
+        let files: [FileInfo]
+        do {
+            files = try await device.listFiles()
+        } catch {
+            // Always emit a terminal event, or a UI driven off progress hangs
+            // on "listing" forever.
+            progress(.finished(downloaded: 0, skipped: 0, failed: 0))
+            throw error
+        }
 
         // Oldest first, so an interrupted sync still makes forward progress
         // through the backlog rather than repeatedly retrying the newest file.
+        // Signature breaks ties: Array.sorted is not documented stable, and every
+        // undated file maps to .distantPast, so without it their relative order
+        // is arbitrary between runs.
         let ordered = files.sorted {
-            ($0.recordedAt ?? .distantPast) < ($1.recordedAt ?? .distantPast)
+            let l = ($0.recordedAt ?? .distantPast), r = ($1.recordedAt ?? .distantPast)
+            return l == r ? $0.signature < $1.signature : l < r
         }
 
         var result = SyncResult()
@@ -103,10 +140,13 @@ public actor SyncEngine {
     /// are still on disk at the expected length.
     private func isAlreadySynced(_ file: FileInfo) -> Bool {
         guard index.contains(signature: file.signature) else { return false }
-        let url = library.destinationURL(for: file)
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = attrs[.size] as? Int else { return false }
-        return size == file.lengthBytes
+        guard let size = Library.fileSize(at: library.destinationURL(for: file)) else {
+            return false
+        }
+        // Compare against the LOCALLY recorded length where one exists. A check
+        // that gates a destructive action should trust local truth, not the
+        // device's own claim about what it is holding.
+        return size == (library.sidecar(for: file)?.lengthBytes ?? file.lengthBytes)
     }
 
     /// Reclaim. Only ever called from the explicit menubar action.
@@ -115,13 +155,48 @@ public actor SyncEngine {
         try await device.listFiles().filter { isAlreadySynced($0) }
     }
 
-    public func deleteFromDevice(_ files: [FileInfo], device: any SyncDevice) async throws -> Int {
-        var deleted = 0
-        for file in files where isAlreadySynced(file) {
-            try await device.deleteFile(named: file.name)
-            deleted += 1
+    /// Deletes from the device, then CONFIRMS against the device's own listing.
+    ///
+    /// The DELETE_FILE response body layout has never been verified against
+    /// hardware, so a status code in it cannot be trusted. Rather than guess at
+    /// one, this checks the outcome: whatever the device still lists is still
+    /// there. Format-independent, and it is the only command in the project
+    /// that destroys data.
+    ///
+    /// Per-file isolation like `sync`: one device error does not abandon the
+    /// rest, and the caller can tell deleted from skipped from failed.
+    public func deleteFromDevice(
+        _ files: [FileInfo], device: any SyncDevice
+    ) async throws -> DeleteResult {
+        var result = DeleteResult()
+        var requested: [FileInfo] = []
+
+        for file in files {
+            // Re-verified HERE, at call time, not trusted from the index. A file
+            // removed from disk since `reclaimable()` must not be deleted.
+            guard isAlreadySynced(file) else {
+                result.skipped.append(file.name)
+                continue
+            }
+            do {
+                try await device.deleteFile(named: file.name)
+                requested.append(file)
+            } catch {
+                result.failed.append(file.name)
+            }
         }
-        return deleted
+
+        guard !requested.isEmpty else { return result }
+
+        let stillPresent = Set((try? await device.listFiles())?.map(\.signature) ?? [])
+        for file in requested {
+            if stillPresent.contains(file.signature) {
+                result.failed.append(file.name)
+            } else {
+                result.deleted.append(file.name)
+            }
+        }
+        return result
     }
 }
 

@@ -90,6 +90,78 @@ private func file(_ name: String, _ bytes: Int, sig: String) -> FileInfo {
     }
 }
 
+/// The spec's headline safety property: sync copies, it never deletes. The
+/// fake records every delete it is asked for, and this is the assertion that
+/// makes recording it mean something.
+@Test func syncNeverDeletesFromTheDevice() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let b = file("20260804150000REC002.mp3", 3, sig: "sb")
+    let device = FakeDevice(files: [a, b],
+                            payloads: [a.name: Data([1, 2, 3, 4]), b.name: Data([5, 6, 7])])
+
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }   // re-sync too
+
+    #expect(await device.deletedNames.isEmpty)
+}
+
+/// Actors are reentrant, so two overlapping syncs would compute the same
+/// pending set and race on the same staging file.
+@Test func aSecondConcurrentSyncIsRejected() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])])
+
+    async let first = engine.sync(device: device, serial: "SN1") { _ in }
+    async let second = engine.sync(device: device, serial: "SN1") { _ in }
+    let outcomes = await [try? first, try? second]
+
+    #expect(outcomes.compactMap { $0 }.count == 1)   // exactly one ran
+}
+
+/// Reclaim must re-verify at call time. A file removed from disk after
+/// reclaimable() listed it must NOT be deleted from the device.
+@Test func reclaimSkipsFilesNoLongerOnDisk() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, library, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])])
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+
+    #expect(try await engine.reclaimable(device: device).count == 1)
+
+    // Pull the local copy out from under it.
+    try FileManager.default.removeItem(at: library.destinationURL(for: a))
+
+    let result = try await engine.deleteFromDevice([a], device: device)
+    #expect(result.deleted.isEmpty)
+    #expect(result.skipped == [a.name])
+    #expect(await device.deletedNames.isEmpty)
+}
+
+/// A device that accepts the command but still lists the file afterwards must
+/// be reported as failed, not deleted. The DELETE_FILE response format is
+/// unverified, so the listing is the only trustworthy confirmation.
+@Test func reclaimReportsFailureWhenTheDeviceStillListsTheFile() async throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let (engine, _, _) = try makeEngine(root: root)
+
+    let a = file("20260804143022REC001.mp3", 4, sig: "sa")
+    let device = FakeDevice(files: [a], payloads: [a.name: Data([1, 2, 3, 4])],
+                            ignoreDeletes: true)
+    _ = try await engine.sync(device: device, serial: "SN1") { _ in }
+
+    let result = try await engine.deleteFromDevice([a], device: device)
+    #expect(result.deleted.isEmpty)
+    #expect(result.failed == [a.name])
+}
+
 @Test func progressReportsEachPhase() async throws {
     let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
     let (engine, _, _) = try makeEngine(root: root)

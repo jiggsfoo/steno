@@ -62,6 +62,14 @@ public struct Library: Sendable {
         Self.sidecarURL(forAudio: destinationURL(for: file))
     }
 
+    /// Reads the sidecar at `file`'s computed path, if one is there and decodes.
+    /// The locally recorded length in it is the trusted source for anything
+    /// gating a destructive action — see `SyncEngine.isAlreadySynced`.
+    public func sidecar(for file: FileInfo) -> Sidecar? {
+        guard let data = try? Data(contentsOf: sidecarURL(for: file)) else { return nil }
+        return try? Self.decoder.decode(Sidecar.self, from: data)
+    }
+
     static func sidecarURL(forAudio url: URL) -> URL {
         url.deletingPathExtension().appendingPathExtension("json")
     }
