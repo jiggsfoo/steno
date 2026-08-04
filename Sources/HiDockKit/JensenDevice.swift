@@ -284,10 +284,15 @@ public actor JensenDevice {
         }
 
         // The destination is not touched until here.
-        if fm.fileExists(atPath: url.path) {
-            _ = try fm.replaceItemAt(url, withItemAt: staging)
-        } else {
-            try fm.moveItem(at: staging, to: url)
+        do {
+            if fm.fileExists(atPath: url.path) {
+                _ = try fm.replaceItemAt(url, withItemAt: staging)
+            } else {
+                try fm.moveItem(at: staging, to: url)
+            }
+        } catch {
+            try? fm.removeItem(at: staging)
+            throw error
         }
     }
 }
