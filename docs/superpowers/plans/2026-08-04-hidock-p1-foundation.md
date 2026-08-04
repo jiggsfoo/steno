@@ -2148,10 +2148,15 @@ git commit -m "feat(kit): streaming file transfer with verification and hidock-c
 Add to `targets:`:
 
 ```swift
-        .executableTarget(
+        // A LIBRARY, not an executable. All app logic and views live here so the
+        // test target can @testable import it. Task 10 adds a thin `HiDockApp`
+        // executable target carrying only @main and Info.plist. Declaring this
+        // executable now would fail to link (no main entry point yet) and would
+        // make the test target depend on an executable, which SPM handles
+        // awkwardly.
+        .target(
             name: "HiDockMenubar",
             dependencies: ["HiDockKit"],
-            resources: [.copy("Info.plist")],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
         .testTarget(name: "HiDockMenubarTests", dependencies: ["HiDockMenubar", "HiDockKit"]),
@@ -2160,7 +2165,7 @@ Add to `targets:`:
 Add to `products:`:
 
 ```swift
-        .executable(name: "HiDockMenubar", targets: ["HiDockMenubar"]),
+        .library(name: "HiDockMenubar", targets: ["HiDockMenubar"]),
 ```
 
 - [ ] **Step 2: Write the failing tests**
@@ -3112,17 +3117,30 @@ git commit -m "feat(app): event-driven IOKit device monitor with sleep/wake hand
 ### Task 10: Menubar app
 
 **Files:**
-- Create: `Sources/HiDockMenubar/Info.plist`
+- Modify: `Package.swift` (add the `HiDockApp` executable target and product)
+- Create: `Sources/HiDockApp/Info.plist`
+- Create: `Sources/HiDockApp/HiDockApp.swift`
 - Create: `Sources/HiDockMenubar/AppModel.swift`
 - Create: `Sources/HiDockMenubar/MenuBarView.swift`
-- Create: `Sources/HiDockMenubar/HiDockApp.swift`
 - Create: `Scripts/make-app.sh`
+
+`HiDockApp` is a thin executable shell holding only `@main` and the bundle
+plist. Everything testable stays in the `HiDockMenubar` library.
+
+Add to `Package.swift`:
+
+```swift
+        // products:
+        .executable(name: "HiDockApp", targets: ["HiDockApp"]),
+        // targets:
+        .executableTarget(name: "HiDockApp", dependencies: ["HiDockMenubar", "HiDockKit"]),
+```
 
 **Interfaces:**
 - Consumes: `DeviceMonitor`, `SyncEngine`, `Library`, `LibraryIndex`, `JensenDevice`, `IOUSBHostTransport`
 - Produces: `@MainActor @Observable final class AppModel`, `AppModel.status: DeviceStatus`, `AppModel.recent: [Sidecar]`, `AppModel.syncMessage: String?`, `AppModel.start()`, `enum DeviceStatus`
 
-- [ ] **Step 1: Write `Info.plist`**
+- [ ] **Step 1: Write `Sources/HiDockApp/Info.plist`**
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -3134,7 +3152,7 @@ git commit -m "feat(app): event-driven IOKit device monitor with sleep/wake hand
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>1</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleExecutable</key><string>HiDockMenubar</string>
+    <key>CFBundleExecutable</key><string>HiDockApp</string>
     <key>LSMinimumSystemVersion</key><string>15.0</string>
     <key>LSUIElement</key><true/>
 </dict>
@@ -3431,9 +3449,10 @@ struct MenuBarView: View {
 }
 ```
 
-- [ ] **Step 4: Write `HiDockApp.swift`**
+- [ ] **Step 4: Write `Sources/HiDockApp/HiDockApp.swift`**
 
 ```swift
+import HiDockMenubar
 import SwiftUI
 
 @main
@@ -3465,12 +3484,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$(swift build --configuration "$CONFIG" --show-bin-path)"
 APP="$ROOT/build/HiDock.app"
 
-swift build --configuration "$CONFIG" --product HiDockMenubar
+swift build --configuration "$CONFIG" --product HiDockApp
 
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$BIN/HiDockMenubar" "$APP/Contents/MacOS/HiDockMenubar"
-cp "$ROOT/Sources/HiDockMenubar/Info.plist" "$APP/Contents/Info.plist"
+cp "$BIN/HiDockApp" "$APP/Contents/MacOS/HiDockApp"
+cp "$ROOT/Sources/HiDockApp/Info.plist" "$APP/Contents/Info.plist"
 codesign --force --deep --sign - "$APP"
 
 echo "Built $APP"
