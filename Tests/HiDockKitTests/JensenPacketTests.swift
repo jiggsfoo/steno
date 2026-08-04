@@ -86,6 +86,25 @@ import Testing
     #expect(second.body == Data([2, 2]))
 }
 
+/// Pins the mask/shift arithmetic at the top of both packed fields without
+/// allocating a 16 MB buffer: a maximal declared length must be read back
+/// exactly and simply report needMoreData against a short buffer.
+@Test func decodeHandlesMaximalDeclaredLengthWithoutOverflow() throws {
+    var bytes: [UInt8] = [0x12, 0x34, 0x00, 0x01, 0, 0, 0, 0]
+    bytes += [0xFF, 0xFF, 0xFF, 0xFF]          // padding 255, body length 0xFFFFFF
+    #expect(try JensenPacket.decode(from: Data(bytes)) == .needMoreData)
+}
+
+/// The largest body length that still leaves the padding byte clear must
+/// round-trip with padding read back as zero.
+@Test func encodesLargestBodyThatKeepsPaddingByteClear() {
+    let body = Data(repeating: 0xAB, count: 300_000)
+    let bytes = [UInt8](JensenPacket(command: 5, sequence: 1, body: body).encoded())
+    #expect(bytes[8] == 0x00)                                    // padding stays clear
+    let declared = Int(bytes[9]) << 16 | Int(bytes[10]) << 8 | Int(bytes[11])
+    #expect(declared == 300_000)
+}
+
 /// Regression guard: Data slices keep their parent's indices, so any decoder
 /// that assumes a zero start index breaks on the second packet of a read.
 @Test func decodesFromASliceWithNonZeroStartIndex() throws {

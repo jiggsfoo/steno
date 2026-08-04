@@ -18,7 +18,19 @@ public struct JensenPacket: Sendable, Equatable {
     public static let headerSize = 12
     private static let syncMarker: [UInt8] = [0x12, 0x34]
 
+    /// The wire format stores body length in 24 bits, with the top byte of the
+    /// same word reserved for padding length.
+    public static let maxBodyLength = 0x00FF_FFFF
+
     public func encoded() -> Data {
+        // A body this large is a programming error, not a runtime condition:
+        // requests carry filenames and small payloads, and bulk data flows the
+        // other way. Without this, an oversized body would silently spill into
+        // the padding byte and emit a corrupt frame.
+        precondition(
+            body.count <= Self.maxBodyLength,
+            "body of \(body.count) bytes exceeds the protocol maximum of \(Self.maxBodyLength)")
+
         var out = Data(capacity: Self.headerSize + body.count)
         out.append(contentsOf: Self.syncMarker)
         out.append(UInt8(truncatingIfNeeded: command >> 8))
