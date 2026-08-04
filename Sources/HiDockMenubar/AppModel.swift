@@ -96,7 +96,10 @@ public final class AppModel: @unchecked Sendable {
     }
 
     private func startSync() {
-        guard let index else { return }
+        // Reclaim holds the USB interface too. Without this, an attach or a
+        // retry rescan can call startSync mid-reclaim and fail on "user
+        // client already created". The guard has to run in BOTH directions.
+        guard let index, !isReclaiming else { return }
         let library = Library(root: libraryRoot)
         let engine = SyncEngine(library: library, index: index)
 
@@ -105,6 +108,7 @@ public final class AppModel: @unchecked Sendable {
         // otherwise sit in the menu forever, describing something that is no
         // longer true.
         lastError = nil
+        lastNotice = nil
 
         // Identity token. A fast unplug/replug can cancel sync A, start sync B,
         // and only THEN have A's unwind clear `syncTask` — reopening the guard
@@ -256,27 +260,44 @@ public final class AppModel: @unchecked Sendable {
 
     public var reclaimCandidates: [FileInfo] = []
     public var isLoadingReclaim = false
+    /// Neutral outcome message. `lastError` is for problems; this is for
+    /// "it worked", which the reclaim flow otherwise had no way to say.
+    public var lastNotice: String?
+    /// Reclaim holds the USB interface too. Without this, an attach or a retry
+    /// rescan can call startSync mid-reclaim and fail on "user client already
+    /// created". The guard has to run in BOTH directions.
+    private var isReclaiming = false
 
     /// Lists only recordings verified present on disk at the expected byte
     /// length, checked at call time rather than trusted from the index.
     public func loadReclaimable() {
-        guard let index, syncTask == nil else { return }
+        // Clear first: a stale list left from a previous Cancel would otherwise
+        // be presented as if it were current.
+        reclaimCandidates = []
+        lastNotice = nil
+
+        guard let index, syncTask == nil, !isReclaiming else {
+            lastError = "Can't check the device while a sync is running. Try again in a moment."
+            return
+        }
+        isReclaiming = true
         isLoadingReclaim = true
         let engine = SyncEngine(library: Library(root: libraryRoot), index: index)
 
         Task { [weak self] in
-            defer { Task { @MainActor in self?.isLoadingReclaim = false } }
             do {
                 let transport = try IOUSBHostTransport.openFirstAvailable()
                 let device = JensenDevice(transport: transport)
                 try await device.open()
 
                 // Same discipline as startSync: the device MUST be closed on
-                // every path once open() succeeds, or the claimed interface
-                // makes every later open() (including the next sync) fail with
-                // "user client already created" for the rest of the process's
-                // life. open() itself already tears down on ITS OWN failure, so
-                // close() only belongs on the success side of that call.
+                // every path once open() succeeds, not only when reclaimable()
+                // returns cleanly. Skipping close() when it throws leaves the
+                // claimed interface behind, and every later open() — including
+                // the next sync — fails with "user client already created" for
+                // the rest of the process's life. open() itself already tears
+                // down on ITS OWN failure, so close() only belongs on the
+                // success side of THAT call.
                 var caught: (any Error)?
                 var candidates: [FileInfo] = []
                 do {
@@ -286,19 +307,33 @@ public final class AppModel: @unchecked Sendable {
                 }
                 await device.close()
 
-                if let caught {
-                    await MainActor.run { self?.lastError = caught.localizedDescription }
-                } else {
-                    await MainActor.run { self?.reclaimCandidates = candidates }
+                await MainActor.run {
+                    if let caught {
+                        self?.lastError = caught.localizedDescription
+                    } else {
+                        self?.reclaimCandidates = candidates
+                    }
+                    self?.isLoadingReclaim = false
+                    self?.isReclaiming = false
                 }
             } catch {
-                await MainActor.run { self?.lastError = error.localizedDescription }
+                await MainActor.run {
+                    self?.lastError = error.localizedDescription
+                    self?.isLoadingReclaim = false
+                    self?.isReclaiming = false
+                }
             }
         }
     }
 
     public func reclaim(_ files: [FileInfo]) {
-        guard let index, syncTask == nil, !files.isEmpty else { return }
+        guard let index, syncTask == nil, !isReclaiming, !files.isEmpty else {
+            lastError = "Can't delete right now. Try again in a moment."
+            return
+        }
+        isReclaiming = true
+        lastError = nil
+        lastNotice = nil
         let engine = SyncEngine(library: Library(root: libraryRoot), index: index)
 
         Task { [weak self] in
@@ -307,7 +342,8 @@ public final class AppModel: @unchecked Sendable {
                 let device = JensenDevice(transport: transport)
                 try await device.open()
 
-                // See loadReclaimable: close on every path once open() succeeds.
+                // See loadReclaimable: close on every path once open()
+                // succeeds, including when deleteFromDevice itself throws.
                 var caught: (any Error)?
                 var result = DeleteResult()
                 do {
@@ -318,21 +354,34 @@ public final class AppModel: @unchecked Sendable {
                 await device.close()
 
                 await MainActor.run {
+                    self?.reclaimCandidates = []
+                    self?.isReclaiming = false
                     if let caught {
                         self?.lastError = caught.localizedDescription
-                    } else if !result.failed.isEmpty {
-                        // deleteFromDevice re-verifies against the device's own
-                        // listing after deleting, so a name here means the
-                        // device still reports the file present (or the
-                        // confirmation listing itself failed) — surface it
-                        // rather than silently reporting success.
-                        self?.lastError = "\(result.failed.count) recording(s) "
-                            + "could not be confirmed deleted from the device"
+                        return
                     }
-                    self?.reclaimCandidates = []
+                    // Report ALL three outcomes. A file reported `failed` may
+                    // still be on the device, and a fully-`skipped` run used to
+                    // look identical to a successful one.
+                    var problems: [String] = []
+                    if !result.failed.isEmpty {
+                        problems.append("\(result.failed.count) could not be deleted")
+                    }
+                    if !result.skipped.isEmpty {
+                        problems.append("\(result.skipped.count) skipped (no verified local copy)")
+                    }
+                    if problems.isEmpty {
+                        self?.lastNotice = "Freed \(result.deleted.count) recording(s) from the P1."
+                    } else {
+                        self?.lastError = "Deleted \(result.deleted.count). "
+                            + problems.joined(separator: ", ") + "."
+                    }
                 }
             } catch {
-                await MainActor.run { self?.lastError = error.localizedDescription }
+                await MainActor.run {
+                    self?.lastError = error.localizedDescription
+                    self?.isReclaiming = false
+                }
             }
         }
     }

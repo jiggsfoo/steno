@@ -58,6 +58,16 @@ public struct MenuBarView: View {
                 .foregroundStyle(.orange)
                 .lineLimit(3)
         }
+
+        // Neutral outcome, e.g. "Freed N recording(s) from the P1." — a
+        // fully-successful reclaim otherwise had no way to tell the user
+        // anything happened at all.
+        if let notice = model.lastNotice {
+            Text(notice)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+        }
     }
 
     @ViewBuilder

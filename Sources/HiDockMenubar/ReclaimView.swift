@@ -5,6 +5,7 @@ struct ReclaimView: View {
     @Bindable var model: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var selected: Set<String> = []
+    @State private var showConfirm = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -37,12 +38,29 @@ struct ReclaimView: View {
                 }
                 Spacer()
                 Button("Cancel") { dismiss() }
-                Button("Delete \(selected.count) from device") {
+                    .keyboardShortcut(.cancelAction)
+
+                // Deliberately NOT .defaultAction. Deleting from the device is
+                // irreversible, and Select-all sits one click away — Return
+                // should never be able to wipe the P1. A confirmation dialog
+                // stands between the button and the deletion.
+                Button("Delete \(selected.count) from device\u{2026}") {
+                    showConfirm = true
+                }
+                .disabled(selected.isEmpty)
+            }
+            .confirmationDialog(
+                "Delete \(selected.count) recording(s) from the P1?",
+                isPresented: $showConfirm, titleVisibility: .visible
+            ) {
+                Button("Delete from device", role: .destructive) {
                     model.reclaim(model.reclaimCandidates.filter { selected.contains($0.signature) })
                     dismiss()
                 }
-                .disabled(selected.isEmpty)
-                .keyboardShortcut(.defaultAction)
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Your local copies in the library are not affected. "
+                     + "This cannot be undone on the device.")
             }
         }
         .padding()
