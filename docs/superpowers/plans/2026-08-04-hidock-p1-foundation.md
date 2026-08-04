@@ -211,6 +211,7 @@ public enum JensenError: Error, Equatable, Sendable {
     case timeout(command: UInt16)
     case shortBody(command: UInt16, expected: Int, got: Int)
     case transferIncomplete(expected: Int, got: Int)
+    case fileWriteFailed(String)
     case notConnected
 }
 ```
@@ -1874,6 +1875,58 @@ private func makeFile(length: Int) -> FileInfo {
     #expect(box.seen.count >= 2)
 }
 
+/// The gate must be released even when a transfer fails, or the device wedges
+/// permanently. Also the regression test for transferFile calling the GATED
+/// public drain() instead of drainLocked — that self-deadlocks, and this test
+/// would hang rather than fail.
+@Test func gateSurvivesAFailedTransfer() async throws {
+    let t = FakeTransport(script: .init(responses: [
+        5: [Data(repeating: 1, count: 100)],
+        1: [Data(repeating: 0, count: 20)],
+    ]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+
+    _ = try? await device.transferFile(
+        makeFile(length: 1000), to: url, chunkTimeout: .milliseconds(200)) { _, _ in }
+
+    // Any gated command completing proves the gate came back.
+    #expect(try await device.send(.getDeviceInfo, timeout: .seconds(2)).count == 20)
+}
+
+/// A failed transfer must not destroy a good file already at the destination.
+@Test func failedTransferLeavesAnExistingFileIntact() async throws {
+    let t = FakeTransport(script: .init(responses: [5: [Data(repeating: 1, count: 100)]]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    let original = Data("already here".utf8)
+    try original.write(to: url)
+
+    _ = try? await device.transferFile(
+        makeFile(length: 1000), to: url, chunkTimeout: .milliseconds(200)) { _, _ in }
+
+    #expect(try Data(contentsOf: url) == original)
+}
+
+/// A device sending more than it advertised must not overflow the file.
+@Test func overLongStreamIsClampedToTheAdvertisedLength() async throws {
+    let t = FakeTransport(script: .init(responses: [5: [Data(repeating: 9, count: 500)]]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+
+    let url = tempURL()
+    defer { try? FileManager.default.removeItem(at: url) }
+    try await device.transferFile(
+        makeFile(length: 200), to: url, chunkTimeout: .seconds(2)) { _, _ in }
+
+    #expect(try Data(contentsOf: url).count == 200)
+}
+
 @Test func transferThrowsAndRemovesPartialOnShortStream() async throws {
     let t = FakeTransport(script: .init(responses: [5: [Data(repeating: 1, count: 100)]]))
     let device = JensenDevice(transport: t)
@@ -1902,45 +1955,50 @@ Append inside the actor:
 
 ```swift
     /// Streams a recording to `url`. Never buffers the whole file in memory.
-    /// Throws `transferIncomplete` and deletes the partial file if the byte
-    /// count does not match what the device reported.
+    ///
+    /// Contract: on return, either `url` holds the complete, length-verified
+    /// recording, or `url` is exactly as it was before the call. Bytes land in
+    /// a sibling `.part` file and are moved into place only after verification,
+    /// so an interrupted transfer can neither destroy a good file already at
+    /// the destination nor leave a truncated one where a library scan would
+    /// mistake it for complete.
     public func transferFile(
         _ file: FileInfo,
         to url: URL,
         chunkTimeout: Duration = .seconds(30),
         progress: @Sendable (Int, Int) -> Void
     ) async throws {
-        let fm = FileManager.default
-        try? fm.removeItem(at: url)
-        fm.createFile(atPath: url.path, contents: nil)
-        guard let handle = try? FileHandle(forWritingTo: url) else {
-            throw JensenError.interfaceUnavailable("cannot open \(url.path) for writing")
-        }
-
-        var received = 0
-        var failure: (any Error)?
-
-        // Holds the same FIFO gate as every other command: a transfer streams
-        // many packets, and a concurrent command would interleave with them.
         await acquire()
         defer { release() }
 
+        let fm = FileManager.default
+        let staging = url.appendingPathExtension("part")
+        try? fm.removeItem(at: staging)
+        guard fm.createFile(atPath: staging.path, contents: nil),
+              let handle = try? FileHandle(forWritingTo: staging) else {
+            throw JensenError.fileWriteFailed(staging.path)
+        }
+
         let seq = sequence
         sequence &+= 1
+        var received = 0
+        var failure: (any Error)?
 
         do {
-            let body = Data(file.name.utf8)
             try await transport.write(
                 JensenPacket(command: JensenCommand.transferFile.rawValue,
-                             sequence: seq, body: body).encoded())
+                             sequence: seq, body: Data(file.name.utf8)).encoded())
 
             // Resets on every received chunk. A single deadline for the whole
-            // transfer would cap a 170 MB WAV at chunkTimeout regardless of
-            // link speed; this bounds the gap *between* chunks instead.
+            // transfer would cap a large recording by link speed; this bounds
+            // the gap *between* chunks instead.
             var deadline = ContinuousClock.now.advanced(by: chunkTimeout)
             while received < file.lengthBytes {
                 if let chunk = try takeBufferedPacket(
-                    command: JensenCommand.transferFile.rawValue, sequence: seq), !chunk.isEmpty {
+                    command: JensenCommand.transferFile.rawValue, sequence: seq),
+                    !chunk.isEmpty {
+                    // Clamp: a device sending more than it advertised must not
+                    // overflow the file.
                     let slice = chunk.prefix(file.lengthBytes - received)
                     try handle.write(contentsOf: slice)
                     received += slice.count
@@ -1949,8 +2007,12 @@ Append inside the actor:
                     continue
                 }
 
-                guard ContinuousClock.now < deadline else { break }
-                let raw = try await transport.read(maxLength: 64 * 1024, timeout: chunkTimeout)
+                let remaining = ContinuousClock.now.duration(to: deadline)
+                guard remaining > .zero else { break }
+                // Never read for longer than the gap budget has left, or a read
+                // entered just before the deadline doubles the stated timeout.
+                let raw = try await transport.read(
+                    maxLength: 64 * 1024, timeout: min(remaining, Self.maxReadWindow))
                 if raw.isEmpty {
                     try await Task.sleep(for: .milliseconds(5))
                 } else {
@@ -1961,23 +2023,37 @@ Append inside the actor:
             failure = error
         }
 
-        try? handle.close()
+        if failure == nil && received == file.lengthBytes {
+            // Only place a close failure can still mean "success, but short".
+            do {
+                try handle.synchronize()
+                try handle.close()
+            } catch {
+                failure = error
+            }
+        } else {
+            try? handle.close()
+        }
+
+        // Clear the buffer and endpoint on SUCCESS as well as failure. A device
+        // that sent more than it advertised would otherwise leave bytes that
+        // corrupt the next command's response.
+        await drainLocked(maxDuration: .milliseconds(150))
 
         if let failure {
-            try? fm.removeItem(at: url)
-            buffer.removeAll(keepingCapacity: true)
-            // drainLocked, NOT drain(): transferFile already holds the gate and
-            // the public drain() takes it. Calling it here self-deadlocks.
-            await drainLocked(maxDuration: .milliseconds(500))
+            try? fm.removeItem(at: staging)
             throw failure
         }
         guard received == file.lengthBytes else {
-            try? fm.removeItem(at: url)
-            // Same cleanup as the sibling catch above: a short transfer leaves
-            // unread bytes on the endpoint that would corrupt the next command.
-            buffer.removeAll(keepingCapacity: true)
-            await drainLocked(maxDuration: .milliseconds(500))
+            try? fm.removeItem(at: staging)
             throw JensenError.transferIncomplete(expected: file.lengthBytes, got: received)
+        }
+
+        // The destination is not touched until here.
+        if fm.fileExists(atPath: url.path) {
+            _ = try fm.replaceItemAt(url, withItemAt: staging)
+        } else {
+            try fm.moveItem(at: staging, to: url)
         }
     }
 ```
@@ -1985,7 +2061,7 @@ Append inside the actor:
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `swift test --filter TransferTests`
-Expected: PASS, 3 tests
+Expected: PASS, 6 tests
 
 - [ ] **Step 5: Add the `pull` command to the CLI**
 
@@ -2787,6 +2863,11 @@ public actor SyncEngine {
                     throw SyncError.insufficientSpace(needed: file.lengthBytes)
                 }
 
+                // transferFile stages internally too, so bytes actually land in
+                // `<sig>.part.part` before being moved here. Redundant but
+                // harmless: the engine's `.incoming` staging is what keeps a
+                // partial out of the library tree, and transferFile's is what
+                // makes the write atomic. Do not "simplify" either away.
                 let incoming = library.incomingURL(for: file)
                 try FileManager.default.createDirectory(
                     at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
