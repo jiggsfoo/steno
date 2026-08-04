@@ -3439,6 +3439,8 @@ git commit -m "feat(app): sync engine with verify-before-commit and per-file fai
 
 **Files:**
 - Create: `Sources/HiDockMenubar/DeviceMonitor.swift`
+- Modify: `Sources/HiDockCLI/CLI.swift` (add `watch`)
+- Modify: `Package.swift` (HiDockCLI depends on HiDockMenubar)
 
 **Interfaces:**
 - Consumes: `HiDockDeviceMatching`
@@ -3567,15 +3569,58 @@ public final class DeviceMonitor: @unchecked Sendable {
 }
 ```
 
-- [ ] **Step 2: Verify it compiles**
+- [ ] **Step 2: Add a `watch` command so the monitor is observable**
+
+`DeviceMonitor` is what triggers every sync, and IOKit match notifications
+cannot be unit-tested without hardware. Without this it would ship with no
+verification at all.
+
+In `Package.swift`, add `"HiDockMenubar"` to `HiDockCLI`'s dependencies.
+
+Add to `Sources/HiDockCLI/CLI.swift` before `default:`:
+
+```swift
+case "watch":
+    print("Watching for HiDock P1 attach/detach. Ctrl-C to stop.")
+    let monitor = DeviceMonitor { event in
+        let stamp = ISO8601DateFormatter().string(from: Date())
+        switch event {
+        case .attached: print("\(stamp)  ATTACHED")
+        case .detached: print("\(stamp)  DETACHED")
+        }
+    }
+    monitor.start()
+    // The monitor delivers on the main queue, so keep the run loop alive.
+    RunLoop.main.run()
+```
+
+Update the usage string to `[probe|info|list|pull <name>|watch]`.
+
+- [ ] **Step 3: Verify it builds and reports the current state**
 
 Run: `swift build`
 Expected: builds with no errors
 
-- [ ] **Step 3: Commit**
+Run: `swift run hidock-cli watch` with the P1 already plugged in.
+Expected: one `ATTACHED` line appears within a second or two, from the initial
+`rescan()`. Leave it running.
+
+- [ ] **Step 4: Hardware check (manual, needs the P1)**
+
+With `watch` running, unplug the P1 and plug it back in. Expected: a `DETACHED`
+line on unplug and an `ATTACHED` line on replug, each within a second or two,
+and **no spurious events from other USB devices** — the matching dictionary is a
+bare `IOUSBHostInterface` class match, so every USB interface on the system
+fires these callbacks and the filter in `drain` is what makes them meaningful.
+If plugging in an unrelated USB device produces a line, the filter is wrong.
+
+If the P1 cannot be unplugged, report that plainly and record which parts you
+did observe. Do not claim an unplug you did not perform.
+
+- [ ] **Step 5: Commit**
 
 ```bash
-git add Sources/HiDockMenubar/DeviceMonitor.swift
+git add Package.swift Sources/HiDockMenubar/DeviceMonitor.swift Sources/HiDockCLI/CLI.swift
 git commit -m "feat(app): event-driven IOKit device monitor with sleep/wake handling"
 ```
 
