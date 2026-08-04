@@ -1880,8 +1880,12 @@ private func makeFile(length: Int) -> FileInfo {
     try await device.open()
 
     let url = tempURL()
+    // Pass a short chunkTimeout explicitly. The default is 30 s, and this test
+    // deliberately starves the stream, so it would otherwise sit out the whole
+    // deadline -- a 30-second unit test that slows every later task's run.
     await #expect(throws: JensenError.transferIncomplete(expected: 1000, got: 100)) {
-        try await device.transferFile(makeFile(length: 1000), to: url) { _, _ in }
+        try await device.transferFile(
+            makeFile(length: 1000), to: url, chunkTimeout: .milliseconds(200)) { _, _ in }
     }
     #expect(FileManager.default.fileExists(atPath: url.path) == false)
 }

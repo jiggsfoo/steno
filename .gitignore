@@ -5,3 +5,7 @@ DerivedData/
 xcuserdata/
 .superpowers/
 build/
+
+# pulled recordings (hidock-cli pull writes to cwd)
+*.mp3
+*.hda
