@@ -84,8 +84,34 @@ struct CLI {
             }
             print("LIST OK")
 
+        case "pull":
+            guard args.count >= 2 else { print("usage: hidock-cli pull <device-filename>"); exit(2) }
+            let target = args[1]
+
+            let transport = try IOUSBHostTransport.openFirstAvailable()
+            let device = JensenDevice(transport: transport)
+            try await device.open()
+
+
+            let files = try await device.listFiles()
+            guard let file = files.first(where: { $0.name == target }) else {
+                print("not found on device: \(target)"); exit(1)
+            }
+
+            // Write with the corrected extension so the result is directly playable.
+            // The device names MP3 recordings `.hda`; the bytes need no conversion.
+            let stem = (file.name as NSString).deletingPathExtension
+            let out = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("\(stem).\(file.preferredExtension)")
+            try await device.transferFile(file, to: out) { done, total in
+                let pct = total > 0 ? done * 100 / total : 0
+                FileHandle.standardError.write(Data("\r\(pct)% (\(done)/\(total))".utf8))
+            }
+            print("\nwrote \(out.path)")
+            print("PULL OK")
+
         default:
-            print("usage: hidock-cli [probe|info|list]")
+            print("usage: hidock-cli [probe|info|list|pull <name>]")
             exit(2)
         }
     }

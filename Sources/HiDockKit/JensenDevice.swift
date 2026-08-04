@@ -187,4 +187,84 @@ public actor JensenDevice {
     public func listFiles(timeout: Duration = .seconds(20)) async throws -> [FileInfo] {
         try ResponseParsers.fileList(await send(.getFileList, timeout: timeout)).files
     }
+
+    /// Streams a recording to `url`. Never buffers the whole file in memory.
+    /// Throws `transferIncomplete` and deletes the partial file if the byte
+    /// count does not match what the device reported.
+    public func transferFile(
+        _ file: FileInfo,
+        to url: URL,
+        chunkTimeout: Duration = .seconds(30),
+        progress: @Sendable (Int, Int) -> Void
+    ) async throws {
+        let fm = FileManager.default
+        try? fm.removeItem(at: url)
+        fm.createFile(atPath: url.path, contents: nil)
+        guard let handle = try? FileHandle(forWritingTo: url) else {
+            throw JensenError.interfaceUnavailable("cannot open \(url.path) for writing")
+        }
+
+        var received = 0
+        var failure: (any Error)?
+
+        // Holds the same FIFO gate as every other command: a transfer streams
+        // many packets, and a concurrent command would interleave with them.
+        await acquire()
+        defer { release() }
+
+        let seq = sequence
+        sequence &+= 1
+
+        do {
+            let body = Data(file.name.utf8)
+            try await transport.write(
+                JensenPacket(command: JensenCommand.transferFile.rawValue,
+                             sequence: seq, body: body).encoded())
+
+            // Resets on every received chunk. A single deadline for the whole
+            // transfer would cap a 170 MB WAV at chunkTimeout regardless of
+            // link speed; this bounds the gap *between* chunks instead.
+            var deadline = ContinuousClock.now.advanced(by: chunkTimeout)
+            while received < file.lengthBytes {
+                if let chunk = try takeBufferedPacket(
+                    command: JensenCommand.transferFile.rawValue, sequence: seq), !chunk.isEmpty {
+                    let slice = chunk.prefix(file.lengthBytes - received)
+                    try handle.write(contentsOf: slice)
+                    received += slice.count
+                    progress(received, file.lengthBytes)
+                    deadline = ContinuousClock.now.advanced(by: chunkTimeout)
+                    continue
+                }
+
+                guard ContinuousClock.now < deadline else { break }
+                let raw = try await transport.read(maxLength: 64 * 1024, timeout: chunkTimeout)
+                if raw.isEmpty {
+                    try await Task.sleep(for: .milliseconds(5))
+                } else {
+                    buffer.append(raw)
+                }
+            }
+        } catch {
+            failure = error
+        }
+
+        try? handle.close()
+
+        if let failure {
+            try? fm.removeItem(at: url)
+            buffer.removeAll(keepingCapacity: true)
+            // drainLocked, NOT drain(): transferFile already holds the gate and
+            // the public drain() takes it. Calling it here self-deadlocks.
+            await drainLocked(maxDuration: .milliseconds(500))
+            throw failure
+        }
+        guard received == file.lengthBytes else {
+            try? fm.removeItem(at: url)
+            // Same cleanup as the sibling catch above: a short transfer leaves
+            // unread bytes on the endpoint that would corrupt the next command.
+            buffer.removeAll(keepingCapacity: true)
+            await drainLocked(maxDuration: .milliseconds(500))
+            throw JensenError.transferIncomplete(expected: file.lengthBytes, got: received)
+        }
+    }
 }
