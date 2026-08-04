@@ -11,7 +11,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "HiDockKit"),
-        .executableTarget(name: "HiDockCLI", dependencies: ["HiDockKit"]),
+        .executableTarget(name: "HiDockCLI", dependencies: ["HiDockKit", "HiDockMenubar"]),
         .testTarget(name: "HiDockKitTests", dependencies: ["HiDockKit"]),
         // A LIBRARY, not an executable. All app logic and views live here so the
         // test target can @testable import it. Task 10 adds a thin `HiDockApp`

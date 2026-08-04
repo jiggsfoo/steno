@@ -3,6 +3,7 @@ import Foundation
 import IOKit
 import IOUSBHost
 import HiDockKit
+import HiDockMenubar
 
 @main
 struct CLI {
@@ -110,8 +111,27 @@ struct CLI {
             print("\nwrote \(out.path)")
             print("PULL OK")
 
+        case "watch":
+            print("Watching for HiDock P1 attach/detach. Ctrl-C to stop.")
+            let monitor = DeviceMonitor { event in
+                let stamp = ISO8601DateFormatter().string(from: Date())
+                switch event {
+                case .attached: print("\(stamp)  ATTACHED")
+                case .detached: print("\(stamp)  DETACHED")
+                }
+            }
+            monitor.start()
+            // The monitor delivers on the main queue, so keep the run loop alive.
+            // RunLoop.run() is unavailable from async contexts, and CLI.main() is
+            // async throws, so the blocking call is isolated in a synchronous
+            // nested function.
+            func runForever() {
+                RunLoop.main.run()
+            }
+            runForever()
+
         default:
-            print("usage: hidock-cli [probe|info|list|pull <name>]")
+            print("usage: hidock-cli [probe|info|list|pull <name>|watch]")
             exit(2)
         }
     }
