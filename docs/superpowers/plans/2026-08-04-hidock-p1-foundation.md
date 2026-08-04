@@ -658,9 +658,18 @@ actor FakeTransport: USBTransport {
         }
     }
 
+    /// Hands back at most `readSplit` bytes per call, so encoded packets
+    /// genuinely arrive across multiple reads and the device layer has to
+    /// reassemble them. A fake that always returns whole packets would let a
+    /// broken reassembler pass.
+    private static let readSplit = 64
+
     func read(maxLength: Int, timeout: Duration) async throws -> Data {
         guard !pending.isEmpty else { return Data() }
-        return pending.removeFirst()
+        let next = pending.removeFirst()
+        guard next.count > Self.readSplit else { return next }
+        pending.insert(next.dropFirst(Self.readSplit), at: 0)
+        return Data(next.prefix(Self.readSplit))
     }
 
     /// Queue an unsolicited packet, simulating a late response arriving after a timeout.
@@ -697,8 +706,8 @@ import Testing
 }
 
 @Test func reassemblesBodySplitAcrossReads() async throws {
-    // A response whose body is large enough that the fake returns it whole,
-    // but the device concatenates two packets into the same buffer.
+    // FakeTransport hands back 64 bytes per read, so this 300-byte body
+    // arrives across five reads and must be reassembled.
     let t = FakeTransport(script: .init(responses: [4: [Data(repeating: 0x7, count: 300)]]))
     let device = JensenDevice(transport: t)
     try await device.open()
@@ -1370,6 +1379,15 @@ case "list":
     let info = try await device.deviceInfo()
     print("firmware \(info.versionCode)  serial \(info.serialNumber)")
 
+    // The GET_DEVICE_TIME body layout is NOT documented in either reference
+    // implementation. Dump it raw so the real format can be read off the
+    // device before anything ever writes SET_DEVICE_TIME.
+    if let timeBody = try? await device.send(.getDeviceTime, timeout: .seconds(5)) {
+        let hex = timeBody.map { String(format: "%02x", $0) }.joined(separator: " ")
+        print("device time body (\(timeBody.count) bytes): \(hex)")
+        print("  ^ compare against the wall clock now: \(Date())")
+    }
+
     let card = try await device.cardInfo()
     print("storage: \(card.usedMiB) MiB used of \(card.capacityMiB) MiB")
 
@@ -1391,6 +1409,8 @@ Run: `swift run hidock-cli list`
 Expected: `LIST OK`, firmware version matching the device, and one line per recording.
 
 Record the observed file extensions. **If any file ends in `.hda`, stop and report** — the spec's fallback applies and a WAV-header wrapper must be added to this task.
+
+**Also record the `device time body` hex line verbatim in the task report.** Its layout is unverified, and Task 10 deliberately never writes the clock until it is confirmed against these real bytes.
 
 - [ ] **Step 9: Commit**
 
@@ -1516,7 +1536,10 @@ Append inside the actor:
                 JensenPacket(command: JensenCommand.transferFile.rawValue,
                              sequence: seq, body: body).encoded())
 
-            let deadline = ContinuousClock.now.advanced(by: chunkTimeout)
+            // Resets on every received chunk. A single deadline for the whole
+            // transfer would cap a 170 MB WAV at chunkTimeout regardless of
+            // link speed; this bounds the gap *between* chunks instead.
+            var deadline = ContinuousClock.now.advanced(by: chunkTimeout)
             while received < file.lengthBytes {
                 if let chunk = try takeBufferedPacket(
                     matching: JensenCommand.transferFile.rawValue), !chunk.isEmpty {
@@ -1524,6 +1547,7 @@ Append inside the actor:
                     try handle.write(contentsOf: slice)
                     received += slice.count
                     progress(received, file.lengthBytes)
+                    deadline = ContinuousClock.now.advanced(by: chunkTimeout)
                     continue
                 }
 
@@ -2134,7 +2158,7 @@ actor FakeDevice: SyncDevice {
 
     func listFiles() async throws -> [FileInfo] { files }
 
-    func transferFile(_ file: FileInfo, to url: URL,
+    func transferFile(_ file: FileInfo, to url: URL, chunkTimeout: Duration,
                       progress: @Sendable (Int, Int) -> Void) async throws {
         if failTransfersFor.contains(file.name) {
             throw JensenError.transferIncomplete(expected: file.lengthBytes, got: 0)
@@ -2272,9 +2296,14 @@ import Foundation
 import HiDockKit
 
 /// The subset of JensenDevice the engine needs, so tests can fake it.
+///
+/// `chunkTimeout` is part of the requirement on purpose: Swift matches a
+/// protocol witness on its full declaration name, and a default argument does
+/// not synthesize the shorter form. Omitting it here makes
+/// `extension JensenDevice: SyncDevice {}` fail to compile.
 public protocol SyncDevice: Sendable, Actor {
     func listFiles() async throws -> [FileInfo]
-    func transferFile(_ file: FileInfo, to url: URL,
+    func transferFile(_ file: FileInfo, to url: URL, chunkTimeout: Duration,
                       progress: @Sendable (Int, Int) -> Void) async throws
     func deleteFile(named name: String) async throws
 }
@@ -2336,7 +2365,9 @@ public actor SyncEngine {
                 try FileManager.default.createDirectory(
                     at: incoming.deletingLastPathComponent(), withIntermediateDirectories: true)
 
-                try await device.transferFile(file, to: incoming) { done, total in
+                try await device.transferFile(
+                    file, to: incoming, chunkTimeout: .seconds(30)
+                ) { done, total in
                     progress(.downloading(name: file.name, index: offset + 1,
                                           of: pending.count, bytesDone: done, bytesTotal: total))
                 }
@@ -2692,7 +2723,12 @@ public final class AppModel {
                                               capacityMiB: card.capacityMiB)
                 }
 
-                try await Self.syncClock(device: device)
+                if let drift = await Self.readClockDrift(device: device), abs(drift) > 60 {
+                    await MainActor.run {
+                        self?.lastError = "Device clock is off by "
+                            + "\(Int(abs(drift) / 60)) min. Recording timestamps may be wrong."
+                    }
+                }
 
                 _ = try await engine.sync(device: device, serial: info.serialNumber) { progress in
                     Task { @MainActor in self?.apply(progress) }
@@ -2717,26 +2753,26 @@ public final class AppModel {
     }
 
     /// The device clock names the recordings, so drift means mislabelled notes.
-    private static func syncClock(device: JensenDevice) async throws {
-        let body = try await device.send(.getDeviceTime, timeout: .seconds(5))
-        guard body.count >= 7 else { return }
+    ///
+    /// READ ONLY, DELIBERATELY. The GET_DEVICE_TIME body layout below is an
+    /// educated guess and appears in neither reference implementation. Reading
+    /// a wrong layout yields a nonsense date and is harmless; *writing* one
+    /// would set the clock that names every future recording to garbage.
+    /// Task 5's hardware check dumps the real bytes. Do not call
+    /// SET_DEVICE_TIME until this parse is confirmed against them.
+    private static func readClockDrift(device: JensenDevice) async -> TimeInterval? {
+        guard let body = try? await device.send(.getDeviceTime, timeout: .seconds(5)),
+              body.count >= 7 else { return nil }
         let b = [UInt8](body)
         var c = DateComponents()
         c.year = Int(b[0]) << 8 | Int(b[1])
         c.month = Int(b[2]); c.day = Int(b[3])
         c.hour = Int(b[4]); c.minute = Int(b[5]); c.second = Int(b[6])
-        guard let deviceTime = Calendar.current.date(from: c) else { return }
 
-        if abs(deviceTime.timeIntervalSinceNow) > 60 {
-            let now = Calendar.current.dateComponents(
-                [.year, .month, .day, .hour, .minute, .second], from: Date())
-            let payload = Data([
-                UInt8(truncatingIfNeeded: (now.year ?? 2026) >> 8),
-                UInt8(truncatingIfNeeded: now.year ?? 2026),
-                UInt8(now.month ?? 1), UInt8(now.day ?? 1),
-                UInt8(now.hour ?? 0), UInt8(now.minute ?? 0), UInt8(now.second ?? 0)])
-            _ = try? await device.send(.setDeviceTime, body: payload, timeout: .seconds(5))
-        }
+        // Reject an implausible parse rather than report nonsense drift.
+        guard let year = c.year, (2020...2100).contains(year),
+              let deviceTime = Calendar.current.date(from: c) else { return nil }
+        return deviceTime.timeIntervalSinceNow
     }
 
     private func handleConnectionFailure(_ error: JensenError) {
@@ -3203,7 +3239,7 @@ git commit -m "feat(app): settings, login item, and verified reclaim flow"
 | Actor, one command in flight | 3 |
 | Drain after timeout | 3 |
 | IOUSBHost transport | 4 |
-| Clock drift correction | 10 (`syncClock`) |
+| Clock drift detection | 10 (`readClockDrift`, read-only — see deviation 4) |
 | File list, count, card info | 5 |
 | Streaming transfer, no RAM buffering | 6 |
 | Library layout + sidecars | 7 |
@@ -3226,6 +3262,7 @@ git commit -m "feat(app): settings, login item, and verified reclaim flow"
 1. Duration is measured with `AVURLAsset` after download rather than inferred from a `fileVersion` bitrate table. More accurate, and nothing before download needs a duration.
 2. Battery (`GET_BATTERY_STATUS`, 4100) is plumbed through `DeviceStatus` but reported as `nil`. Its body format is not in the reference implementation. Task 5's hardware check should capture the raw bytes so it can be parsed in a follow-up. The menubar simply omits the battery line when `nil`, so nothing is broken by this.
 3. The app is built by `Scripts/make-app.sh` rather than an Xcode project, so every step is scriptable.
+4. **The spec's "correct clock drift" requirement ships as detect-and-warn, not correct.** The `GET_DEVICE_TIME`/`SET_DEVICE_TIME` body layout is documented in neither reference implementation, so the parse in `readClockDrift` is a guess. A wrong read is harmless; a wrong write would corrupt the clock that names every recording. Task 5's hardware check dumps the real bytes, and enabling the write is a small follow-up once they are known. Decided with Angelo before execution, 2026-08-04.
 
 **Placeholder scan:** clean. Every code step contains complete, compiling code. The three hardware checks that can fail (Tasks 1, 4, 5) each specify a concrete fallback and an explicit stop-and-report instruction.
 
