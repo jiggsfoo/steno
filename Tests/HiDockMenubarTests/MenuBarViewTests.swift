@@ -40,3 +40,11 @@ import Testing
         #expect(!MenuBarView.statusTitle(for: status).isEmpty)
     }
 }
+
+/// GET_RECORDING_FILE's body layout beyond "empty means idle" is unverified,
+/// so anything outside printable ASCII (a control byte here) must fall back
+/// to a bare "Recording…" rather than render mangled text.
+@Test func recordingLabelRejectsControlBytes() {
+    let withControlByte = "take1\u{0007}.hda"
+    #expect(MenuBarView.recordingLabel(for: withControlByte) == "Recording…")
+}

@@ -47,7 +47,8 @@ public struct MenuBarView: View {
 
     @ViewBuilder
     private var statusSection: some View {
-        MenuRow(Self.statusTitle(for: model.status), detail: statusDetail)
+        MenuRow(Self.statusTitle(for: model.status), detail: statusDetail,
+                lineLimit: statusDetailLineLimit)
 
         if case let .syncing(_, _, percent) = model.status {
             ProgressView(value: Double(percent), total: 100)
@@ -55,14 +56,23 @@ public struct MenuBarView: View {
                 .padding(.bottom, 2)
         }
 
+        // Rendered regardless of status -- the idle-poll loop can notice a
+        // recording start while the menu shows any connected/syncing state.
         if let recording = model.recordingInProgress {
             MenuRow(Self.recordingLabel(for: recording))
         }
+
+        // Rendered regardless of status. Clock-drift warnings and "N recordings
+        // failed to sync" were being written and never shown to anyone.
         if let error = model.lastError {
-            MenuRow("", detail: error)
+            MenuRow("", detail: error, lineLimit: 3)
         }
+
+        // Neutral outcome, e.g. "Freed N recording(s) from the P1." -- a
+        // fully-successful reclaim otherwise had no way to tell the user
+        // anything happened at all.
         if let notice = model.lastNotice {
-            MenuRow("", detail: notice)
+            MenuRow("", detail: notice, lineLimit: 3)
         }
     }
 
@@ -78,6 +88,11 @@ public struct MenuBarView: View {
         default:
             return nil
         }
+    }
+
+    private var statusDetailLineLimit: Int? {
+        if case .unavailable = model.status { return 2 }
+        return nil
     }
 
     // MARK: - Recent
@@ -121,8 +136,6 @@ public struct MenuBarView: View {
         }
         MenuRow("Quit HiDock") { NSApplication.shared.terminate(nil) }
     }
-    // Keep the existing `.sheet(isPresented: $showReclaim)` attached to the
-    // outermost VStack rather than to a MenuRow.
 
     private func reveal(_ item: Sidecar) {
         let url = model.libraryRoot.appendingPathComponent(item.relativePath)
@@ -168,10 +181,14 @@ public struct MenuBarView: View {
         return f
     }()
 
+    /// GET_RECORDING_FILE's body layout beyond "empty means idle" is
+    /// unverified, so a name containing anything other than printable ASCII
+    /// is shown as a bare "Recording…" rather than risking mangled text.
+    ///
     /// `nonisolated`: see `statusTitle(for:)` above.
     nonisolated static func recordingLabel(for filename: String) -> String {
-        let sensible = filename.count < 48
-            && filename.allSatisfy { $0.isASCII && !$0.isNewline }
+        let sensible = !filename.isEmpty && filename.count < 48
+            && filename.unicodeScalars.allSatisfy { (0x20...0x7E).contains($0.value) }
         return sensible ? "Recording: \(filename)" : "Recording…"
     }
 }

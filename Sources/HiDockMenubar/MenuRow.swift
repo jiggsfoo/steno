@@ -14,6 +14,7 @@ public struct MenuRow: View {
     private let title: String
     private let value: String?
     private let detail: String?
+    private let lineLimit: Int?
     private let isEnabled: Bool
     private let action: (() -> Void)?
 
@@ -23,12 +24,14 @@ public struct MenuRow: View {
         _ title: String,
         value: String? = nil,
         detail: String? = nil,
+        lineLimit: Int? = nil,
         isEnabled: Bool = true,
         action: (() -> Void)? = nil
     ) {
         self.title = title
         self.value = value
         self.detail = detail
+        self.lineLimit = lineLimit
         self.isEnabled = isEnabled
         self.action = action
     }
@@ -54,10 +57,16 @@ public struct MenuRow: View {
     public var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             VStack(alignment: .leading, spacing: 1) {
-                Text(title)
+                // An empty title (e.g. an error/notice row that is all detail)
+                // must not render at all -- an empty `Text` still reserves a
+                // full line above the caption.
+                if !title.isEmpty {
+                    Text(title)
+                }
                 if let detail, !detail.isEmpty {
                     Text(detail)
                         .font(.caption)
+                        .lineLimit(lineLimit)
                         .foregroundStyle(isHovering && isInteractive ? .white : .secondary)
                 }
             }
