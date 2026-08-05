@@ -56,7 +56,12 @@ public enum MenuBarIcon {
     /// Symbol point size. 16 put 17-19pt of ink on screen and produced natural
     /// canvases of 19-22pt; the badged variants were then at or over the 22pt
     /// the status bar gives an item, which reads chunkier than the system's
-    /// own extras. At 14 all four symbols land on a 15pt-tall ink grid.
+    /// own extras. Measured (8x raster) at 14: the five states average
+    /// 14.4pt of ink, short of Apple's own status art -- which runs roughly
+    /// 16-18pt tall -- but it is the largest size that still fits every state
+    /// on the shared 20x18 canvas below: 15+ pushes the badged variants'
+    /// natural canvas to 19-22pt, overflowing it and clipping the ink. See
+    /// `theInkIsMenuBarSizedAndHoldsStillAcrossStates` for the measurement.
     private static let pointSize: CGFloat = 14
 
     /// The size every state renders at.
@@ -64,9 +69,12 @@ public enum MenuBarIcon {
     /// Without this each state shipped at its symbol's natural canvas —
     /// 19x21, 19x20, 21x21, 21x22, 22x21 — so the icon changed size by up to
     /// 2pt as the device changed state, visibly growing when a sync started.
-    /// Height 18 sits inside the 22pt status item box, which is where Apple's
-    /// own status art sits. Width is fixed too, so the items to the left of
-    /// this one do not shuffle sideways on a state change.
+    /// Height 18 is the canvas ceiling inside the 22pt status item box that
+    /// Apple's own status art uses -- the ink actually drawn onto this canvas
+    /// is smaller than Apple's; see `pointSize` above for the measured value
+    /// and why it cannot rise without overflowing this canvas. Width is fixed
+    /// too, so the items to the left of this one do not shuffle sideways on a
+    /// state change.
     public static let renderedSize = NSSize(width: 20, height: 18)
 
     public static func image(for state: State) -> NSImage {

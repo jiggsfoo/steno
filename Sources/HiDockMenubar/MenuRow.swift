@@ -15,9 +15,10 @@ public struct MenuRow: View {
     /// A row's leading symbol, its tint, and the word VoiceOver hears first.
     ///
     /// Bundled into one value rather than passed as three parameters so a tint
-    /// can never travel without a shape to carry it. HIG forbids encoding
-    /// state in colour alone, and a menu row has exactly one place that gets
-    /// colour — here.
+    /// can never travel without a shape to carry it -- enforced below by
+    /// `init`, not just by convention at the two call sites that build one.
+    /// HIG forbids encoding state in colour alone, and a menu row has exactly
+    /// one place that gets colour — here.
     ///
     /// `spokenSeverity` exists because VoiceOver receives neither the colour
     /// nor the symbol. Without it, "3 recordings failed to sync" and "Freed 3
@@ -28,6 +29,8 @@ public struct MenuRow: View {
         public let spokenSeverity: String?
 
         public init(symbol: String, tint: Color? = nil, spokenSeverity: String? = nil) {
+            precondition(!symbol.isEmpty,
+                         "Accent needs a real symbol -- a tint must never travel without a shape to carry it.")
             self.symbol = symbol
             self.tint = tint
             self.spokenSeverity = spokenSeverity
@@ -197,8 +200,15 @@ public struct MenuRow: View {
         return accent.tint ?? rowForeground
     }
 
+    /// A disabled row with an action is dimmed by `.buttonStyle(.plain)` +
+    /// `.disabled` in `body` already -- measured at meanLum 0.820 / darkest
+    /// 0.794 against a bare `.secondary`'s 0.663 / 0.574, and an isolated
+    /// `Button { .secondary }.plain.disabled(true)` reproduces the row's
+    /// numbers exactly. Returning `.secondary` here on top of that halved the
+    /// ink strength again. A disabled row with NO action has no Button to dim
+    /// it at all, so it still has to do its own dimming here.
     private var rowForeground: Color {
-        if !isEnabled { return .secondary }
+        if !isEnabled && action == nil { return .secondary }
         return isHovering && isInteractive ? .white : .primary
     }
 }

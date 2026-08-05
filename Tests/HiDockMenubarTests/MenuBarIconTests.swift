@@ -60,25 +60,46 @@ import Testing
 /// The canvas being equal is not enough on its own: art that overflows it is
 /// silently clipped, and art that shrinks inside it is the same wobble one
 /// level down. Measures the drawn ink, which is what a person sees.
+///
+/// Rasterises at 8x, not the usual 2x. `pointSize` 14 measures a genuine
+/// 0.125pt height spread across the five states -- reverting only it to 16
+/// measures 1.25pt, ten times as much, from the badged states' bigger natural
+/// canvas. At 2x both round to the identical 1.0pt: real and rounding-noise
+/// spreads are indistinguishable there, so this check needs the sharper
+/// raster to mean anything.
 @Test func theInkIsMenuBarSizedAndHoldsStillAcrossStates() {
     let boxes = MenuBarIcon.State.allCases.map { state -> NSRect in
-        guard let ink = inkBounds(of: MenuBarIcon.image(for: state)) else {
+        guard let ink = inkBounds(of: MenuBarIcon.image(for: state), scale: 8) else {
             Issue.record("\(state) produced no readable ink")
             return .zero
         }
         return ink
     }
     let heights = boxes.map(\.height)
-    // Apple's own status art is roughly 16-18pt tall inside the 22pt box.
+    // Measured, not aspirational: at `pointSize` 14 the five states average
+    // 14.4pt of ink, short of Apple's own status art (roughly 16-18pt tall
+    // inside the 22pt box). 14 is what fits the shared 20x18 canvas without
+    // any state clipping -- see the `pointSize` doc comment in MenuBarIcon.swift
+    // for why raising it does not fit. The `>= 13` floor is loosened to what
+    // this code actually produces, not to Apple's range; this is a floor
+    // against future shrinkage, not a claim of parity.
     #expect(heights.allSatisfy { $0 >= 13 && $0 <= 18 },
             Comment(rawValue: "ink heights \(heights)"))
-    #expect((heights.max() ?? 0) - (heights.min() ?? 0) <= 1.5,
+    // 0.5pt: clears the measured 0.125pt real spread with room to spare, but
+    // does not clear the 1.25pt spread `pointSize` 16 produces -- see above.
+    #expect((heights.max() ?? 0) - (heights.min() ?? 0) <= 0.5,
             Comment(rawValue: "ink heights \(heights)"))
     // Nothing reaches an edge, so nothing is clipped by the shared canvas.
+    // A real margin on both axes: at `pointSize` 16 the ink is measured
+    // reaching y = 18.00 -- exactly the canvas height -- which a `<=` bound
+    // with no margin accepts as "not clipped" by construction, since ink can
+    // never be measured taller than the bitmap it was rasterised into. `>= 0`
+    // on the low side has the same failing-open shape: `pointSize` 16 also
+    // measures the recording state's ink at y = 0.00 exactly.
     for (state, box) in zip(MenuBarIcon.State.allCases, boxes) {
         #expect(box.minX >= 0.5 && box.maxX <= MenuBarIcon.renderedSize.width - 0.5,
                 Comment(rawValue: "\(state) ink \(box) touches the canvas edge"))
-        #expect(box.minY >= 0 && box.maxY <= MenuBarIcon.renderedSize.height,
+        #expect(box.minY >= 0.5 && box.maxY <= MenuBarIcon.renderedSize.height - 0.5,
                 Comment(rawValue: "\(state) ink \(box) touches the canvas edge"))
     }
 }
@@ -194,8 +215,16 @@ private func raster(_ image: NSImage, scale: CGFloat = 2) -> NSBitmapImageRep? {
 }
 
 /// The drawn ink's bounding box, in points. Nil when nothing was drawn.
-private func inkBounds(of image: NSImage) -> NSRect? {
-    guard let rep = raster(image) else { return nil }
+///
+/// `scale` defaults to the same 2x every other caller uses. Callers measuring
+/// sub-point differences (state-to-state spread, how close ink sits to a
+/// canvas edge) need more: at 2x, a box's coordinates only ever land on a
+/// half-point grid, so two states whose true heights differ by a few hundredths
+/// of a point round to the identical 0.5pt-quantised value -- indistinguishable
+/// from states that genuinely match. A regression that grows every box by
+/// exactly the same rounding step is invisible at that resolution.
+private func inkBounds(of image: NSImage, scale: CGFloat = 2) -> NSRect? {
+    guard let rep = raster(image, scale: scale) else { return nil }
     var minX = rep.pixelsWide, maxX = -1, minY = rep.pixelsHigh, maxY = -1
     for y in 0..<rep.pixelsHigh {
         for x in 0..<rep.pixelsWide {
