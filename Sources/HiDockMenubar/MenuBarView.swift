@@ -23,7 +23,14 @@ public struct MenuBarView: View {
         }
         .padding(.vertical, 6)
         .frame(width: 272)
-        .sheet(isPresented: $showReclaim) { ReclaimView(model: model) }
+        // `ReclaimView` is handed the same binding that presents it, and closes
+        // itself by writing `false` to it. See its `isPresented` doc comment:
+        // `@Environment(\.dismiss)` did not reliably clear this state when the
+        // popover tore down, which left the sheet to re-present on the next
+        // open.
+        .sheet(isPresented: $showReclaim) {
+            ReclaimView(model: model, isPresented: $showReclaim)
+        }
     }
 
     // MARK: - Status

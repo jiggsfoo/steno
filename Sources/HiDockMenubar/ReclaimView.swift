@@ -3,7 +3,23 @@ import SwiftUI
 
 struct ReclaimView: View {
     @Bindable var model: AppModel
-    @Environment(\.dismiss) private var dismiss
+
+    /// The presenting view's own `@State`, written directly.
+    ///
+    /// This was `@Environment(\.dismiss)`. That dismisses through the
+    /// presentation environment, which does not reliably write `false` back to
+    /// the `@State` driving `.sheet(isPresented:)` when the hosting
+    /// `MenuBarExtra` popover tears down on focus loss at the same moment. The
+    /// state stayed `true`, so re-opening the popover re-evaluated
+    /// `MenuBarView` and re-presented this sheet -- a phantom that needed a
+    /// second Cancel, and whose `.onAppear` re-ran `loadReclaimable()` and
+    /// posted a stuck "Can't check the device..." warning.
+    ///
+    /// Writing the binding is synchronous and lands on the source of truth
+    /// itself, so it survives that teardown: there is no environment action to
+    /// propagate and nothing left holding `showReclaim` true.
+    @Binding var isPresented: Bool
+
     @State private var selected: Set<String> = []
     @State private var showConfirm = false
 
@@ -46,7 +62,7 @@ struct ReclaimView: View {
                     selected = Set(model.reclaimCandidates.map(\.signature))
                 }
                 Spacer()
-                Button("Cancel") { dismiss() }
+                Button("Cancel") { cancel() }
                     .keyboardShortcut(.cancelAction)
 
                 // Deliberately NOT .defaultAction. Deleting from the device is
@@ -63,8 +79,7 @@ struct ReclaimView: View {
                 isPresented: $showConfirm, titleVisibility: .visible
             ) {
                 Button("Delete from Device", role: .destructive) {
-                    model.reclaim(model.reclaimCandidates.filter { selected.contains($0.signature) })
-                    dismiss()
+                    confirmDelete()
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
@@ -75,6 +90,20 @@ struct ReclaimView: View {
         .padding()
         .frame(width: 460)
         .onAppear { model.loadReclaimable() }
+    }
+
+    /// Both exits from this sheet, factored out of their `Button` closures so
+    /// a test can call the same code the buttons call. A test cannot press a
+    /// SwiftUI button without a UI-testing dependency, and this package has
+    /// none -- so the alternative was no coverage at all on the one line whose
+    /// absence caused the phantom sheet.
+    func cancel() {
+        isPresented = false
+    }
+
+    func confirmDelete() {
+        model.reclaim(model.reclaimCandidates.filter { selected.contains($0.signature) })
+        isPresented = false
     }
 
     private func binding(for file: FileInfo) -> Binding<Bool> {
