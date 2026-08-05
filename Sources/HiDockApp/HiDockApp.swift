@@ -26,8 +26,14 @@ struct HiDockApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Settings {
+        // A regular Window, not `Settings { }`: `SettingsLink` has no hook to
+        // activate the app first, and this is an LSUIElement (.accessory) app
+        // that never activates on its own -- the window would open behind
+        // every other app and be effectively invisible. MenuBarView activates
+        // the app before calling openWindow(id: MenuBarView.settingsWindowID).
+        Window("HiDock Settings", id: MenuBarView.settingsWindowID) {
             SettingsView(model: appDelegate.model)
         }
+        .windowResizability(.contentSize)
     }
 }

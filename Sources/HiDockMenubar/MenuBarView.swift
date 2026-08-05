@@ -2,8 +2,15 @@ import HiDockKit
 import SwiftUI
 
 public struct MenuBarView: View {
+    /// Shared with `HiDockApp`, which declares the `Window(_:id:)` scene this
+    /// opens. Defined here (not there) so the `HiDockApp` executable target,
+    /// which depends on this library, can reference it without the id string
+    /// being duplicated in both places.
+    public static let settingsWindowID = "settings"
+
     @Bindable var model: AppModel
     @State private var showReclaim = false
+    @Environment(\.openWindow) private var openWindow
 
     public init(model: AppModel) {
         self.model = model
@@ -108,7 +115,17 @@ public struct MenuBarView: View {
         Button("Free up space on P1...") { showReclaim = true }
             .disabled(model.status == .disconnected)
             .sheet(isPresented: $showReclaim) { ReclaimView(model: model) }
-        SettingsLink { Text("Settings...") }
+        // `SettingsLink` has no hook to activate the app first, and this is
+        // an LSUIElement (.accessory) app that never activates on its own --
+        // the Settings window would open behind every other app. Activate,
+        // then open, in that order. Verified by hand (including re-opening
+        // this window while it's already open but buried behind another
+        // app) that activation alone is enough to raise it -- no explicit
+        // makeKeyAndOrderFront needed.
+        Button("Settings...") {
+            NSApp.activate(ignoringOtherApps: true)
+            openWindow(id: Self.settingsWindowID)
+        }
         Button("Quit HiDock") { NSApplication.shared.terminate(nil) }
     }
 
