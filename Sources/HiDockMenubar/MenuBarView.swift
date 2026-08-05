@@ -14,14 +14,18 @@ public struct MenuBarView: View {
     public init(model: AppModel) { self.model = model }
 
     public var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        // Spacing, padding and the separator all come from `MenuMetrics`, which
+        // documents where each number was measured on a real NSMenu. AppKit
+        // lays menu rows edge to edge, so the spacing here is zero and each
+        // row owns its own 24pt height.
+        VStack(alignment: .leading, spacing: MenuMetrics.rowSpacing) {
             statusSection
-            Divider().padding(.vertical, 4)
+            separator
             recentSection
-            Divider().padding(.vertical, 4)
+            separator
             actionsSection
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, MenuMetrics.contentInset)
         .frame(width: 272)
         // `ReclaimView` is handed the same binding that presents it, and closes
         // itself by writing `false` to it. See its `isPresented` doc comment:
@@ -31,6 +35,16 @@ public struct MenuBarView: View {
         .sheet(isPresented: $showReclaim) {
             ReclaimView(model: model, isPresented: $showReclaim)
         }
+    }
+
+    /// One separator, built once so all three sites cannot drift apart. A bare
+    /// `Divider()` runs the full width of the popover; AppKit insets a real
+    /// menu separator from both edges, and that difference is what made this
+    /// menu read as not-quite-native next to one.
+    private var separator: some View {
+        Divider()
+            .padding(.horizontal, MenuMetrics.separatorInset)
+            .padding(.vertical, MenuMetrics.separatorPadding)
     }
 
     // MARK: - Status
@@ -89,7 +103,7 @@ public struct MenuBarView: View {
             // Unlabelled, a ProgressView announces only a bare percentage --
             // no indication of what is at that percentage.
             ProgressView(value: Double(percent), total: 100)
-                .padding(.horizontal, 8)
+                .padding(.horizontal, MenuMetrics.textInset)
                 .padding(.bottom, 2)
                 .accessibilityLabel("Sync progress")
         }
@@ -148,7 +162,7 @@ public struct MenuBarView: View {
         Text("RECENT")
             .font(.caption2)
             .foregroundStyle(.tertiary)
-            .padding(.horizontal, 8)
+            .padding(.horizontal, MenuMetrics.textInset)
             .padding(.bottom, 2)
             .accessibilityLabel("Recent")
             .accessibilityAddTraits(.isHeader)
@@ -174,7 +188,7 @@ public struct MenuBarView: View {
         MenuRow("Free Up Space on P1…", isEnabled: model.status != .disconnected) {
             showReclaim = true
         }
-        Divider().padding(.vertical, 4)
+        separator
         // `SettingsLink` has no hook to activate the app first, and this is an
         // LSUIElement (.accessory) app that never activates on its own — the
         // window would open behind everything. Activate, then open.

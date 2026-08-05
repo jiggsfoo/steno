@@ -184,8 +184,13 @@ public struct MenuRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        // Native metrics, measured off a real NSMenu -- see `MenuMetrics`.
+        // `minHeight` rather than a fixed height: a two-line row (a status
+        // detail, an error) is legitimately taller and must still be allowed
+        // to grow, but a one-line row must land on exactly the native 24.
+        .padding(.horizontal, MenuMetrics.textInset)
+        .padding(.vertical, MenuMetrics.rowVerticalPadding)
+        .frame(minHeight: MenuMetrics.rowHeight)
         .foregroundStyle(rowForeground)
         .background(
             RoundedRectangle(cornerRadius: 5)
