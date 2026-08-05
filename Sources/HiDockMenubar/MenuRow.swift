@@ -104,8 +104,15 @@ public struct MenuRow: View {
             title: title, value: value, detail: detail))
         .accessibilityValue(Self.composedAccessibilityValue(
             hasAction: action != nil, isEnabled: isEnabled))
-        .accessibilityAddTraits(isInteractive ? .isButton : [])
-        .accessibilityRemoveTraits(isInteractive ? [] : .isButton)
+        // Keyed off `action`, NOT `isInteractive`: a disabled control keeps
+        // its button trait so it still shows up in VoiceOver's control rotor.
+        // Dropping the trait while disabled makes the row vanish from the
+        // rotor entirely and announce as static text, which is a worse lie
+        // than "a button you cannot press right now" -- and the value above
+        // already says "Unavailable". Rows with no action are status lines
+        // and correctly stay untraited.
+        .accessibilityAddTraits(action != nil ? .isButton : [])
+        .accessibilityRemoveTraits(action != nil ? [] : .isButton)
     }
 
     private var rowForeground: Color {

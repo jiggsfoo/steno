@@ -30,11 +30,7 @@ public struct SettingsView: View {
                         .accessibilityLabel("Change library folder")
                 }
                 Button("Rebuild Index") { model.rebuildIndex() }
-                Button("Reveal Log in Finder") {
-                    let log = FileManager.default.homeDirectoryForCurrentUser
-                        .appendingPathComponent("Library/Logs/HiDock/hidock.log")
-                    NSWorkspace.shared.activateFileViewerSelecting([log])
-                }
+                Button("Reveal Log in Finder") { revealLog() }
             }
 
             Section("Startup") {
@@ -65,6 +61,21 @@ public struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 460)
         .padding()
+    }
+
+    /// The log may not exist yet -- nothing has synced since the folder was
+    /// last cleared, or this is a fresh install -- so the containing directory
+    /// is created first. `activateFileViewerSelecting` on a nonexistent path
+    /// is unreliable and silently does nothing, which is what this button did
+    /// on a fresh install before the directory creation was restored.
+    ///
+    /// `DiagnosticLog.defaultURL` rather than a rebuilt path: the logger owns
+    /// where it writes, and it is in this module. A hardcoded copy here would
+    /// silently stop matching the moment that moves.
+    private func revealLog() {
+        let folder = DiagnosticLog.defaultURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([DiagnosticLog.defaultURL])
     }
 
     private func chooseFolder() {

@@ -81,30 +81,71 @@ public enum MenuBarIcon {
         return base.applying(NSImage.SymbolConfiguration(paletteColors: [.systemRed]))
     }
 
-    /// `waveform` with a small downward chevron drawn beside it.
+    /// `waveform` with a downward arrow badged onto its bottom-trailing
+    /// corner, mimicking a real SF Symbol badge.
     ///
     /// No SF Symbol conveys "downloading" on a waveform, so this is the one
     /// state that is drawn. Keeping the waveform means the silhouette stays
-    /// recognisable across every state.
+    /// recognisable across every state -- but only if it is the SAME
+    /// waveform. `withSymbolConfiguration` rescales a symbol image; it does
+    /// nothing to a hand-drawn one, so `pointSize` is inert here and the
+    /// geometry has to be got right at draw time instead. Measured against
+    /// the real symbols at `pointSize: 16` (top-left pixel coordinates):
+    ///
+    ///     bare `waveform`   canvas 19x20   ink 15x16 @ x2-16 y2-17
+    ///     `.badge.mic`      canvas 21x22   badge 6x8  @ x13-18 y11-18
+    ///     `.badge.exclam`   canvas 22x21   badge 8x7  @ x12-19 y11-17
+    ///
+    /// So: draw the waveform at the symbol's own configured size (NOT into a
+    /// smaller box -- an earlier version used a hardcoded 14x14 and shipped a
+    /// waveform 31% shorter than every other state), and bottom-anchor the
+    /// badge the way both real badges are anchored. Badges knock a gap out of
+    /// the glyph they sit on rather than overlapping it, which is why the
+    /// waveform's right-hand bars are cleared before the arrow is stroked.
     private static func composedSyncingImage() -> NSImage {
-        let size = NSSize(width: 20, height: 16)
-        let image = NSImage(size: size, flipped: false) { rect in
-            guard let base = NSImage(systemSymbolName: "waveform",
-                                     accessibilityDescription: nil) else { return false }
-            base.isTemplate = true
-            base.draw(in: NSRect(x: 0, y: 1, width: 14, height: 14))
+        // 21x21: the badged symbols are 21x22 and 22x21, and the waveform's
+        // own 19x20 sits inside this with the same 2px leading inset.
+        let size = NSSize(width: 21, height: 21)
+        // Bottom-left origin, matching `flipped: false` below. This lands the
+        // arrow at x13-18 / y11-18 top-left -- the mic badge's own box.
+        let badge = NSRect(x: 13, y: 2, width: 6, height: 8)
 
-            let path = NSBezierPath()
-            path.lineWidth = 1.6
-            path.lineCapStyle = .round
-            path.lineJoinStyle = .round
-            path.move(to: NSPoint(x: rect.maxX - 4, y: rect.midY + 4))
-            path.line(to: NSPoint(x: rect.maxX - 4, y: rect.midY - 3))
-            path.move(to: NSPoint(x: rect.maxX - 6.6, y: rect.midY - 0.6))
-            path.line(to: NSPoint(x: rect.maxX - 4, y: rect.midY - 3.2))
-            path.line(to: NSPoint(x: rect.maxX - 1.4, y: rect.midY - 0.6))
+        let image = NSImage(size: size, flipped: false) { _ in
+            guard let waveform = NSImage(systemSymbolName: "waveform",
+                                         accessibilityDescription: nil)?
+                .withSymbolConfiguration(configuration(for: .connected))
+            else { return false }
+            waveform.isTemplate = true
+            // Top-aligned in the 21pt canvas so the ink lands at y2-17, the
+            // same rows the symbol states occupy.
+            waveform.draw(in: NSRect(x: 0, y: size.height - waveform.size.height,
+                                     width: waveform.size.width,
+                                     height: waveform.size.height))
+
+            // -1.2 is tuned, not arbitrary: it leaves the shortest bar's tip
+            // as a 2x2 nub above the badge, which is exactly what
+            // `waveform.badge.exclamationmark` leaves. A wider knockout
+            // shaves that to a lone 1px speck that reads as a rendering
+            // artifact.
+            NSGraphicsContext.current?.compositingOperation = .clear
+            NSBezierPath(roundedRect: badge.insetBy(dx: -1.2, dy: -1.2),
+                         xRadius: 3, yRadius: 3).fill()
+            NSGraphicsContext.current?.compositingOperation = .sourceOver
+
+            // 1.8 rather than the bars' 2.0: the head's two arms and the stem
+            // all meet in a 3pt square, and at the bars' full weight that
+            // corner fills in and reads as a solid wedge rather than an arrow.
+            let arrow = NSBezierPath()
+            arrow.lineWidth = 1.8
+            arrow.lineCapStyle = .round
+            arrow.lineJoinStyle = .round
+            arrow.move(to: NSPoint(x: badge.midX, y: badge.maxY - 1))
+            arrow.line(to: NSPoint(x: badge.midX, y: badge.minY + 1.4))
+            arrow.move(to: NSPoint(x: badge.minX + 1.1, y: badge.minY + 4.2))
+            arrow.line(to: NSPoint(x: badge.midX, y: badge.minY + 1.4))
+            arrow.line(to: NSPoint(x: badge.maxX - 1.1, y: badge.minY + 4.2))
             NSColor.black.setStroke()      // template mode recolours this
-            path.stroke()
+            arrow.stroke()
             return true
         }
         image.isTemplate = true

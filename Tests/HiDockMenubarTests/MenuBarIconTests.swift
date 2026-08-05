@@ -86,17 +86,27 @@ import Testing
             "the recording icon renders with no colour at all")
 
     for state in MenuBarIcon.State.allCases where state != .recording {
-        #expect(maxRedness(MenuBarIcon.image(for: state)) < 0.05,
+        let image = MenuBarIcon.image(for: state)
+        // Without this the assertion below fails OPEN: if the image cannot be
+        // rasterised, `opaquePixels` returns [] and `< 0.05` passes on an
+        // image that was never examined.
+        #expect(!opaquePixels(of: image).isEmpty,
+                Comment(rawValue: "\(state) produced no readable pixels"))
+        #expect(maxRedness(image) < 0.05,
                 Comment(rawValue: "\(state) is a template image and must stay colourless"))
     }
 }
 
 /// Guards the actual failure mode rather than its cause: a non-template image
 /// dark enough to vanish against a dark menu bar.
+///
+/// The DARKEST ink, not the average: a half-red, half-black icon would clear a
+/// mean threshold while still being half invisible.
 @Test func theNonTemplateRecordingIconIsNotBlack() {
-    let luminance = meanInkLuminance(MenuBarIcon.image(for: .recording))
-    #expect(luminance > 0.2,
-            "recording renders too dark and will disappear on a dark menu bar")
+    let image = MenuBarIcon.image(for: .recording)
+    #expect(!opaquePixels(of: image).isEmpty, "recording produced no readable pixels")
+    #expect(minInkLuminance(image) > 0.2,
+            "recording has ink dark enough to disappear on a dark menu bar")
 }
 
 // MARK: - Pixel helpers
@@ -123,12 +133,10 @@ private func maxRedness(_ image: NSImage) -> Double {
         .max() ?? 0
 }
 
-/// Mean relative luminance of the drawn (non-transparent) pixels.
-private func meanInkLuminance(_ image: NSImage) -> Double {
-    let pixels = opaquePixels(of: image)
-    guard !pixels.isEmpty else { return 0 }
-    let total = pixels.reduce(0.0) {
-        $0 + 0.2126 * $1.redComponent + 0.7152 * $1.greenComponent + 0.0722 * $1.blueComponent
-    }
-    return total / Double(pixels.count)
+/// Relative luminance of the DARKEST drawn pixel. A mean would let a bright
+/// area average away an invisible one.
+private func minInkLuminance(_ image: NSImage) -> Double {
+    opaquePixels(of: image)
+        .map { 0.2126 * $0.redComponent + 0.7152 * $0.greenComponent + 0.0722 * $0.blueComponent }
+        .min() ?? 0
 }
