@@ -21,8 +21,12 @@ struct HiDockApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
-        MenuBarExtra("HiDock", systemImage: "waveform.circle") {
+        MenuBarExtra {
             MenuBarView(model: appDelegate.model)
+        } label: {
+            Image(nsImage: MenuBarIcon.image(for: MenuBarIcon.state(
+                for: appDelegate.model.status,
+                recording: appDelegate.model.recordingInProgress)))
         }
         .menuBarExtraStyle(.window)
 
