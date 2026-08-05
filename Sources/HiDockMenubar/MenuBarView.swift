@@ -50,6 +50,13 @@ public struct MenuBarView: View {
             Text(detail).font(.caption).foregroundStyle(.secondary).lineLimit(2)
         }
 
+        // Rendered regardless of status -- the idle-poll loop can notice a
+        // recording start while the menu shows any connected/syncing state.
+        if let recording = model.recordingInProgress {
+            Label(Self.recordingLabel(for: recording), systemImage: "mic.fill")
+                .foregroundStyle(.red)
+        }
+
         // Rendered regardless of status. Clock-drift warnings and "N recordings
         // failed to sync" were being written and never shown to anyone.
         if let error = model.lastError {
@@ -95,6 +102,8 @@ public struct MenuBarView: View {
         Button("Reveal in Finder") {
             NSWorkspace.shared.open(model.libraryRoot)
         }
+        Button("Sync now") { model.syncNow() }
+            .disabled(model.status == .disconnected)
         Button("Free up space on P1...") { showReclaim = true }
             .disabled(model.status == .disconnected)
             .sheet(isPresented: $showReclaim) { ReclaimView(model: model) }
@@ -116,6 +125,15 @@ public struct MenuBarView: View {
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "MMM d  HH:mm"
         return f.string(from: date)
+    }
+
+    /// GET_RECORDING_FILE's body layout beyond "empty means idle" is
+    /// unverified, so a name containing anything other than printable ASCII
+    /// is shown as a bare "Recording..." rather than risking mangled text.
+    private static func recordingLabel(for filename: String) -> String {
+        let sensible = !filename.isEmpty
+            && filename.unicodeScalars.allSatisfy { (0x20...0x7E).contains($0.value) }
+        return sensible ? "Recording: \(filename)" : "Recording..."
     }
 
     private static func durationLabel(_ seconds: Double?) -> String {

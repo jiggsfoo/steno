@@ -142,6 +142,36 @@ import Testing
     #expect(await t.overlappingWrites == 0)
 }
 
+/// Command 18 (GET_RECORDING_FILE) returns an empty body when the device is
+/// idle -- confirmed against the real P1 2026-08-04.
+@Test func recordingFileReturnsNilForAnEmptyBody() async throws {
+    let t = FakeTransport(script: .init(responses: [18: [Data()]]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+    #expect(try await device.recordingFile() == nil)
+}
+
+@Test func recordingFileReturnsTheNameForANonEmptyBody() async throws {
+    let name = "20260804143022REC003.hda"
+    let t = FakeTransport(script: .init(responses: [18: [Data(name.utf8)]]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+    #expect(try await device.recordingFile() == name)
+}
+
+/// The reference implementation pads the filename to a fixed width with
+/// NUL bytes; `recordingFile` must strip them rather than return a name with
+/// trailing garbage or report a false "recording" from a body that's really
+/// just padding.
+@Test func recordingFileStripsTrailingNULs() async throws {
+    var body = Data("REC004.hda".utf8)
+    body.append(contentsOf: [0, 0, 0, 0])
+    let t = FakeTransport(script: .init(responses: [18: [body]]))
+    let device = JensenDevice(transport: t)
+    try await device.open()
+    #expect(try await device.recordingFile() == "REC004.hda")
+}
+
 @Test func openAndCloseForwardToTransport() async throws {
     let t = FakeTransport(script: .init())
     let device = JensenDevice(transport: t)

@@ -188,6 +188,14 @@ public actor JensenDevice {
         try ResponseParsers.fileList(await send(.getFileList, timeout: timeout)).files
     }
 
+    /// The recording currently in progress, or nil when the device is idle.
+    /// Command 18 returns an empty body when nothing is being recorded.
+    public func recordingFile(timeout: Duration = .seconds(5)) async throws -> String? {
+        let body = try await send(.getRecordingFile, timeout: timeout)
+        let name = String(decoding: body.filter { $0 > 0 }, as: UTF8.self)
+        return name.isEmpty ? nil : name
+    }
+
     public func deleteFile(named name: String) async throws {
         _ = try await send(.deleteFile, body: Data(name.utf8), timeout: .seconds(10))
     }

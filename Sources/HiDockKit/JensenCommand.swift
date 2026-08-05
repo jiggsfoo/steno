@@ -9,5 +9,6 @@ public enum JensenCommand: UInt16, Sendable {
     case getFileCount      = 6
     case deleteFile        = 7
     case getCardInfo       = 16
+    case getRecordingFile  = 18
     case getBatteryStatus  = 4100
 }

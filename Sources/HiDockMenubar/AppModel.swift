@@ -25,6 +25,9 @@ public final class AppModel: @unchecked Sendable {
     public var status: DeviceStatus = .disconnected
     public var recent: [Sidecar] = []
     public var lastError: String?
+    /// The recording currently in progress on the device, or nil when idle.
+    /// Set from the idle-poll loop (see `pollTick`); cleared on detach.
+    public private(set) var recordingInProgress: String?
 
     public var libraryRoot: URL {
         didSet {
@@ -43,6 +46,10 @@ public final class AppModel: @unchecked Sendable {
     private var syncTask: Task<Void, Never>?
     private var syncGeneration = 0
     private var retryDelay: Duration = .seconds(2)
+    /// Idle-poll loop. Only ever runs while the P1 is presumed attached
+    /// (started once a sync completes after `.attached`, cancelled on
+    /// `.detached`) -- see `startPolling`/`pollTick`.
+    private var pollTask: Task<Void, Never>?
 
     public init() {
         let stored = UserDefaults.standard.string(forKey: Self.rootKey)
@@ -101,6 +108,8 @@ public final class AppModel: @unchecked Sendable {
         case .detached:
             syncTask?.cancel()
             syncTask = nil
+            stopPolling()
+            recordingInProgress = nil
             status = .disconnected
         case .attached:
             guard syncTask == nil else { return }
@@ -231,6 +240,12 @@ public final class AppModel: @unchecked Sendable {
                     self?.status = .connected(battery: nil,
                                               freeMiB: refreshed?.freeMiB ?? card.freeMiB,
                                               capacityMiB: refreshed?.capacityMiB ?? card.capacityMiB)
+                    // A full sync just completed after attach: the device is
+                    // known-present and idle enough to have answered every
+                    // command above, so it's safe to start noticing new
+                    // recordings without a replug. `startPolling` is a no-op
+                    // if a poll loop from an earlier attach is already running.
+                    self?.startPolling()
                     // Name and cause, not just a count — a permanently-failing
                     // recording used to render as "1 recording(s) failed to
                     // sync" forever, with no way to tell which one or why.
@@ -314,6 +329,116 @@ public final class AppModel: @unchecked Sendable {
             // only ever carried counts, not enough to report anything useful.
             break
         }
+    }
+
+    // MARK: - Idle polling
+
+    /// The P1 doesn't push any notification when a recording starts or
+    /// finishes, so a device left plugged in needs to be asked. Interval
+    /// shortens while a recording is in progress so "Recording..." clears
+    /// promptly once it stops; 10s otherwise keeps USB traffic light.
+    ///
+    /// A no-op if a poll loop is already running -- callers (sync completion
+    /// after both an attach AND a poll-triggered sync) don't need to know
+    /// whether one is already in flight.
+    private func startPolling() {
+        guard pollTask == nil else { return }
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                let interval: Duration = await MainActor.run {
+                    self?.recordingInProgress != nil ? .seconds(3) : .seconds(10)
+                }
+                try? await Task.sleep(for: interval)
+                guard !Task.isCancelled else { return }
+                await self?.pollTick()
+            }
+        }
+    }
+
+    private func stopPolling() {
+        pollTask?.cancel()
+        pollTask = nil
+    }
+
+    /// One iteration of the idle-poll loop.
+    ///
+    /// Must not fight the existing guards: a sync or reclaim already owns the
+    /// interface (or is about to), and there is nothing useful to add by
+    /// racing it here.
+    ///
+    /// Same open/close discipline as `startSync`: the interface must be free
+    /// BETWEEN polls so `hidock-cli` and a user-triggered sync can still claim
+    /// it, so every tick opens its own transport, does its work, and closes it
+    /// again on every path -- capture the error, close unconditionally, then
+    /// handle. `startSync` (called below) opens its own transport separately,
+    /// after this one is already closed.
+    private func pollTick() async {
+        guard syncTask == nil, !isReclaiming else { return }
+
+        let device: JensenDevice
+        do {
+            let transport = try IOUSBHostTransport.openFirstAvailable()
+            device = JensenDevice(transport: transport)
+            try await device.open()
+        } catch {
+            // Busy (interface already claimed elsewhere) or gone. DeviceMonitor
+            // owns detecting an actual detach; this tick just skips quietly.
+            return
+        }
+
+        var caught: (any Error)?
+        var recording: String?
+        var deviceFileCount = 0
+        do {
+            recording = try await device.recordingFile()
+            if recording == nil {
+                deviceFileCount = try await device.fileCount()
+            }
+        } catch {
+            caught = error
+        }
+        await device.close()
+
+        // A poll tick is background noise, not something the user asked for --
+        // a transient read failure here must not overwrite lastError/status
+        // that a real sync or reclaim set. Just try again next tick.
+        guard caught == nil else { return }
+
+        recordingInProgress = recording
+        guard recording == nil else { return }
+
+        let localCount = (try? index?.all())?.count ?? 0
+        if Self.shouldSyncAfterPoll(
+            recording: recording, deviceFileCount: deviceFileCount, localCount: localCount) {
+            startSync()
+        }
+    }
+
+    /// Pure decision extracted for testing -- `AppModel` itself has no seam
+    /// for it, since it depends on live device state fetched inside `pollTick`.
+    /// `nonisolated`: a static member of a `@MainActor` class is MainActor-
+    /// isolated by default, which would force every caller (including the
+    /// synchronous tests below) onto the main actor for no reason -- this has
+    /// no actor-isolated state to protect.
+    nonisolated static func shouldSyncAfterPoll(
+        recording: String?, deviceFileCount: Int, localCount: Int
+    ) -> Bool {
+        recording == nil && deviceFileCount > localCount
+    }
+
+    /// Manual escape hatch for the menu's "Sync now" button -- the same
+    /// guard `startSync` already relies on via `.attached` and the poll loop,
+    /// just reachable on demand instead of waiting for the next attach or tick.
+    public func syncNow() {
+        guard syncTask == nil else {
+            lastError = "A sync is already running."
+            return
+        }
+        guard !isReclaiming else {
+            lastError = "Can't sync while freeing up space on the P1. Try again in a moment."
+            return
+        }
+        startSync()
     }
 
     public var reclaimCandidates: [FileInfo] = []
