@@ -124,6 +124,7 @@ public final class AppModel: @unchecked Sendable {
     private func handle(_ event: DeviceEvent) {
         switch event {
         case .detached:
+            DiagnosticLog.log("detach")
             syncTask?.cancel()
             syncTask = nil
             stopPolling()
@@ -131,6 +132,7 @@ public final class AppModel: @unchecked Sendable {
             lastSeenDeviceFileCount = nil
             status = .disconnected
         case .attached:
+            DiagnosticLog.log("attach")
             guard syncTask == nil else { return }
             // DeviceMonitor cannot trust its own termination filter (a
             // terminated service may not expose idVendor), so ANY USB device
@@ -143,7 +145,7 @@ public final class AppModel: @unchecked Sendable {
             // keyboard was unplugged. An actual P1 detach resets `status` to
             // `.disconnected` above, so a real replug still syncs.
             if case .connected = status { return }
-            startSync()
+            startSync(trigger: "attach")
         }
     }
 
@@ -159,7 +161,7 @@ public final class AppModel: @unchecked Sendable {
         recent = (try? index?.recent(limit: 5)) ?? []
     }
 
-    private func startSync() {
+    private func startSync(trigger: String) {
         guard let index else { return }
 
         // The precondition belongs HERE, not scattered across callers who
@@ -179,9 +181,10 @@ public final class AppModel: @unchecked Sendable {
         // else re-triggers a sync, so an unplug during any of them would
         // otherwise leave auto-sync dead until a physical replug.
         guard syncTask == nil, !isReclaiming, !isPolling else {
-            scheduleRetry()
+            scheduleRetry(reason: "guard-blocked")
             return
         }
+        DiagnosticLog.log("sync.start", ["trigger": trigger])
         let library = Library(root: libraryRoot)
         let engine = SyncEngine(library: library, index: index)
 
@@ -230,10 +233,16 @@ public final class AppModel: @unchecked Sendable {
             // later open() fail with "user client already created" for the rest of
             // the process's life. The app would sync once and then be dead until
             // relaunch. So: capture the error, close unconditionally, then handle.
+            let syncStarted = ContinuousClock.now
             var caught: (any Error)?
             do {
                 let info = try await device.deviceInfo()
                 let card = try await device.cardInfo()
+                DiagnosticLog.log("sync.device", [
+                    "firmware": info.versionCode,
+                    "serial": info.serialNumber,
+                    "freeMiB": "\(card.freeMiB)",
+                ])
                 await MainActor.run {
                     self?.retryDelay = .seconds(2)
                     self?.status = .connected(battery: nil,
@@ -262,6 +271,12 @@ public final class AppModel: @unchecked Sendable {
                     Task { @MainActor in selfForProgress?.apply(progress) }
                 }
 
+                DiagnosticLog.log("sync.end", [
+                    "downloaded": "\(syncResult.downloaded.count)",
+                    "skipped": "\(syncResult.skipped)",
+                    "failed": "\(syncResult.failed.count)",
+                    "seconds": DiagnosticLog.seconds(ContinuousClock.now - syncStarted),
+                ])
                 let refreshed = try? await device.cardInfo()
                 await MainActor.run {
                     self?.reloadRecent()
@@ -319,20 +334,25 @@ public final class AppModel: @unchecked Sendable {
     }
 
     private func handleConnectionFailure(_ error: JensenError) {
+        let reason: String
         switch error {
         case .timeout:
             status = .busy                       // recording, or in Vibe Mic Bluetooth mode
+            reason = "busy"
         case .interfaceUnavailable(let detail):
             status = .unavailable(detail)
+            reason = "unavailable"
         default:
             status = .unavailable(error.localizedDescription)
+            reason = "unavailable"
         }
-        scheduleRetry()
+        scheduleRetry(reason: reason)
     }
 
     /// Backs off so a persistently unavailable device never busy-loops.
-    private func scheduleRetry() {
+    private func scheduleRetry(reason: String) {
         let delay = retryDelay
+        DiagnosticLog.log("retry", ["delay": "\(DiagnosticLog.seconds(delay))s", "reason": reason])
         retryDelay = min(delay * 2, .seconds(60))
         Task { [weak self] in
             try? await Task.sleep(for: delay)
@@ -405,7 +425,11 @@ public final class AppModel: @unchecked Sendable {
     /// handle. `startSync` (called below) opens its own transport separately,
     /// after this one is already closed.
     private func pollTick() async {
-        guard syncTask == nil, !isReclaiming, !isPolling else { return }
+        guard syncTask == nil, !isReclaiming, !isPolling else {
+            let guardName = syncTask != nil ? "syncTask" : (isReclaiming ? "isReclaiming" : "isPolling")
+            DiagnosticLog.log("poll.skip", ["guard": guardName])
+            return
+        }
         isPolling = true
 
         let device: JensenDevice
@@ -416,6 +440,7 @@ public final class AppModel: @unchecked Sendable {
         } catch {
             // Busy (interface already claimed elsewhere) or gone. DeviceMonitor
             // owns detecting an actual detach; this tick just skips quietly.
+            DiagnosticLog.log("poll.error", ["error": "\(error)"])
             isPolling = false
             return
         }
@@ -437,10 +462,16 @@ public final class AppModel: @unchecked Sendable {
         // A poll tick is background noise, not something the user asked for --
         // a transient read failure here must not overwrite lastError/status
         // that a real sync or reclaim set. Just try again next tick.
-        guard caught == nil else { return }
+        guard caught == nil else {
+            if let caught { DiagnosticLog.log("poll.error", ["error": "\(caught)"]) }
+            return
+        }
 
         recordingInProgress = recording
-        guard recording == nil else { return }
+        if let recording {
+            DiagnosticLog.log("poll", ["recording": recording])
+            return
+        }
 
         // Update the baseline on EVERY idle tick, whether or not it syncs --
         // that's what makes this a change detector rather than a running
@@ -448,9 +479,14 @@ public final class AppModel: @unchecked Sendable {
         // reclaim instead of staying permanently tripped.
         let previouslySeen = lastSeenDeviceFileCount
         lastSeenDeviceFileCount = deviceFileCount
-        guard Self.shouldSyncAfterPoll(
-            recording: recording, deviceFileCount: deviceFileCount, lastSeenCount: previouslySeen
-        ) else { return }
+        let willSync = Self.shouldSyncAfterPoll(
+            recording: recording, deviceFileCount: deviceFileCount, lastSeenCount: previouslySeen)
+        DiagnosticLog.log("poll", [
+            "recording": "nil",
+            "count": "\(deviceFileCount)",
+            "lastSeen": previouslySeen.map(String.init) ?? "nil",
+        ], suffix: willSync ? "-> sync" : nil)
+        guard willSync else { return }
 
         // startSync reopens the interface this tick just released
         // microseconds ago. Every other close -> open pair in this app is
@@ -458,7 +494,7 @@ public final class AppModel: @unchecked Sendable {
         // synchronously, an immediate reopen fails and only recovers via the
         // 2s backoff.
         try? await Task.sleep(for: .milliseconds(250))
-        startSync()
+        startSync(trigger: "poll")
     }
 
     /// Pure decision extracted for testing -- `AppModel` itself has no seam
@@ -500,7 +536,7 @@ public final class AppModel: @unchecked Sendable {
             lastError = "Can't sync right now. Try again in a moment."
             return
         }
-        startSync()
+        startSync(trigger: "manual")
     }
 
     public var reclaimCandidates: [FileInfo] = []
@@ -579,6 +615,7 @@ public final class AppModel: @unchecked Sendable {
         isReclaiming = true
         lastError = nil
         lastNotice = nil
+        DiagnosticLog.log("reclaim.start", ["count": "\(files.count)"])
         let engine = SyncEngine(library: Library(root: libraryRoot), index: index)
 
         Task { [weak self] in
@@ -597,6 +634,12 @@ public final class AppModel: @unchecked Sendable {
                     caught = error
                 }
                 await device.close()
+
+                DiagnosticLog.log("reclaim.end", [
+                    "deleted": "\(result.deleted.count)",
+                    "skipped": "\(result.skipped.count)",
+                    "failed": "\(result.failed.count)",
+                ])
 
                 await MainActor.run {
                     self?.reclaimCandidates = []

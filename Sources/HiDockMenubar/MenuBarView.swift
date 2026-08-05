@@ -104,6 +104,7 @@ public struct MenuBarView: View {
         }
         Button("Sync now") { model.syncNow() }
             .disabled(model.status == .disconnected)
+        Button("Reveal log") { revealLog() }
         Button("Free up space on P1...") { showReclaim = true }
             .disabled(model.status == .disconnected)
             .sheet(isPresented: $showReclaim) { ReclaimView(model: model) }
@@ -114,6 +115,15 @@ public struct MenuBarView: View {
     private func reveal(_ item: Sidecar) {
         let url = model.libraryRoot.appendingPathComponent(item.relativePath)
         NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    /// The log may not exist yet (nothing has synced since the folder was
+    /// last cleared), so the containing directory is created first --
+    /// `activateFileViewerSelecting` on a nonexistent path is unreliable.
+    private func revealLog() {
+        let folder = DiagnosticLog.defaultURL.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        NSWorkspace.shared.activateFileViewerSelecting([DiagnosticLog.defaultURL])
     }
 
     private static func dateLabel(_ date: Date?) -> String {

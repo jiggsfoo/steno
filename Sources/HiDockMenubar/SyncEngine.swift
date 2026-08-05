@@ -111,8 +111,11 @@ public actor SyncEngine {
         var result = SyncResult()
         let pending = ordered.filter { !isAlreadySynced($0) }
         result.skipped = ordered.count - pending.count
+        DiagnosticLog.log("sync.listed", ["deviceFiles": "\(files.count)", "pending": "\(pending.count)"])
 
         for (offset, file) in pending.enumerated() {
+            let xferStarted = ContinuousClock.now
+            DiagnosticLog.log("xfer.start", ["name": file.name, "bytes": "\(file.lengthBytes)"])
             do {
                 guard library.hasFreeSpace(forBytes: file.lengthBytes) else {
                     throw SyncError.insufficientSpace(needed: file.lengthBytes)
@@ -138,6 +141,11 @@ public actor SyncEngine {
                     incoming: incoming, file: file, deviceSerial: serial)
                 try index.upsert(sidecar)
                 result.downloaded.append(sidecar)
+                DiagnosticLog.log("xfer.done", [
+                    "name": file.name,
+                    "bytes": "\(file.lengthBytes)",
+                    "seconds": DiagnosticLog.seconds(ContinuousClock.now - xferStarted),
+                ])
             } catch {
                 try? FileManager.default.removeItem(at: library.incomingURL(for: file))
                 result.failed.append((name: file.name, error: error))
