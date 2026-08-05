@@ -1,6 +1,15 @@
+import AppKit
 import Foundation
 import Testing
 @testable import HiDockMenubar
+
+private let everyStatus: [DeviceStatus] = [
+    .disconnected,
+    .connected(battery: nil, freeMiB: 1, capacityMiB: 2),
+    .syncing(done: 1, total: 2, percent: 50),
+    .busy,
+    .unavailable("boom"),
+]
 
 @Test func durationIsMinutesAndPaddedSeconds() {
     #expect(MenuBarView.durationLabel(4.464) == "0:04")
@@ -29,15 +38,33 @@ import Testing
 }
 
 @Test func everyStatusHasANonEmptyTitle() {
-    let statuses: [DeviceStatus] = [
-        .disconnected,
-        .connected(battery: nil, freeMiB: 1, capacityMiB: 2),
-        .syncing(done: 1, total: 2, percent: 50),
-        .busy,
-        .unavailable("boom"),
-    ]
-    for status in statuses {
+    for status in everyStatus {
         #expect(!MenuBarView.statusTitle(for: status).isEmpty)
+    }
+}
+
+/// The spec's menu diagram shows the status row as "● P1 connected", and its
+/// accessibility section justifies the never-colour-alone rule by pointing at
+/// that symbol. A status row rendered as bare text has neither.
+@Test func everyStatusCarriesItsOwnSymbol() {
+    let symbols = everyStatus.map { MenuBarView.statusAccent(for: $0).symbol }
+    #expect(symbols.allSatisfy { !$0.isEmpty })
+    #expect(Set(symbols).count == symbols.count)
+}
+
+/// Colour is the reinforcement, never the signal — so every tinted status must
+/// already be distinguishable with the tint discarded.
+@Test func statusSymbolsStillDifferWithTheColourRemoved() {
+    let tinted = everyStatus.map { MenuBarView.statusAccent(for: $0) }.filter { $0.tint != nil }
+    #expect(!tinted.isEmpty)
+    #expect(Set(tinted.map(\.symbol)).count == tinted.count)
+}
+
+@Test func everyStatusSymbolExistsOnThisSystem() {
+    let accents = everyStatus.map { MenuBarView.statusAccent(for: $0) } + [MenuBarView.recordingAccent]
+    for accent in accents {
+        #expect(NSImage(systemSymbolName: accent.symbol, accessibilityDescription: nil) != nil,
+                Comment(rawValue: "SF Symbol '\(accent.symbol)' does not exist"))
     }
 }
 

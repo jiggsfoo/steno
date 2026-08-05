@@ -45,10 +45,38 @@ public struct MenuBarView: View {
         }
     }
 
+    /// The symbol beside the status title, and its tint.
+    ///
+    /// The spec's menu diagram shows the status row as "● P1 connected" and
+    /// its accessibility section justifies the no-colour-alone rule by
+    /// pointing at that symbol, so the symbol is the load-bearing part: the
+    /// title already says which state this is, the shape reinforces it, and
+    /// the colour is the last and least of the three.
+    ///
+    /// `nonisolated`: see `statusTitle(for:)` above -- same rationale.
+    nonisolated static func statusAccent(for status: DeviceStatus) -> MenuRow.Accent {
+        switch status {
+        case .disconnected: return .init(symbol: "circle")
+        case .connected:    return .init(symbol: "circle.fill", tint: .green)
+        case .syncing:      return .init(symbol: "arrow.down.circle")
+        case .busy:         return .init(symbol: "exclamationmark.circle", tint: .orange)
+        case .unavailable:  return .init(symbol: "exclamationmark.triangle", tint: .red)
+        }
+    }
+
+    /// Recording is the one row that can appear beside any status, so it needs
+    /// a shape of its own or it is typographically identical to everything
+    /// else in the section.
+    ///
+    /// `nonisolated`: see `statusTitle(for:)` above.
+    nonisolated static let recordingAccent = MenuRow.Accent(symbol: "mic.fill", tint: .red)
+
     @ViewBuilder
     private var statusSection: some View {
-        MenuRow(Self.statusTitle(for: model.status), detail: statusDetail,
-                lineLimit: statusDetailLineLimit)
+        MenuRow(Self.statusTitle(for: model.status),
+                accent: Self.statusAccent(for: model.status),
+                detail: statusDetail,
+                detailLineLimit: statusDetailLineLimit)
 
         if case let .syncing(_, _, percent) = model.status {
             // Unlabelled, a ProgressView announces only a bare percentage --
@@ -62,20 +90,24 @@ public struct MenuBarView: View {
         // Rendered regardless of status -- the idle-poll loop can notice a
         // recording start while the menu shows any connected/syncing state.
         if let recording = model.recordingInProgress {
-            MenuRow(Self.recordingLabel(for: recording))
+            MenuRow(Self.recordingLabel(for: recording), accent: Self.recordingAccent)
         }
 
         // Rendered regardless of status. Clock-drift warnings and "N recordings
         // failed to sync" were being written and never shown to anyone.
+        //
+        // `.error` and `.notice` are what keep the two apart: identical grey
+        // captions differing only in wording meant a partial sync failure
+        // looked and announced exactly like a successful reclaim.
         if let error = model.lastError {
-            MenuRow("", detail: error, lineLimit: 3)
+            MenuRow("", accent: .error, detail: error, detailLineLimit: 3)
         }
 
         // Neutral outcome, e.g. "Freed N recording(s) from the P1." -- a
         // fully-successful reclaim otherwise had no way to tell the user
         // anything happened at all.
         if let notice = model.lastNotice {
-            MenuRow("", detail: notice, lineLimit: 3)
+            MenuRow("", accent: .notice, detail: notice, detailLineLimit: 3)
         }
     }
 

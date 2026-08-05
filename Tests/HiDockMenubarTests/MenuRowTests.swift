@@ -1,3 +1,4 @@
+import AppKit
 import Testing
 @testable import HiDockMenubar
 
@@ -46,4 +47,49 @@ import Testing
 @Test func aPlainStatusRowIsNotAnnouncedAsUnavailable() {
     #expect(MenuRow.composedAccessibilityValue(hasAction: false, isEnabled: false).isEmpty)
     #expect(MenuRow.composedAccessibilityValue(hasAction: false, isEnabled: true).isEmpty)
+}
+
+// MARK: - Severity
+
+/// VoiceOver gets neither the orange nor the triangle, so the severity has to
+/// arrive as a word — and first, before a three-line message.
+@Test func anErrorAnnouncesThatItIsAnError() {
+    #expect(MenuRow.composedAccessibilityLabel(
+        title: "", value: nil, detail: "3 recordings failed to sync",
+        severity: MenuRow.Accent.error.spokenSeverity) == "Error, 3 recordings failed to sync")
+}
+
+/// The defect this replaces: a partial sync failure and a successful reclaim
+/// were both `MenuRow("", detail:)`, so they rendered as the same grey caption
+/// and announced as the same bare sentence.
+@Test func aFailureAndASuccessNoticeDoNotAnnounceAlike() {
+    let failure = MenuRow.composedAccessibilityLabel(
+        title: "", value: nil, detail: "3 recordings failed to sync",
+        severity: MenuRow.Accent.error.spokenSeverity)
+    let success = MenuRow.composedAccessibilityLabel(
+        title: "", value: nil, detail: "Freed 3 recording(s) from the P1.",
+        severity: MenuRow.Accent.notice.spokenSeverity)
+    #expect(failure != success)
+    #expect(failure.hasPrefix("Error"))
+    #expect(success.hasPrefix("Notice"))
+}
+
+/// Severity must survive with the colour switched off: distinct shapes, and a
+/// spoken word each. HIG forbids encoding state in colour alone.
+@Test func severityIsCarriedByShapeAndSpeechNotOnlyColour() {
+    #expect(MenuRow.Accent.error.symbol != MenuRow.Accent.notice.symbol)
+    #expect(MenuRow.Accent.error.spokenSeverity != MenuRow.Accent.notice.spokenSeverity)
+    #expect(MenuRow.Accent.notice.tint == nil)
+}
+
+@Test func aRowWithNoAccentAnnouncesExactlyAsBefore() {
+    #expect(MenuRow.composedAccessibilityLabel(title: "Sync Now", value: nil, detail: nil,
+                                               severity: nil) == "Sync Now")
+}
+
+@Test func everyAccentSymbolExistsOnThisSystem() {
+    for accent in [MenuRow.Accent.error, .notice] {
+        #expect(NSImage(systemSymbolName: accent.symbol, accessibilityDescription: nil) != nil,
+                Comment(rawValue: "SF Symbol '\(accent.symbol)' does not exist"))
+    }
 }

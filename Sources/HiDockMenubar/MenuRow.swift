@@ -7,36 +7,82 @@ import SwiftUI
 /// *appearance* is hand-built, and this is where it lives — so it is built once
 /// and every row inherits it.
 ///
-/// `detail` is unused today. It exists because spec 2 adds transcript titles to
-/// the recent rows, and a second line should be an extension rather than a
-/// rewrite.
+/// `detail` is the row's optional second line. Today it carries the free-space
+/// summary, the unavailable reason, and the error/notice messages; spec 2 adds
+/// transcript titles to the recent rows on the same slot.
 public struct MenuRow: View {
+
+    /// A row's leading symbol, its tint, and the word VoiceOver hears first.
+    ///
+    /// Bundled into one value rather than passed as three parameters so a tint
+    /// can never travel without a shape to carry it. HIG forbids encoding
+    /// state in colour alone, and a menu row has exactly one place that gets
+    /// colour — here.
+    ///
+    /// `spokenSeverity` exists because VoiceOver receives neither the colour
+    /// nor the symbol. Without it, "3 recordings failed to sync" and "Freed 3
+    /// recording(s) from the P1." announce as the same kind of thing.
+    public struct Accent: Sendable, Equatable {
+        public let symbol: String
+        public let tint: Color?
+        public let spokenSeverity: String?
+
+        public init(symbol: String, tint: Color? = nil, spokenSeverity: String? = nil) {
+            self.symbol = symbol
+            self.tint = tint
+            self.spokenSeverity = spokenSeverity
+        }
+
+        /// Something went wrong. Orange is reinforcement; the triangle and the
+        /// spoken "Error" are what actually carry it.
+        public static let error = Accent(symbol: "exclamationmark.triangle.fill",
+                                         tint: .orange,
+                                         spokenSeverity: "Error")
+
+        /// A completed action worth mentioning, e.g. "Freed 3 recording(s)".
+        /// Deliberately untinted — it is not a warning — but it still needs a
+        /// shape and a word of its own so it cannot be mistaken for one.
+        public static let notice = Accent(symbol: "checkmark.circle",
+                                          spokenSeverity: "Notice")
+    }
+
     private let title: String
+    private let accent: Accent?
     private let value: String?
     private let detail: String?
-    private let lineLimit: Int?
+    private let detailLineLimit: Int?
     private let isEnabled: Bool
     private let action: (() -> Void)?
 
     @State private var isHovering = false
 
+    /// `detailLineLimit` rather than `lineLimit`: it caps the second line only.
+    /// Under the old name `MenuRow("a very long title", lineLimit: 2)` compiled
+    /// and silently did nothing. Titles here are short generated strings and
+    /// have never needed capping.
     public init(
         _ title: String,
+        accent: Accent? = nil,
         value: String? = nil,
         detail: String? = nil,
-        lineLimit: Int? = nil,
+        detailLineLimit: Int? = nil,
         isEnabled: Bool = true,
         action: (() -> Void)? = nil
     ) {
         self.title = title
+        self.accent = accent
         self.value = value
         self.detail = detail
-        self.lineLimit = lineLimit
+        self.detailLineLimit = detailLineLimit
         self.isEnabled = isEnabled
         self.action = action
     }
 
     /// What VoiceOver reads. Pure, and therefore the testable part.
+    ///
+    /// `severity` leads because it changes how everything after it should be
+    /// heard, and a screen reader user should not have to wait for the end of
+    /// a three-line error to learn it was an error.
     ///
     /// `nonisolated`: `MenuRow` conforms to `View` whose only requirement,
     /// `body`, is `@MainActor`. Swift 6 infers that isolation onto every
@@ -44,9 +90,9 @@ public struct MenuRow: View {
     /// otherwise make this pure string function unreachable from a plain,
     /// non-isolated `@Test func` without a runtime trap.
     nonisolated static func composedAccessibilityLabel(
-        title: String, value: String?, detail: String?
+        title: String, value: String?, detail: String?, severity: String? = nil
     ) -> String {
-        [title, value, detail]
+        [severity, title, value, detail]
             .compactMap { $0?.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
             .joined(separator: ", ")
@@ -65,8 +111,54 @@ public struct MenuRow: View {
 
     private var isInteractive: Bool { action != nil && isEnabled }
 
+    private var accessibilityLabelText: String {
+        Self.composedAccessibilityLabel(title: title, value: value, detail: detail,
+                                        severity: accent?.spokenSeverity)
+    }
+
+    private var accessibilityValueText: String {
+        Self.composedAccessibilityValue(hasAction: action != nil, isEnabled: isEnabled)
+    }
+
+    /// A row with an action is a real `Button`, not a tappable `Text` stack.
+    /// A tap gesture is invisible to macOS Full Keyboard Access, so rows built
+    /// that way drop out of the focus ring entirely — and with no keyboard
+    /// shortcuts anywhere in this menu, keyboard access and VoiceOver are the
+    /// only non-mouse routes into the app.
+    ///
+    /// `Button` supplies the `.isButton` trait and the disabled state itself,
+    /// so neither is hand-applied any more. `.disabled(!isEnabled)` rather
+    /// than dropping the Button keeps the earlier review's outcome intact: a
+    /// disabled control still appears in VoiceOver's rotor, announced as
+    /// dimmed and valued "Unavailable", which beats vanishing from the rotor
+    /// and announcing as static text.
+    ///
+    /// A row with no action is a status line. It stays plain text and is
+    /// deliberately not focusable.
     public var body: some View {
+        if let action {
+            Button(action: action) { rowContent }
+                .buttonStyle(.plain)
+                .disabled(!isEnabled)
+                .accessibilityLabel(accessibilityLabelText)
+                .accessibilityValue(accessibilityValueText)
+        } else {
+            rowContent
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(accessibilityLabelText)
+                .accessibilityValue(accessibilityValueText)
+        }
+    }
+
+    private var rowContent: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
+            if let accent {
+                // Sized to whichever line it sits beside: a title-less row is
+                // all caption, and a body-sized glyph would tower over it.
+                Image(systemName: accent.symbol)
+                    .font(title.isEmpty ? .caption : nil)
+                    .foregroundStyle(symbolColor(accent))
+            }
             VStack(alignment: .leading, spacing: 1) {
                 // An empty title (e.g. an error/notice row that is all detail)
                 // must not render at all -- an empty `Text` still reserves a
@@ -77,7 +169,7 @@ public struct MenuRow: View {
                 if let detail, !detail.isEmpty {
                     Text(detail)
                         .font(.caption)
-                        .lineLimit(lineLimit)
+                        .lineLimit(detailLineLimit)
                         .foregroundStyle(isHovering && isInteractive ? .white : .secondary)
                 }
             }
@@ -98,21 +190,11 @@ public struct MenuRow: View {
         )
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        .onTapGesture { if isInteractive { action?() } }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Self.composedAccessibilityLabel(
-            title: title, value: value, detail: detail))
-        .accessibilityValue(Self.composedAccessibilityValue(
-            hasAction: action != nil, isEnabled: isEnabled))
-        // Keyed off `action`, NOT `isInteractive`: a disabled control keeps
-        // its button trait so it still shows up in VoiceOver's control rotor.
-        // Dropping the trait while disabled makes the row vanish from the
-        // rotor entirely and announce as static text, which is a worse lie
-        // than "a button you cannot press right now" -- and the value above
-        // already says "Unavailable". Rows with no action are status lines
-        // and correctly stay untraited.
-        .accessibilityAddTraits(action != nil ? .isButton : [])
-        .accessibilityRemoveTraits(action != nil ? [] : .isButton)
+    }
+
+    private func symbolColor(_ accent: Accent) -> Color {
+        if isHovering && isInteractive { return .white }
+        return accent.tint ?? rowForeground
     }
 
     private var rowForeground: Color {
