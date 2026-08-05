@@ -25,7 +25,11 @@
   a capital: `"HiDock: no device"`, not `"HiDock: No Device"`. That matches Apple's
   convention for VoiceOver text. An earlier draft's blanket "all user-facing strings are
   Title Case" was over-broad; narrowed after Task 1's review raised it.
-- **No keyboard shortcuts.** Deliberate — see the spec. Do not add them.
+- **No keyboard shortcuts in the menu.** Deliberate — see the spec. A menu bar extra has no
+  app menu, so a shortcut there would advertise an app-wide capability it cannot deliver.
+- **Standard modal affordances are exempt.** `.cancelAction` on a sheet's Cancel button is
+  correct macOS behaviour and was added deliberately in spec 1 so Return could not fire a
+  device deletion. Do not remove it. Narrowed after Task 3's review raised it.
 - Every task ends with a commit.
 
 ## Verified facts
