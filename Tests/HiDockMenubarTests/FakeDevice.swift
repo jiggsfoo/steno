@@ -13,6 +13,17 @@ actor FakeDevice: SyncDevice {
     var failListAfterDelete: Bool
     private(set) var deletedNames: [String] = []
 
+    /// Entry/exit counter around `listFiles`, mirroring
+    /// `FakeTransport.overlappingWrites` in HiDockKitTests: the direct
+    /// observable for "two callers were ever inside at once". `listFiles`
+    /// yields once internally specifically so this can be nonzero if
+    /// `SyncEngine`'s `isSyncing` guard were ever removed -- without a
+    /// suspension point inside the method, actor isolation alone would
+    /// serialize any two calls and the counter could never exceed 1
+    /// regardless of whether the guard actually works.
+    private var activeListFiles = 0
+    private(set) var maxConcurrentListFiles = 0
+
     init(files: [FileInfo], payloads: [String: Data],
          failTransfersFor: Set<String> = [], ignoreDeletes: Bool = false,
          failListAfterDelete: Bool = false) {
@@ -24,6 +35,13 @@ actor FakeDevice: SyncDevice {
     }
 
     func listFiles() async throws -> [FileInfo] {
+        activeListFiles += 1
+        maxConcurrentListFiles = max(maxConcurrentListFiles, activeListFiles)
+        defer { activeListFiles -= 1 }
+        // See `maxConcurrentListFiles`'s doc comment -- this yield is what
+        // gives a second overlapping call an actual chance to be observed.
+        await Task.yield()
+
         if failListAfterDelete && !deletedNames.isEmpty {
             throw JensenError.timeout(command: 4)
         }

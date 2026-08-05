@@ -1,6 +1,6 @@
 import Foundation
 
-/// A tiny, best-effort diagnostic logger for `AppModel`.
+/// A tiny, best-effort diagnostic logger for `AppModel`/`SyncEngine`.
 ///
 /// PURELY OBSERVATIONAL. This exists to answer one question after the fact --
 /// where did the time go on a slow sync -- by recording every point where
@@ -9,10 +9,29 @@ import Foundation
 /// fire-and-forget call that never throws and never blocks its caller on
 /// disk I/O.
 ///
-/// Every failure -- can't create the directory, can't open the file, can't
-/// rotate -- is swallowed. A logger that can crash the app it's watching is
-/// worse than no logger at all.
-enum DiagnosticLog {
+/// An actual instance (not a bare namespace), so it can be injected. `nil` is
+/// the "don't log" case: `SyncEngine`'s tests construct it with no logger at
+/// all, so a `FakeDevice`-driven test run cannot write a single byte to the
+/// user's real `~/Library/Logs/HiDock/hidock.log` -- there is no shared
+/// mutable path or environment variable to override, just a dependency that
+/// either is or isn't there. `AppModel` owns the one real instance for the
+/// app's process lifetime and hands it to every `SyncEngine` it constructs.
+///
+/// Every I/O failure -- can't create the directory, can't open the file,
+/// can't rotate -- is swallowed. A logger that can crash the app it's
+/// watching is worse than no logger at all.
+/// `public`: `SyncEngine.init`'s `log:` parameter is public API, and Swift
+/// requires a public signature's types to be at least as visible as the
+/// signature itself. Nothing outside this module actually needs to construct
+/// one -- `init`/`log(...)`/etc. below stay at their default (internal)
+/// access level.
+public struct DiagnosticLog: Sendable {
+    let destinationURL: URL
+
+    init(destinationURL: URL = DiagnosticLog.defaultURL) {
+        self.destinationURL = destinationURL
+    }
+
     /// `~/Library/Logs/HiDock/hidock.log`. Same convention as any other
     /// per-app log under `~/Library/Logs`.
     static let defaultURL: URL = {
@@ -34,12 +53,13 @@ enum DiagnosticLog {
     /// pairs rather than as another pair -- used for the poll loop's
     /// `-> sync` decision marker, which reads as an annotation on the line
     /// rather than a field of it.
-    static func log(
+    func log(
         _ event: String, _ pairs: KeyValuePairs<String, String> = [:], suffix: String? = nil
     ) {
-        let line = format(event: event, pairs: pairs, suffix: suffix)
+        let line = Self.format(event: event, pairs: pairs, suffix: suffix)
+        let url = destinationURL
         Task.detached(priority: .utility) {
-            append(line, to: defaultURL)
+            Self.append(line, to: url)
         }
     }
 

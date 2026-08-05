@@ -60,6 +60,11 @@ public struct SyncResult: Sendable {
 public actor SyncEngine {
     private let library: Library
     private let index: LibraryIndex
+    /// Injected, not looked up. `nil` means "don't log" -- the default, and
+    /// what every test uses, so a `FakeDevice`-driven `sync()` call cannot
+    /// write into the real `~/Library/Logs/HiDock/hidock.log`. `AppModel`
+    /// passes its one real instance.
+    private let log: DiagnosticLog?
 
     /// Guards against overlapping runs. `sync` is an actor method with `await`
     /// points, and Swift actors are reentrant, so Task 9's auto-sync-on-attach
@@ -67,9 +72,10 @@ public actor SyncEngine {
     /// pending set and racing on the same `.incoming` staging file.
     private var isSyncing = false
 
-    public init(library: Library, index: LibraryIndex) {
+    public init(library: Library, index: LibraryIndex, log: DiagnosticLog? = nil) {
         self.library = library
         self.index = index
+        self.log = log
     }
 
     /// Copies every recording not already present. Never deletes from the device.
@@ -111,11 +117,11 @@ public actor SyncEngine {
         var result = SyncResult()
         let pending = ordered.filter { !isAlreadySynced($0) }
         result.skipped = ordered.count - pending.count
-        DiagnosticLog.log("sync.listed", ["deviceFiles": "\(files.count)", "pending": "\(pending.count)"])
+        log?.log("sync.listed", ["deviceFiles": "\(files.count)", "pending": "\(pending.count)"])
 
         for (offset, file) in pending.enumerated() {
             let xferStarted = ContinuousClock.now
-            DiagnosticLog.log("xfer.start", ["name": file.name, "bytes": "\(file.lengthBytes)"])
+            log?.log("xfer.start", ["name": file.name, "bytes": "\(file.lengthBytes)"])
             do {
                 guard library.hasFreeSpace(forBytes: file.lengthBytes) else {
                     throw SyncError.insufficientSpace(needed: file.lengthBytes)
@@ -141,7 +147,7 @@ public actor SyncEngine {
                     incoming: incoming, file: file, deviceSerial: serial)
                 try index.upsert(sidecar)
                 result.downloaded.append(sidecar)
-                DiagnosticLog.log("xfer.done", [
+                log?.log("xfer.done", [
                     "name": file.name,
                     "bytes": "\(file.lengthBytes)",
                     "seconds": DiagnosticLog.seconds(ContinuousClock.now - xferStarted),

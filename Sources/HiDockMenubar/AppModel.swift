@@ -46,6 +46,11 @@ public final class AppModel: @unchecked Sendable {
     private var syncTask: Task<Void, Never>?
     private var syncGeneration = 0
     private var retryDelay: Duration = .seconds(2)
+    /// The one real diagnostic logger for this process's lifetime, handed to
+    /// every `SyncEngine` this class constructs. Tests never construct
+    /// `AppModel` (it drives real USB I/O), so there is no injected `nil`
+    /// case needed here the way there is on `SyncEngine`.
+    private let log = DiagnosticLog()
     /// Idle-poll loop. Only ever runs while the P1 is presumed attached
     /// (started once a sync completes after `.attached`, cancelled on
     /// `.detached`) -- see `startPolling`/`pollTick`.
@@ -124,7 +129,7 @@ public final class AppModel: @unchecked Sendable {
     private func handle(_ event: DeviceEvent) {
         switch event {
         case .detached:
-            DiagnosticLog.log("detach")
+            log.log("detach")
             syncTask?.cancel()
             syncTask = nil
             stopPolling()
@@ -132,7 +137,7 @@ public final class AppModel: @unchecked Sendable {
             lastSeenDeviceFileCount = nil
             status = .disconnected
         case .attached:
-            DiagnosticLog.log("attach")
+            log.log("attach")
             guard syncTask == nil else { return }
             // DeviceMonitor cannot trust its own termination filter (a
             // terminated service may not expose idVendor), so ANY USB device
@@ -184,9 +189,9 @@ public final class AppModel: @unchecked Sendable {
             scheduleRetry(reason: "guard-blocked")
             return
         }
-        DiagnosticLog.log("sync.start", ["trigger": trigger])
+        log.log("sync.start", ["trigger": trigger])
         let library = Library(root: libraryRoot)
-        let engine = SyncEngine(library: library, index: index)
+        let engine = SyncEngine(library: library, index: index, log: log)
 
         // Clear stale state before a fresh attempt. lastError is now rendered,
         // so a drift warning or failure count from a previous attach would
@@ -238,7 +243,7 @@ public final class AppModel: @unchecked Sendable {
             do {
                 let info = try await device.deviceInfo()
                 let card = try await device.cardInfo()
-                DiagnosticLog.log("sync.device", [
+                self?.log.log("sync.device", [
                     "firmware": info.versionCode,
                     "serial": info.serialNumber,
                     "freeMiB": "\(card.freeMiB)",
@@ -271,7 +276,7 @@ public final class AppModel: @unchecked Sendable {
                     Task { @MainActor in selfForProgress?.apply(progress) }
                 }
 
-                DiagnosticLog.log("sync.end", [
+                self?.log.log("sync.end", [
                     "downloaded": "\(syncResult.downloaded.count)",
                     "skipped": "\(syncResult.skipped)",
                     "failed": "\(syncResult.failed.count)",
@@ -352,7 +357,7 @@ public final class AppModel: @unchecked Sendable {
     /// Backs off so a persistently unavailable device never busy-loops.
     private func scheduleRetry(reason: String) {
         let delay = retryDelay
-        DiagnosticLog.log("retry", ["delay": "\(DiagnosticLog.seconds(delay))s", "reason": reason])
+        log.log("retry", ["delay": "\(DiagnosticLog.seconds(delay))s", "reason": reason])
         retryDelay = min(delay * 2, .seconds(60))
         Task { [weak self] in
             try? await Task.sleep(for: delay)
@@ -427,7 +432,7 @@ public final class AppModel: @unchecked Sendable {
     private func pollTick() async {
         guard syncTask == nil, !isReclaiming, !isPolling else {
             let guardName = syncTask != nil ? "syncTask" : (isReclaiming ? "isReclaiming" : "isPolling")
-            DiagnosticLog.log("poll.skip", ["guard": guardName])
+            log.log("poll.skip", ["guard": guardName])
             return
         }
         isPolling = true
@@ -440,7 +445,7 @@ public final class AppModel: @unchecked Sendable {
         } catch {
             // Busy (interface already claimed elsewhere) or gone. DeviceMonitor
             // owns detecting an actual detach; this tick just skips quietly.
-            DiagnosticLog.log("poll.error", ["error": "\(error)"])
+            log.log("poll.error", ["error": "\(error)"])
             isPolling = false
             return
         }
@@ -463,13 +468,13 @@ public final class AppModel: @unchecked Sendable {
         // a transient read failure here must not overwrite lastError/status
         // that a real sync or reclaim set. Just try again next tick.
         guard caught == nil else {
-            if let caught { DiagnosticLog.log("poll.error", ["error": "\(caught)"]) }
+            if let caught { log.log("poll.error", ["error": "\(caught)"]) }
             return
         }
 
         recordingInProgress = recording
         if let recording {
-            DiagnosticLog.log("poll", ["recording": recording])
+            log.log("poll", ["recording": recording])
             return
         }
 
@@ -481,7 +486,7 @@ public final class AppModel: @unchecked Sendable {
         lastSeenDeviceFileCount = deviceFileCount
         let willSync = Self.shouldSyncAfterPoll(
             recording: recording, deviceFileCount: deviceFileCount, lastSeenCount: previouslySeen)
-        DiagnosticLog.log("poll", [
+        log.log("poll", [
             "recording": "nil",
             "count": "\(deviceFileCount)",
             "lastSeen": previouslySeen.map(String.init) ?? "nil",
@@ -563,7 +568,7 @@ public final class AppModel: @unchecked Sendable {
         }
         isReclaiming = true
         isLoadingReclaim = true
-        let engine = SyncEngine(library: Library(root: libraryRoot), index: index)
+        let engine = SyncEngine(library: Library(root: libraryRoot), index: index, log: log)
 
         Task { [weak self] in
             do {
@@ -615,8 +620,8 @@ public final class AppModel: @unchecked Sendable {
         isReclaiming = true
         lastError = nil
         lastNotice = nil
-        DiagnosticLog.log("reclaim.start", ["count": "\(files.count)"])
-        let engine = SyncEngine(library: Library(root: libraryRoot), index: index)
+        log.log("reclaim.start", ["count": "\(files.count)"])
+        let engine = SyncEngine(library: Library(root: libraryRoot), index: index, log: log)
 
         Task { [weak self] in
             do {
@@ -635,7 +640,7 @@ public final class AppModel: @unchecked Sendable {
                 }
                 await device.close()
 
-                DiagnosticLog.log("reclaim.end", [
+                self?.log.log("reclaim.end", [
                     "deleted": "\(result.deleted.count)",
                     "skipped": "\(result.skipped.count)",
                     "failed": "\(result.failed.count)",

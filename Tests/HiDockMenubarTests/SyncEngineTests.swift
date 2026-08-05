@@ -110,7 +110,17 @@ private func file(_ name: String, _ bytes: Int, sig: String) -> FileInfo {
 
 /// Actors are reentrant, so two overlapping syncs would compute the same
 /// pending set and race on the same staging file.
-@Test func aSecondConcurrentSyncIsRejected() async throws {
+///
+/// The property that matters is that the two calls never BOTH reach the
+/// device at once -- not that the second one specifically gets rejected.
+/// Under load the two can simply serialize (the first completes before the
+/// second's turn on the actor even starts), which is correct behaviour and
+/// would make an "exactly one succeeds" assertion fail for no real reason.
+/// `maxConcurrentListFiles` is the direct observable, mirroring
+/// `FakeTransport.overlappingWrites` in HiDockKitTests: it can only exceed 1
+/// if `SyncEngine`'s `isSyncing` guard lets two `sync()` calls both reach
+/// `listFiles()` at the same time, regardless of how each one resolves.
+@Test func twoConcurrentSyncsNeverBothReachTheDevice() async throws {
     let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
     let (engine, _, _) = try makeEngine(root: root)
 
@@ -119,9 +129,9 @@ private func file(_ name: String, _ bytes: Int, sig: String) -> FileInfo {
 
     async let first = engine.sync(device: device, serial: "SN1") { _ in }
     async let second = engine.sync(device: device, serial: "SN1") { _ in }
-    let outcomes = await [try? first, try? second]
+    _ = await [try? first, try? second]
 
-    #expect(outcomes.compactMap { $0 }.count == 1)   // exactly one ran
+    #expect(await device.maxConcurrentListFiles == 1)
 }
 
 /// Reclaim must re-verify at call time. A file removed from disk after

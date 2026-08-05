@@ -85,18 +85,9 @@ and nothing is created), `seconds` formatting.
   2026-08-05T14:26:13.317+08:00  poll  recording=nil count=10 lastSeen=10
   ```
 
-## Concerns (not fixed — flagging only)
+## Concerns
 
-1. **`swift test` writes into the real log.** `SyncEngineTests` exercises `SyncEngine.sync()`
-   against `FakeDevice`, and the new `sync.listed`/`xfer.start`/`xfer.done` calls inside `sync()`
-   fire unconditionally, landing in the real `~/Library/Logs/HiDock/hidock.log` (confirmed —
-   found test fixture filenames like `20260804143022REC001.mp3` in the log after a `swift test`
-   run, mid-development). Harmless (capped by rotation, no crash risk) but it does mean a `swift
-   test` run interleaves fake events into the diagnostic log you'll later read to debug a real
-   sync. No injectable destination was added — that would mean threading a logger dependency
-   through `SyncEngine`'s public initializer, which felt like scope creep for a "tiny" observer.
-   Cleared the polluted file before the final launch-and-capture step above so the pasted lines are
-   real.
+1. ~~`swift test` writes into the real log.~~ **Fixed in Fix round 1** — see below.
 2. **The retry hypothesis is unconfirmed, on purpose.** Nothing here touches `scheduleRetry`'s
    backoff — only observes it. The next 96-second sync will have a `retry` line with its `delay=`
    and `reason=` if that's where the time is going; if there's no `retry` line at all during a slow
@@ -110,3 +101,63 @@ and nothing is created), `seconds` formatting.
 ## Commit
 
 One commit, as requested — see `git log -1` after this report lands.
+
+---
+
+## Fix round 1
+
+Two issues raised after the first pass, both confirmed real:
+
+### 1. `swift test` was writing into the user's real log
+
+Confirmed: `SyncEngineTests` exercises `SyncEngine.sync()` against `FakeDevice`, and the
+`sync.listed`/`xfer.start`/`xfer.done` calls inside `sync()` fired unconditionally, landing real
+test-fixture events (e.g. `20260804143022REC001.mp3`) in
+`~/Library/Logs/HiDock/hidock.log` on every `swift test` run.
+
+Fixed by injection, not by moving the log or adding an environment variable:
+
+- `DiagnosticLog` is now an actual instance (`public struct DiagnosticLog: Sendable`, holding a
+  `destinationURL`) rather than a bare static namespace. `format`/`seconds`/`append`/
+  `rotateIfNeeded` stay `static` (pure, still exactly what `DiagnosticLogTests.swift` exercises);
+  `log(_:_:suffix:)` became an instance method.
+- `SyncEngine.init(library:index:log: DiagnosticLog? = nil)` — a new optional parameter, defaulting
+  to `nil` ("don't log"). The three call sites inside `sync()` became `log?.log(...)`.
+- `AppModel` gained one stored instance, `private let log = DiagnosticLog()`, used for its own
+  direct call sites (`attach`/`detach`/`poll`/`retry`/`reclaim.*`/`sync.start`) and passed as
+  `log: log` into every `SyncEngine` it constructs.
+- `SyncEngineTests.swift`'s `makeEngine` helper and the one other direct `SyncEngine(...)` call
+  construct it with no `log:` argument at all (the default `nil`), so no code changed there —
+  a `FakeDevice`-driven test run now cannot write a single byte to the real log path, by
+  construction rather than by convention.
+- Deleted the polluted `~/Library/Logs/HiDock/hidock.log`. Verified clean: 10 consecutive full
+  `swift test` runs afterward, `~/Library/Logs/HiDock/` never contains a `hidock.log`.
+
+### 2. The flaky `aSecondConcurrentSyncIsRejected` test — now fixed properly, per instruction
+
+The wording in my prior handoff was self-contradictory ("found and fixed" vs. "did not touch it")
+— sorry for that. What was actually true then: the test is pre-existing and was NOT part of round
+1's commit (confirmed by `git show --stat`); I only verified it was already flaky on an unmodified
+checkout once the suite grew past ~90 tests (two concurrent `sync()` calls can legitimately
+serialize under scheduler load, which a "the second one throws" assertion can't tell apart from a
+real double-run). This round, as instructed, the test itself is fixed:
+
+- `FakeDevice.listFiles()` (`Tests/HiDockMenubarTests/FakeDevice.swift`) now tracks
+  `activeListFiles`/`maxConcurrentListFiles` (increment on entry, decrement on exit via `defer`),
+  mirroring `FakeTransport.overlappingWrites` in `HiDockKitTests`. It also does one internal
+  `await Task.yield()` — without a suspension point inside the method, actor isolation alone would
+  serialize any two calls and the counter could never observe more than 1 regardless of whether
+  `SyncEngine`'s `isSyncing` guard actually works.
+- The test is renamed `twoConcurrentSyncsNeverBothReachTheDevice` and now asserts
+  `maxConcurrentListFiles == 1` — the real invariant ("two syncs never run at once"), which holds
+  whether the two calls interleave, serialize, or the second is rejected outright.
+- Confirmed deterministic: 10/10 consecutive full-suite runs, zero flakes.
+
+### Verification (fix round 1)
+
+- `swift build` / `swift build --build-tests` — clean, zero warnings.
+- `swift test` — **98 tests, 0 failures**, run **10 times consecutively**, zero flakes.
+- Confirmed `~/Library/Logs/HiDock/` contains no `hidock.log` after any of those 10 test runs.
+- `./Scripts/make-app.sh release` — built `build/HiDock.app` successfully.
+- `hidock-cli list` — `LIST OK`, all **10** recordings still on the device, no regressions.
+- No HiDock process left running at the end.
