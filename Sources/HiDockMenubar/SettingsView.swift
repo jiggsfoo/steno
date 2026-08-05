@@ -30,7 +30,14 @@ public struct SettingsView: View {
                         .accessibilityLabel("Change library folder")
                 }
                 Button("Rebuild Index") { model.rebuildIndex() }
-                Button("Reveal Log in Finder") { revealLog() }
+            }
+
+            // Its own section: the diagnostic log lives in ~/Library/Logs and
+            // is not part of the library the section above configures.
+            Section("Diagnostics") {
+                // "Show in Finder", matching the menu's own wording for the
+                // same operation. Two verbs for one action is one too many.
+                Button("Show Log in Finder") { revealLog() }
             }
 
             Section("Startup") {

@@ -388,7 +388,7 @@ public final class AppModel: @unchecked Sendable {
 
     /// The P1 doesn't push any notification when a recording starts or
     /// finishes, so a device left plugged in needs to be asked. Interval
-    /// shortens while a recording is in progress so "Recording..." clears
+    /// shortens while a recording is in progress so "Recording…" clears
     /// promptly once it stops; 10s otherwise keeps USB traffic light.
     ///
     /// A no-op if a poll loop is already running -- callers (sync completion
