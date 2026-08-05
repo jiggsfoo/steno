@@ -19,7 +19,6 @@ was read from the actual source, not assumed.
 - Sentence case on controls ("Sync now", "Reveal log", "Free up space on P1...") where
   macOS uses Title Case. iOS uses sentence case; macOS does not.
 - `"..."` (three periods) instead of the ellipsis character `…` (U+2026).
-- No keyboard shortcuts anywhere.
 - No `accessibilityLabel` on any control. VoiceOver reads visual shorthand.
 - No app icon, so Login Items, Finder and the Settings window show a generic placeholder.
 
@@ -69,21 +68,34 @@ was read from the actual source, not assumed.
 │ Today 12:00              57:15  │
 │ Today 11:28               0:03  │
 ├─────────────────────────────────┤
-│ Sync Now                    ⌘R  │
-│ Show in Finder             ⌘⇧R  │
+│ Sync Now                        │
+│ Show in Finder                  │
 │ Free Up Space on P1…            │
 ├─────────────────────────────────┤
-│ Settings…                    ⌘, │
-│ Quit HiDock                  ⌘Q │
+│ Settings…                       │
+│ Quit HiDock                     │
 └─────────────────────────────────┘
 ```
 
 All labels Title Case; all ellipses U+2026.
 
-**Keyboard shortcuts fire only while the popover is open.** An accessory app
-(`LSUIElement`) has no menu bar of its own, so there is nowhere to register a global ⌘Q
-or ⌘,. This is a platform constraint, documented here so it is not later mistaken for a
-defect.
+**No keyboard shortcuts. Deliberately.** An earlier draft of this spec added ⌘R, ⌘⇧R, ⌘,
+and ⌘Q as "HIG compliance". That was wrong, and Angelo caught it.
+
+The ⌘Q and ⌘, conventions belong to the **app menu** — the one beside the Apple menu
+bearing the app's name. An `LSUIElement` app has no app menu, so there is no menu item
+for the shortcut to annotate. None of Apple's own menu bar extras (Wi-Fi, Bluetooth,
+Sound, Battery, Time Machine, Control Center) carry keyboard shortcuts, which is the
+clearest available signal about the idiom for this class of app.
+
+Worse than unnecessary, they would mislead: rendering `⌘Q` beside Quit implies it works
+app-wide, when it could only fire while the popover happened to be open. A control that
+advertises a capability it does not have is the same defect class as a stale error
+message or a log that silently drops lines.
+
+Note this was reasoned from convention and from Apple's own shipped behaviour. The HIG
+text itself could not be fetched — the site is a JavaScript app and its docs JSON
+endpoints return 404 — so this is not a citation.
 
 ## Menu bar icon
 
@@ -119,7 +131,7 @@ No binary asset is committed; the icon is reproducible from source.
 
 | File | Responsibility |
 |---|---|
-| `Sources/HiDockMenubar/MenuRow.swift` *(new)* | One menu row: label, optional trailing text, optional second line, hover state, disabled state, accessibility label. Every menu item uses it. |
+| `Sources/HiDockMenubar/MenuRow.swift` *(new)* | One menu row: label, optional trailing value, optional second line, hover state, disabled state, accessibility label. Every menu item uses it. The trailing slot carries values such as a duration — never a keyboard shortcut. |
 | `Sources/HiDockMenubar/MenuBarIcon.swift` *(new)* | Pure mapping from `(DeviceStatus, recordingInProgress)` to symbol name and accessibility label, plus the image builder. |
 | `Sources/HiDockMenubar/MenuBarView.swift` | Rewritten to compose `MenuRow`s. Ad-hoc buttons removed. |
 | `Sources/HiDockMenubar/SettingsView.swift` | Gains "Reveal Log"; labels corrected to Title Case. |
@@ -127,13 +139,16 @@ No binary asset is committed; the icon is reproducible from source.
 | `Scripts/make-icon.swift` *(new)* | Draws and emits `AppIcon.icns`. |
 | `Scripts/make-app.sh` | Copies the icon into the bundle. |
 
-`MenuRow` is where the HIG actually lives — hover, spacing, disabled appearance, trailing
-shortcut. Getting it right once makes every row right. It takes an optional second line
+`MenuRow` is where the HIG actually lives — hover, spacing, disabled appearance, the trailing
+value slot. Getting it right once makes every row right. It takes an optional second line
 from the outset so spec 2's transcript titles are an extension rather than a rewrite.
 
 ## Accessibility
 
 The current app has none of this; it is the substance of "following the HIG".
+
+With no keyboard shortcuts, VoiceOver and full keyboard access are the *only* non-mouse
+route into this app, which makes the following load-bearing rather than decorative.
 
 - **Every row carries an explicit `accessibilityLabel`.** A recent item announces
   "Today 13:00, 66 minutes 24 seconds, recording" rather than the visual shorthand
@@ -168,7 +183,9 @@ The current app has none of this; it is the substance of "following the HIG".
    template images: more code, identical result. Must be verified before building.
 2. **Spec 2 will revisit the recent rows.** `MenuRow`'s optional second line is the
    mitigation; accepted knowingly when full polish was chosen over compliance-only.
-3. **Keyboard shortcuts are popover-scoped only.** Documented above; not a defect.
+3. ~~Keyboard shortcuts are popover-scoped only.~~ **Removed from scope** — see the menu
+   structure section. Not required for a menu bar extra, not idiomatic, and would have
+   advertised a capability the app cannot deliver.
 
 ## Build order
 
