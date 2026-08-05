@@ -19,7 +19,12 @@
 - **No test may require an attached P1**, and **no test may write to `~/Library/Logs/HiDock/`.**
 - **No behaviour changes.** Do not touch `SyncEngine`, `JensenDevice`, `Library`, `LibraryIndex`, `DeviceMonitor`, or any polling/retry/guard logic. This plan is presentation only.
 - **Never send `DELETE_FILE`, `SET_DEVICE_TIME`, or any Bluetooth command.** The user has real recordings on the device and AirPods paired via BlueCatch.
-- All user-facing strings use **Title Case** and the **U+2026 ellipsis character** (`…`), never three periods.
+- **Visible controls** — menu items, buttons, Settings labels — use **Title Case** and the
+  **U+2026 ellipsis character** (`…`), never three periods.
+- **Accessibility labels are spoken, not displayed, and stay sentence case** beginning with
+  a capital: `"HiDock: no device"`, not `"HiDock: No Device"`. That matches Apple's
+  convention for VoiceOver text. An earlier draft's blanket "all user-facing strings are
+  Title Case" was over-broad; narrowed after Task 1's review raised it.
 - **No keyboard shortcuts.** Deliberate — see the spec. Do not add them.
 - Every task ends with a commit.
 
