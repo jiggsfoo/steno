@@ -53,20 +53,56 @@ public enum MenuBarIcon {
         }
     }
 
-    private static let pointSize: CGFloat = 16
+    /// Symbol point size. 16 put 17-19pt of ink on screen and produced natural
+    /// canvases of 19-22pt; the badged variants were then at or over the 22pt
+    /// the status bar gives an item, which reads chunkier than the system's
+    /// own extras. At 14 all four symbols land on a 15pt-tall ink grid.
+    private static let pointSize: CGFloat = 14
+
+    /// The size every state renders at.
+    ///
+    /// Without this each state shipped at its symbol's natural canvas —
+    /// 19x21, 19x20, 21x21, 21x22, 22x21 — so the icon changed size by up to
+    /// 2pt as the device changed state, visibly growing when a sync started.
+    /// Height 18 sits inside the 22pt status item box, which is where Apple's
+    /// own status art sits. Width is fixed too, so the items to the left of
+    /// this one do not shuffle sideways on a state change.
+    public static let renderedSize = NSSize(width: 20, height: 18)
 
     public static func image(for state: State) -> NSImage {
-        let image = symbolName(for: state).flatMap {
-            NSImage(systemSymbolName: $0, accessibilityDescription: nil)
+        let art = symbolName(for: state).flatMap { name -> NSImage? in
+            guard let symbol = NSImage(systemSymbolName: name, accessibilityDescription: nil)
+            else { return nil }
+            return symbol.withSymbolConfiguration(configuration(for: state)) ?? symbol
         } ?? composedSyncingImage()
 
-        let configured = image.withSymbolConfiguration(configuration(for: state)) ?? image
+        let image = fittedToMenuBar(art)
 
         // Template images invert for light/dark and for a tinted menu bar.
         // Recording opts out so its red survives.
-        configured.isTemplate = (state != .recording)
-        configured.accessibilityDescription = accessibilityLabel(for: state)
-        return configured
+        image.isTemplate = (state != .recording)
+        image.accessibilityDescription = accessibilityLabel(for: state)
+        return image
+    }
+
+    /// Centres a state's art, at its own scale, in the one shared canvas.
+    ///
+    /// Deliberately does NOT rescale the art. SF Symbols of the same family
+    /// share a layout grid at a given point size — the badged variants have a
+    /// bigger canvas, not a bigger waveform — so normalising the canvas is
+    /// enough to hold the glyph still, while normalising the ink height would
+    /// shrink the waveform on the badged states and reintroduce the same
+    /// wobble in the part of the silhouette the user actually tracks.
+    private static func fittedToMenuBar(_ art: NSImage) -> NSImage {
+        let canvas = renderedSize
+        // Rounded: a half-point offset resamples a crisp glyph into a blurry
+        // one at 1x.
+        let origin = NSPoint(x: ((canvas.width - art.size.width) / 2).rounded(),
+                             y: ((canvas.height - art.size.height) / 2).rounded())
+        return NSImage(size: canvas, flipped: false) { _ in
+            art.draw(in: NSRect(origin: origin, size: art.size))
+            return true
+        }
     }
 
     /// Recording is the one state that carries colour, so it is also the one
@@ -102,13 +138,26 @@ public enum MenuBarIcon {
     /// badge the way both real badges are anchored. Badges knock a gap out of
     /// the glyph they sit on rather than overlapping it, which is why the
     /// waveform's right-hand bars are cleared before the arrow is stroked.
+    ///
+    /// Every number below is expressed as a fraction of `pointSize`, using the
+    /// measurements above as the ratios. `withSymbolConfiguration` is a no-op
+    /// on a hand-drawn image, so nothing else here would follow `pointSize` on
+    /// its own -- and a `pointSize` that moved four states while pinning the
+    /// fifth is exactly the drift that produced the 31%-short waveform.
     private static func composedSyncingImage() -> NSImage {
-        // 21x21: the badged symbols are 21x22 and 22x21, and the waveform's
-        // own 19x20 sits inside this with the same 2px leading inset.
-        let size = NSSize(width: 21, height: 21)
-        // Bottom-left origin, matching `flipped: false` below. This lands the
-        // arrow at x13-18 / y11-18 top-left -- the mic badge's own box.
-        let badge = NSRect(x: 13, y: 2, width: 6, height: 8)
+        let scale = pointSize / 16
+
+        // The badged symbols are 21x22 and 22x21 at pointSize 16, and the
+        // waveform's own 19x20 sits inside this with the same 2pt leading
+        // inset. Rounded to a whole point: a fractional canvas puts the glyph
+        // on half-pixel boundaries at 1x.
+        let side = (21 * scale).rounded()
+        let size = NSSize(width: side, height: side)
+        // Bottom-left origin, matching `flipped: false` below. At pointSize 16
+        // this lands the arrow at x13-18 / y11-18 top-left -- the mic badge's
+        // own box.
+        let badge = NSRect(x: 13 * scale, y: 2 * scale,
+                           width: 6 * scale, height: 8 * scale)
 
         let image = NSImage(size: size, flipped: false) { _ in
             guard let waveform = NSImage(systemSymbolName: "waveform",
@@ -128,22 +177,22 @@ public enum MenuBarIcon {
             // shaves that to a lone 1px speck that reads as a rendering
             // artifact.
             NSGraphicsContext.current?.compositingOperation = .clear
-            NSBezierPath(roundedRect: badge.insetBy(dx: -1.2, dy: -1.2),
-                         xRadius: 3, yRadius: 3).fill()
+            NSBezierPath(roundedRect: badge.insetBy(dx: -1.2 * scale, dy: -1.2 * scale),
+                         xRadius: 3 * scale, yRadius: 3 * scale).fill()
             NSGraphicsContext.current?.compositingOperation = .sourceOver
 
             // 1.8 rather than the bars' 2.0: the head's two arms and the stem
             // all meet in a 3pt square, and at the bars' full weight that
             // corner fills in and reads as a solid wedge rather than an arrow.
             let arrow = NSBezierPath()
-            arrow.lineWidth = 1.8
+            arrow.lineWidth = 1.8 * scale
             arrow.lineCapStyle = .round
             arrow.lineJoinStyle = .round
-            arrow.move(to: NSPoint(x: badge.midX, y: badge.maxY - 1))
-            arrow.line(to: NSPoint(x: badge.midX, y: badge.minY + 1.4))
-            arrow.move(to: NSPoint(x: badge.minX + 1.1, y: badge.minY + 4.2))
-            arrow.line(to: NSPoint(x: badge.midX, y: badge.minY + 1.4))
-            arrow.line(to: NSPoint(x: badge.maxX - 1.1, y: badge.minY + 4.2))
+            arrow.move(to: NSPoint(x: badge.midX, y: badge.maxY - 1 * scale))
+            arrow.line(to: NSPoint(x: badge.midX, y: badge.minY + 1.4 * scale))
+            arrow.move(to: NSPoint(x: badge.minX + 1.1 * scale, y: badge.minY + 4.2 * scale))
+            arrow.line(to: NSPoint(x: badge.midX, y: badge.minY + 1.4 * scale))
+            arrow.line(to: NSPoint(x: badge.maxX - 1.1 * scale, y: badge.minY + 4.2 * scale))
             NSColor.black.setStroke()      // template mode recolours this
             arrow.stroke()
             return true
