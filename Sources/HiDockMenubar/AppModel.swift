@@ -50,6 +50,24 @@ public final class AppModel: @unchecked Sendable {
     /// (started once a sync completes after `.attached`, cancelled on
     /// `.detached`) -- see `startPolling`/`pollTick`.
     private var pollTask: Task<Void, Never>?
+    /// The device file count as of the last IDLE poll tick (nil until the
+    /// first one). A change detector, not a running total: comparing against
+    /// `index.all().count` instead would break in two ways -- reclaim never
+    /// removes index rows (so it stays synced-but-not-present), which after a
+    /// reclaim makes the device count permanently undershoot it and the poll
+    /// never fires again; and a file that permanently fails to transfer never
+    /// enters the index, which re-fires a sync every tick forever. Reset to
+    /// nil on `.detached` and in `startPolling`, updated on every idle tick.
+    private var lastSeenDeviceFileCount: Int?
+    /// True only while a poll tick holds the claimed USB interface -- open
+    /// through close, including the 300ms post-open settle and up to a
+    /// `recordingFile()`/`fileCount()` timeout. Without this the guard is
+    /// one-directional: `pollTick` respects `syncTask`/`isReclaiming`, but
+    /// nothing respects a tick in progress, so `syncNow`, `loadReclaimable`,
+    /// `reclaim`, or an attach-driven `startSync` can all pass their guards
+    /// mid-tick and then fail `openFirstAvailable()` with "user client
+    /// already created". Same bug class `isReclaiming`'s two-way check kills.
+    private var isPolling = false
 
     public init() {
         let stored = UserDefaults.standard.string(forKey: Self.rootKey)
@@ -110,6 +128,7 @@ public final class AppModel: @unchecked Sendable {
             syncTask = nil
             stopPolling()
             recordingInProgress = nil
+            lastSeenDeviceFileCount = nil
             status = .disconnected
         case .attached:
             guard syncTask == nil else { return }
@@ -143,14 +162,15 @@ public final class AppModel: @unchecked Sendable {
     private func startSync() {
         guard let index else { return }
 
-        // Reclaim holds the USB interface too. Without this, an attach or a
-        // retry rescan can call startSync mid-reclaim and fail on "user
-        // client already created". The guard has to run in BOTH directions.
+        // Reclaim and a poll tick both hold the USB interface too. Without
+        // this, an attach or a retry rescan can call startSync mid-reclaim
+        // (or mid-tick) and fail on "user client already created". The guard
+        // has to run in ALL directions -- see `isPolling`'s doc comment.
         // Unlike a plain "index is nil" return, dropping the attach here must
-        // NOT be silent: reclaim finishes and releases the interface, but
-        // nothing else re-triggers a sync, so an unplug-during-reclaim would
-        // otherwise leave auto-sync dead until a physical replug.
-        guard !isReclaiming else {
+        // NOT be silent: reclaim (or the tick) finishes and releases the
+        // interface, but nothing else re-triggers a sync, so an unplug-during-
+        // reclaim would otherwise leave auto-sync dead until a physical replug.
+        guard !isReclaiming, !isPolling else {
             scheduleRetry()
             return
         }
@@ -342,6 +362,10 @@ public final class AppModel: @unchecked Sendable {
     /// after both an attach AND a poll-triggered sync) don't need to know
     /// whether one is already in flight.
     private func startPolling() {
+        // Always start counting fresh. A baseline left over from before this
+        // sync (or from a previous attach) must not be compared against a
+        // count observed under different circumstances.
+        lastSeenDeviceFileCount = nil
         guard pollTask == nil else { return }
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -362,9 +386,9 @@ public final class AppModel: @unchecked Sendable {
 
     /// One iteration of the idle-poll loop.
     ///
-    /// Must not fight the existing guards: a sync or reclaim already owns the
-    /// interface (or is about to), and there is nothing useful to add by
-    /// racing it here.
+    /// Must not fight the existing guards -- a sync or reclaim already owns
+    /// the interface (or is about to) -- and must not BE fought: `isPolling`
+    /// marks this tick's own claim on the interface so nothing else races it.
     ///
     /// Same open/close discipline as `startSync`: the interface must be free
     /// BETWEEN polls so `hidock-cli` and a user-triggered sync can still claim
@@ -373,7 +397,8 @@ public final class AppModel: @unchecked Sendable {
     /// handle. `startSync` (called below) opens its own transport separately,
     /// after this one is already closed.
     private func pollTick() async {
-        guard syncTask == nil, !isReclaiming else { return }
+        guard syncTask == nil, !isReclaiming, !isPolling else { return }
+        isPolling = true
 
         let device: JensenDevice
         do {
@@ -383,6 +408,7 @@ public final class AppModel: @unchecked Sendable {
         } catch {
             // Busy (interface already claimed elsewhere) or gone. DeviceMonitor
             // owns detecting an actual detach; this tick just skips quietly.
+            isPolling = false
             return
         }
 
@@ -398,6 +424,7 @@ public final class AppModel: @unchecked Sendable {
             caught = error
         }
         await device.close()
+        isPolling = false
 
         // A poll tick is background noise, not something the user asked for --
         // a transient read failure here must not overwrite lastError/status
@@ -407,11 +434,23 @@ public final class AppModel: @unchecked Sendable {
         recordingInProgress = recording
         guard recording == nil else { return }
 
-        let localCount = (try? index?.all())?.count ?? 0
-        if Self.shouldSyncAfterPoll(
-            recording: recording, deviceFileCount: deviceFileCount, localCount: localCount) {
-            startSync()
-        }
+        // Update the baseline on EVERY idle tick, whether or not it syncs --
+        // that's what makes this a change detector rather than a running
+        // total, and what makes it follow the count back down after a
+        // reclaim instead of staying permanently tripped.
+        let previouslySeen = lastSeenDeviceFileCount
+        lastSeenDeviceFileCount = deviceFileCount
+        guard Self.shouldSyncAfterPoll(
+            recording: recording, deviceFileCount: deviceFileCount, lastSeenCount: previouslySeen
+        ) else { return }
+
+        // startSync reopens the interface this tick just released
+        // microseconds ago. Every other close -> open pair in this app is
+        // seconds apart; if the kernel doesn't release the exclusive claim
+        // synchronously, an immediate reopen fails and only recovers via the
+        // 2s backoff.
+        try? await Task.sleep(for: .milliseconds(250))
+        startSync()
     }
 
     /// Pure decision extracted for testing -- `AppModel` itself has no seam
@@ -420,10 +459,21 @@ public final class AppModel: @unchecked Sendable {
     /// isolated by default, which would force every caller (including the
     /// synchronous tests below) onto the main actor for no reason -- this has
     /// no actor-isolated state to protect.
+    ///
+    /// Compares against the LAST OBSERVED device count, not a running total
+    /// like `index.all().count`: reclaim deliberately never removes index
+    /// rows (so an already-synced file doesn't get silently re-downloaded),
+    /// which after a reclaim makes the device count permanently undershoot
+    /// the index count and this would never fire again; and a file that
+    /// permanently fails to transfer never enters the index either, which
+    /// would re-fire a sync every tick forever. `nil` means "no observation
+    /// yet" -- the first tick only establishes a baseline, it never syncs.
     nonisolated static func shouldSyncAfterPoll(
-        recording: String?, deviceFileCount: Int, localCount: Int
+        recording: String?, deviceFileCount: Int, lastSeenCount: Int?
     ) -> Bool {
-        recording == nil && deviceFileCount > localCount
+        guard recording == nil else { return false }
+        guard let lastSeenCount else { return false }
+        return deviceFileCount > lastSeenCount
     }
 
     /// Manual escape hatch for the menu's "Sync now" button -- the same
@@ -436,6 +486,10 @@ public final class AppModel: @unchecked Sendable {
         }
         guard !isReclaiming else {
             lastError = "Can't sync while freeing up space on the P1. Try again in a moment."
+            return
+        }
+        guard !isPolling else {
+            lastError = "Can't sync right now. Try again in a moment."
             return
         }
         startSync()
@@ -459,7 +513,7 @@ public final class AppModel: @unchecked Sendable {
         reclaimCandidates = []
         lastNotice = nil
 
-        guard let index, syncTask == nil, !isReclaiming else {
+        guard let index, syncTask == nil, !isReclaiming, !isPolling else {
             lastError = "Can't check the device while a sync is running. Try again in a moment."
             return
         }
@@ -510,7 +564,7 @@ public final class AppModel: @unchecked Sendable {
     }
 
     public func reclaim(_ files: [FileInfo]) {
-        guard let index, syncTask == nil, !isReclaiming, !files.isEmpty else {
+        guard let index, syncTask == nil, !isReclaiming, !isPolling, !files.isEmpty else {
             lastError = "Can't delete right now. Try again in a moment."
             return
         }

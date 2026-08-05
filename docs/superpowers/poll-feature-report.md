@@ -89,3 +89,43 @@ independent of this work, but this was not used as a substitute for the real acc
 build produced during this task was ever run against the device with the poll loop active, so
 nothing here confirms the poll loop actually detects and syncs a recording end-to-end on real
 hardware. That still needs to be done manually after the user relaunches the app.
+
+## Fix round 1
+
+Review found two HIGH findings, both in the design of `shouldSyncAfterPoll`'s inputs, not in the
+close-on-every-path discipline (confirmed clean across all five exits).
+
+**The flaw:** comparing the device's live file count against `index.all().count` compares two
+different populations. Index rows are every signature ever synced; device files are what's on the
+device right now. Consequences: (1) `deleteFromDevice` deliberately never removes index rows (so
+reclaim doesn't cause a re-download), so after a reclaim the device count permanently undershoots
+the index count and the poll never fires again; (2) a file that permanently fails to transfer never
+enters the index, so `deviceCount > indexCount` stays true and re-fires a sync every tick forever.
+
+**Three changes made:**
+
+1. **Change detector, not a running-total compare.** `shouldSyncAfterPoll` now takes
+   `lastSeenCount: Int?` instead of `localCount: Int` and only returns true when the device count
+   rose since the last observation (`nil` baseline → always false). `AppModel` added
+   `private var lastSeenDeviceFileCount: Int?`, reset to `nil` on `.detached` and at the top of
+   `startPolling()`, and updated to the freshly observed count on every IDLE tick regardless of
+   whether it triggers a sync. This follows the count back down after a reclaim (baseline drops
+   with it) and stops re-firing on a permanently-failing file (baseline tracks the unchanged count).
+2. **`isPolling` flag, checked in both directions.** Added `private var isPolling = false`, set
+   `true` before `pollTick` opens the transport and cleared right after `device.close()` (and on
+   the open-failure exit). `startSync`, `syncNow`, `loadReclaimable`, and `reclaim` now all also
+   guard on `!isPolling`, matching the existing two-way `isReclaiming` pattern — closes the window
+   where a tick holding the interface (up to ~5s on a `recordingFile()` timeout) could be raced by
+   any of those and fail `openFirstAvailable()` with "user client already created".
+3. **250ms settle before a poll-triggered sync.** After a tick decides to sync, it now does
+   `try? await Task.sleep(for: .milliseconds(250))` after `device.close()` and before calling
+   `startSync()`, since that close→open pair is now microseconds apart instead of the seconds every
+   other close→open pair in this app is separated by.
+
+Tests: replaced the three `shouldSyncAfterPoll` cases with five covering `nil` baseline (false),
+increase (true), unchanged (false), decrease/post-reclaim (false), and recording-in-progress-with-
+increase (false) — `Tests/HiDockMenubarTests/AppModelTests.swift`.
+
+Re-verified: `swift build` clean/zero warnings; `swift test` — **87 tests, 0 failures**;
+`hidock-cli probe/info/list` re-run against the real device, still reports all 8 files intact, no
+regression; no HiDock process left running.
