@@ -20,13 +20,18 @@ public struct SettingsView: View {
                     Text(model.libraryRoot.path)
                         .truncationMode(.middle).lineLimit(1)
                     Spacer()
-                    Button("Change...") { chooseFolder() }
+                    Button("Change…") { chooseFolder() }
                 }
-                Button("Rebuild index") { model.rebuildIndex() }
+                Button("Rebuild Index") { model.rebuildIndex() }
+                Button("Reveal Log in Finder") {
+                    let log = FileManager.default.homeDirectoryForCurrentUser
+                        .appendingPathComponent("Library/Logs/HiDock/hidock.log")
+                    NSWorkspace.shared.activateFileViewerSelecting([log])
+                }
             }
 
             Section("Startup") {
-                Toggle("Launch at login", isOn: $launchAtLogin)
+                Toggle("Launch at Login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, enabled in
                         guard !isSyncingToggle else { return }
                         setLoginItem(enabled)
@@ -45,7 +50,7 @@ public struct SettingsView: View {
             }
 
             if let error = model.lastError {
-                Section("Last error") {
+                Section("Last Error") {
                     Text(error).font(.caption).foregroundStyle(.secondary)
                 }
             }
