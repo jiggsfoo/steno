@@ -29,6 +29,14 @@ terminating service is still registry-visible when `rescan()` runs, though, the
 status can stay `.connected` and a genuine replug is dropped. Self-heals on the
 next detach or on sleep/wake.
 
+**`scheduleRetry()` conflates two different situations.** `startSync`'s guard
+retries when it is blocked by a running sync, a reclaim, or a poll tick — but in
+those cases nothing has failed, something else legitimately owns the USB
+interface. It shares a backoff counter with genuine connection failures, so a
+drop doubles `retryDelay` toward its 60 s cap. Self-heals on the next successful
+connect, and not reachable often enough to ratchet in practice (poll ticks run
+strictly sequentially), but the two cases deserve separate handling.
+
 **`retryDelay` ratchets from the reclaim guard.** `scheduleRetry()` doubles the
 backoff toward its 60 s cap and is only reset on a successful connect, so
 repeated attach-during-reclaim events lengthen the delay.
