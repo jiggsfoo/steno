@@ -162,15 +162,23 @@ public final class AppModel: @unchecked Sendable {
     private func startSync() {
         guard let index else { return }
 
-        // Reclaim and a poll tick both hold the USB interface too. Without
-        // this, an attach or a retry rescan can call startSync mid-reclaim
-        // (or mid-tick) and fail on "user client already created". The guard
-        // has to run in ALL directions -- see `isPolling`'s doc comment.
+        // The precondition belongs HERE, not scattered across callers who
+        // each have to remember it. `syncTask == nil` in particular: the poll
+        // tick checks it before opening the transport, but its call to
+        // `startSync` below comes after several awaits AND a deliberate
+        // 250ms settle sleep -- a genuine MainActor suspension point another
+        // caller (e.g. the "Sync now" button) can land in and start a sync of
+        // its own during. Without re-checking here, that races two
+        // `SyncEngine`s against the same USB interface and can clobber the
+        // `syncGeneration` mutex. Reclaim and a poll tick likewise hold the
+        // USB interface, so the guard has to run in ALL directions -- see
+        // `isPolling`'s doc comment.
         // Unlike a plain "index is nil" return, dropping the attach here must
-        // NOT be silent: reclaim (or the tick) finishes and releases the
-        // interface, but nothing else re-triggers a sync, so an unplug-during-
-        // reclaim would otherwise leave auto-sync dead until a physical replug.
-        guard !isReclaiming, !isPolling else {
+        // NOT be silent: whatever's running (reclaim, the tick, or the sync
+        // already in flight) finishes and releases the interface, but nothing
+        // else re-triggers a sync, so an unplug during any of them would
+        // otherwise leave auto-sync dead until a physical replug.
+        guard syncTask == nil, !isReclaiming, !isPolling else {
             scheduleRetry()
             return
         }

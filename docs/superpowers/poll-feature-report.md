@@ -129,3 +129,41 @@ increase (false) — `Tests/HiDockMenubarTests/AppModelTests.swift`.
 Re-verified: `swift build` clean/zero warnings; `swift test` — **87 tests, 0 failures**;
 `hidock-cli probe/info/list` re-run against the real device, still reports all 8 files intact, no
 regression; no HiDock process left running.
+
+## Fix round 2
+
+All three round-1 findings verdicted ADDRESSED. Re-review found one new Medium: the round-1 fix
+itself introduced the bug. The 250ms settle sleep added before the poll tick's `startSync()` call
+is a genuine MainActor suspension point sitting after `isPolling` is cleared and after the sync
+decision is made. `startSync()` never re-checked `syncTask == nil` — it trusted callers to have
+checked it themselves — which was safe before because the tick's decide→`startSync()` path had no
+intervening `await`. Concretely: the tick decides to sync, starts its 250ms sleep; in that window
+the user clicks "Sync now", which passes its own `syncTask == nil` check and starts sync A; the
+tick's sleep ends and its `startSync()` call fires, unguarded, starting sync B — two `SyncEngine`s
+racing the USB interface, with `syncGeneration` able to get clobbered.
+
+**Fix:** added `syncTask == nil` to `startSync()`'s own guard, alongside `!isReclaiming` and
+`!isPolling` — the precondition now lives with the thing it protects instead of being trusted from
+three separate callers.
+
+**Call sites re-checked, none needed changes:**
+- `.attached` handler — already checks `syncTask == nil` synchronously immediately before calling
+  `startSync()`, with no `await` in between. Redundant-but-harmless against the new inner guard.
+- `syncNow()` — plain synchronous function, checks `syncTask == nil` (plus the other two guards)
+  and calls `startSync()` with no `await` anywhere in the function. Same as above.
+- The poll tick — this is the call site the bug lives in: it checks `syncTask == nil` at tick
+  entry, but the actual `startSync()` call comes after device I/O, `device.close()`, and the 250ms
+  settle sleep. This is exactly where the new guard inside `startSync()` earns its keep; the call
+  site itself needed no change because the fix belongs in the callee.
+
+**Test:** not added. `AppModel` has no injectable seam for `startSync()` — `IOUSBHostTransport
+.openFirstAvailable()` is called directly inside it (and inside `pollTick`, `loadReclaimable`, and
+`reclaim`), with no protocol/factory point to substitute a fake, unlike `SyncEngine`'s `SyncDevice`
+abstraction. Exercising this specific race (two overlapping `startSync()` calls with a real
+suspension between decision and call) would need either real hardware or a nontrivial refactor to
+give `AppModel` a device-opening seam, which is out of scope for this fix. Saying so plainly rather
+than adding a test that doesn't actually exercise the guard.
+
+Re-verified: `swift build` clean/zero warnings; `swift test` — **87 tests, 0 failures** (unchanged
+count — no new test added, per above). No hardware touched for this round, per the coordinator's
+instruction — the device was left alone.
