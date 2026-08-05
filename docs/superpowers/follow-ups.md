@@ -38,6 +38,17 @@ recordings hit the fallback path, are skipped, and never re-`upsert`, so the
 index does not refill on its own. Settings → "Rebuild index" recovers it, which
 is the documented path.
 
+## Ready to plan
+
+**Spec 3's audio routing is no longer speculative.** BlueCatch was verified on hardware
+2026-08-05: the P1 pairs directly to Bluetooth earphones, presents a second USB audio
+device (`0x1395:0x005d`, 2ch out / 1ch in @ 48 kHz) alongside the data device, and records
+both directions of a call. Both devices operate simultaneously, so syncing during a call
+works. `BLUETOOTH_STATUS` and `BT_GET_PAIRED_DEV_LIST` are decoded and read the paired
+earphones' name, MAC and connection state straight off the device. The remaining
+unknowns are the mutating commands (`BLUETOOTH_CMD`, `BT_SCAN`, `BT_DEV_LIST`), which
+were deliberately not fired at a working setup. Full detail in `docs/device-reference.md`.
+
 ## Deferred hardware checks
 
 Both need a person at the cable and were never performed.
@@ -65,7 +76,10 @@ Recorded so they are not "fixed" later by mistake.
 
 - **Battery is always `nil`.** `GET_BATTERY_STATUS`'s body layout was never
   verified against hardware, so no parser was invented. The menubar omits the
-  line when nil.
+  line when nil. **Update 2026-08-05:** one sample captured,
+  `00 62 00 3d b8 c8`, where `0x62` = 98 looks like a percentage. Needs a
+  second reading at a materially different charge level before decoding it.
+  See `docs/device-reference.md`.
 - **`SET_DEVICE_TIME` is never sent.** The *read* is hardware-verified BCD. That
   the write accepts the same layout is an inference, not a measurement, and a
   wrong write would corrupt the clock that names every recording.

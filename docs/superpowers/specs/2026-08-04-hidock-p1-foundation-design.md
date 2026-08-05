@@ -265,7 +265,7 @@ toggle (`SMAppService`), and a "Rebuild index" button.
 | Failure | Behaviour |
 |---|---|
 | Interface claim fails (in use, permissions) | Menubar shows "P1 unavailable". Retry with backoff. Never busy-loop. |
-| Device busy (recording, or in Vibe Mic Bluetooth mode) | Commands time out. Show "P1 busy", back off, retry on next attach. |
+| Device busy (recording, in Vibe Mic mode, or mid-BlueCatch connect) | Commands time out. Show "P1 busy", back off, retry on next attach. Observed for real on 2026-08-05: the data path goes briefly deaf while BlueCatch attaches earphones, then recovers. This handling was designed before that was known and turned out to be exactly right. |
 | Unplugged mid-transfer | `.part` remains, nothing commits. Next attach restarts that file. `.part` is keyed by signature so retries do not accumulate orphans. |
 | Command timeout | Clear the read buffer and drain the IN endpoint before the next command. Both halves are required. A stranded partial packet's declared length would swallow the next response, and because its sync marker is intact `invalidHeader` never fires to clear it. Draining must span several quiet windows, not stop at the first empty read: an empty read means "nothing arrived in this window", and the response being guarded against is precisely the late one. |
 | Invalid packet header | Transport is desynced. Drop the read buffer, drain, reconnect. No mid-stream resync attempt. |
@@ -324,7 +324,7 @@ To confirm during step 1. Each has a defined fallback, so none of them blocks th
 | Interface 0 is claimable from a non-sandboxed app via `IOUSBHost` | Fall back to the legacy `IOKit`/`IOUSBLib` plugin interface. Same endpoints, gnarlier C interop. |
 | Device responds to `GET_DEVICE_INFO` after a 300 ms settle | Increase the settle delay, or retry the first command. |
 | ~~Recordings on the device are `.mp3` or `.wav`~~ **RESOLVED 2026-08-04: they are `.hda`, which is MP3.** | No wrapper needed. `FileInfo.preferredExtension` maps `.hda` to `.mp3`; bytes untouched. |
-| P1 also enumerates as a USB Audio Class device | Only affects spec 3. If it does not, audio routing needs a CoreAudio HAL plugin fed by `REALTIME_TRANSFER(34)`, which is substantially more work. |
+| ~~P1 also enumerates as a USB Audio Class device~~ **RESOLVED 2026-08-05, and the framing was wrong.** | It does, but as a **separate USB device** (`0x1395:0x005d`), not an interface on the data device, and only while BlueCatch is engaged. No HAL plugin and no `REALTIME_TRANSFER` are needed. See `docs/device-reference.md`. |
 
 ## Open decisions deferred to later specs
 
@@ -333,3 +333,7 @@ To confirm during step 1. Each has a defined fallback, so none of them blocks th
 - Whether Vibe Mic dictation is handled in-app or delegated to an existing tool (spec 3).
   The Vibe Mic testing guide is a JS-rendered Notion page that could not be read
   programmatically; it needs a browser session or a manual walkthrough on the device.
+- Spec 3's audio routing is no longer speculative. The mechanism is HiDock's BlueCatch:
+  the P1 pairs directly to Bluetooth earphones and sits in the call's audio path,
+  recording both directions. Verified on hardware 2026-08-05, with the payload formats
+  captured in `docs/device-reference.md`. Wired headphones cannot participate.
