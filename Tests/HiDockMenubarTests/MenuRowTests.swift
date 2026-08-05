@@ -28,3 +28,22 @@ import Testing
     #expect(!MenuRow.composedAccessibilityLabel(title: "Quit HiDock", value: nil, detail: nil)
              .isEmpty)
 }
+
+/// A dimmed row is the only signal a sighted user gets that an action exists
+/// but is not available right now. VoiceOver needs the same signal, or
+/// "Sync Now" announces identically whether or not it will do anything.
+@Test func anUnavailableActionSaysSo() {
+    #expect(MenuRow.composedAccessibilityValue(hasAction: true, isEnabled: false)
+            == "Unavailable")
+}
+
+@Test func anAvailableActionHasNoExtraValue() {
+    #expect(MenuRow.composedAccessibilityValue(hasAction: true, isEnabled: true).isEmpty)
+}
+
+/// A row with no action is a status line, not a broken button. It must not
+/// announce as unavailable just because it isn't tappable.
+@Test func aPlainStatusRowIsNotAnnouncedAsUnavailable() {
+    #expect(MenuRow.composedAccessibilityValue(hasAction: false, isEnabled: false).isEmpty)
+    #expect(MenuRow.composedAccessibilityValue(hasAction: false, isEnabled: true).isEmpty)
+}

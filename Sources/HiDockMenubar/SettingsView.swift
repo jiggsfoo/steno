@@ -17,10 +17,17 @@ public struct SettingsView: View {
         Form {
             Section("Library") {
                 HStack {
+                    // The path is the only thing on this line, so on its own
+                    // it announces as a bare path with no hint of what it is.
                     Text(model.libraryRoot.path)
                         .truncationMode(.middle).lineLimit(1)
+                        .accessibilityLabel("Library folder")
+                        .accessibilityValue(model.libraryRoot.path)
                     Spacer()
+                    // "Change" alone says nothing about what it changes;
+                    // VoiceOver reads a button without its neighbouring text.
                     Button("Change…") { chooseFolder() }
+                        .accessibilityLabel("Change library folder")
                 }
                 Button("Rebuild Index") { model.rebuildIndex() }
                 Button("Reveal Log in Finder") {

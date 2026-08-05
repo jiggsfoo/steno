@@ -60,14 +60,25 @@ public enum MenuBarIcon {
             NSImage(systemSymbolName: $0, accessibilityDescription: nil)
         } ?? composedSyncingImage()
 
-        let configured = image.withSymbolConfiguration(
-            .init(pointSize: pointSize, weight: .regular)) ?? image
+        let configured = image.withSymbolConfiguration(configuration(for: state)) ?? image
 
         // Template images invert for light/dark and for a tinted menu bar.
         // Recording opts out so its red survives.
         configured.isTemplate = (state != .recording)
         configured.accessibilityDescription = accessibilityLabel(for: state)
         return configured
+    }
+
+    /// Recording is the one state that carries colour, so it is also the one
+    /// state that must ask for it. Opting out of template rendering only stops
+    /// macOS recolouring the image; it does not make the image red. Without
+    /// the palette colour below, `.recording` renders as flat black and is
+    /// invisible on the default dark menu bar -- the exact state that must
+    /// never go unnoticed.
+    private static func configuration(for state: State) -> NSImage.SymbolConfiguration {
+        let base = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
+        guard state == .recording else { return base }
+        return base.applying(NSImage.SymbolConfiguration(paletteColors: [.systemRed]))
     }
 
     /// `waveform` with a small downward chevron drawn beside it.

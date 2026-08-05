@@ -9,13 +9,22 @@ struct ReclaimView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Free up space on P1").font(.headline)
+            // Title Case, matching the "Free Up Space on P1…" row that opens
+            // this sheet. `.headline` is a visual weight, not a semantic
+            // header, so the trait has to be stated.
+            Text("Free Up Space on P1")
+                .font(.headline)
+                .accessibilityAddTraits(.isHeader)
             Text("Only recordings verified present on this Mac are listed. "
                  + "Deleting removes them from the device, not from your library.")
                 .font(.caption).foregroundStyle(.secondary)
 
             if model.isLoadingReclaim {
-                ProgressView().frame(maxWidth: .infinity)
+                // An unlabelled indeterminate spinner announces as "in
+                // progress" with no subject.
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+                    .accessibilityLabel("Loading recordings from the device")
             } else if model.reclaimCandidates.isEmpty {
                 Text("Nothing safe to delete.").foregroundStyle(.secondary)
             } else {
@@ -33,7 +42,7 @@ struct ReclaimView: View {
             }
 
             HStack {
-                Button("Select all") {
+                Button("Select All") {
                     selected = Set(model.reclaimCandidates.map(\.signature))
                 }
                 Spacer()
@@ -44,7 +53,7 @@ struct ReclaimView: View {
                 // irreversible, and Select-all sits one click away — Return
                 // should never be able to wipe the P1. A confirmation dialog
                 // stands between the button and the deletion.
-                Button("Delete \(selected.count) from device\u{2026}") {
+                Button("Delete \(selected.count) from Device\u{2026}") {
                     showConfirm = true
                 }
                 .disabled(selected.isEmpty)
@@ -53,7 +62,7 @@ struct ReclaimView: View {
                 "Delete \(selected.count) recording(s) from the P1?",
                 isPresented: $showConfirm, titleVisibility: .visible
             ) {
-                Button("Delete from device", role: .destructive) {
+                Button("Delete from Device", role: .destructive) {
                     model.reclaim(model.reclaimCandidates.filter { selected.contains($0.signature) })
                     dismiss()
                 }

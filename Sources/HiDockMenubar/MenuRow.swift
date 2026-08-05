@@ -52,6 +52,17 @@ public struct MenuRow: View {
             .joined(separator: ", ")
     }
 
+    /// What VoiceOver reads after the label. Also pure, also testable.
+    ///
+    /// A dimmed row tells a sighted user "this action exists but not right
+    /// now". Without this, an unavailable action announces identically to a
+    /// working one and the only feedback for activating it is silence.
+    nonisolated static func composedAccessibilityValue(
+        hasAction: Bool, isEnabled: Bool
+    ) -> String {
+        (hasAction && !isEnabled) ? "Unavailable" : ""
+    }
+
     private var isInteractive: Bool { action != nil && isEnabled }
 
     public var body: some View {
@@ -91,6 +102,8 @@ public struct MenuRow: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Self.composedAccessibilityLabel(
             title: title, value: value, detail: detail))
+        .accessibilityValue(Self.composedAccessibilityValue(
+            hasAction: action != nil, isEnabled: isEnabled))
         .accessibilityAddTraits(isInteractive ? .isButton : [])
         .accessibilityRemoveTraits(isInteractive ? [] : .isButton)
     }

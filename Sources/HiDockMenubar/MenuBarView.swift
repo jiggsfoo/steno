@@ -51,9 +51,12 @@ public struct MenuBarView: View {
                 lineLimit: statusDetailLineLimit)
 
         if case let .syncing(_, _, percent) = model.status {
+            // Unlabelled, a ProgressView announces only a bare percentage --
+            // no indication of what is at that percentage.
             ProgressView(value: Double(percent), total: 100)
                 .padding(.horizontal, 8)
                 .padding(.bottom, 2)
+                .accessibilityLabel("Sync progress")
         }
 
         // Rendered regardless of status -- the idle-poll loop can notice a
@@ -99,11 +102,17 @@ public struct MenuBarView: View {
 
     @ViewBuilder
     private var recentSection: some View {
+        // The all-caps spelling is a visual convention for a menu section
+        // header. VoiceOver should get the word and the header trait, not the
+        // shouting -- an all-caps string is a candidate for being spelled out
+        // letter by letter.
         Text("RECENT")
             .font(.caption2)
             .foregroundStyle(.tertiary)
             .padding(.horizontal, 8)
             .padding(.bottom, 2)
+            .accessibilityLabel("Recent")
+            .accessibilityAddTraits(.isHeader)
 
         if model.recent.isEmpty {
             MenuRow("", detail: "Nothing synced yet")
@@ -140,15 +149,6 @@ public struct MenuBarView: View {
     private func reveal(_ item: Sidecar) {
         let url = model.libraryRoot.appendingPathComponent(item.relativePath)
         NSWorkspace.shared.activateFileViewerSelecting([url])
-    }
-
-    /// The log may not exist yet (nothing has synced since the folder was
-    /// last cleared), so the containing directory is created first --
-    /// `activateFileViewerSelecting` on a nonexistent path is unreliable.
-    private func revealLog() {
-        let folder = DiagnosticLog.defaultURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        NSWorkspace.shared.activateFileViewerSelecting([DiagnosticLog.defaultURL])
     }
 
     // MARK: - Formatting

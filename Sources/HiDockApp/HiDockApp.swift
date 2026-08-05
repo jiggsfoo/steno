@@ -24,9 +24,15 @@ struct HiDockApp: App {
         MenuBarExtra {
             MenuBarView(model: appDelegate.model)
         } label: {
-            Image(nsImage: MenuBarIcon.image(for: MenuBarIcon.state(
-                for: appDelegate.model.status,
-                recording: appDelegate.model.recordingInProgress)))
+            let state = MenuBarIcon.state(for: appDelegate.model.status,
+                                          recording: appDelegate.model.recordingInProgress)
+            // The NSImage carries `accessibilityDescription`, but SwiftUI does
+            // not reliably promote that to the accessibility label of an
+            // `Image(nsImage:)` -- an unlabelled image is treated as
+            // decorative. Stating it here means the icon announces its state
+            // whichever of the two the status item ends up exposing.
+            Image(nsImage: MenuBarIcon.image(for: state))
+                .accessibilityLabel(MenuBarIcon.accessibilityLabel(for: state))
         }
         .menuBarExtraStyle(.window)
 
