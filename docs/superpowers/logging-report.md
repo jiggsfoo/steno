@@ -161,3 +161,95 @@ real double-run). This round, as instructed, the test itself is fixed:
 - `./Scripts/make-app.sh release` — built `build/HiDock.app` successfully.
 - `hidock-cli list` — `LIST OK`, all **10** recordings still on the device, no regressions.
 - No HiDock process left running at the end.
+
+---
+
+## Fix round 2
+
+**Fatal bug, caught by the live run immediately:** the first real launch after round 1 produced a
+torn line —
+
+```
+2026-08-05T14:42:16.436+08:00  attach
+2026-08-05T14:42:16.437+08:00  attach
+art  trigger=attach
+```
+
+— the third line's first ~40 characters (`2026-08-05T14:42:16.xxx+08:00  sync.st`) were
+overwritten on disk by another writer.
+
+### Root cause
+
+`append` opened the file with plain `FileHandle(forWritingTo:)`, then did `seekToEnd()` followed by
+a separate `write(contentsOf:)`. Those are two steps, not one: two callers (here, the attach
+handler and the sync task, both firing within ~1ms of each other) can each seek to the same
+end-of-file offset before either has written, and the second write overwrites the first's bytes.
+Not a display artefact — the file on disk was actually corrupted.
+
+### Fix
+
+Rewrote `DiagnosticLog.append` (`Sources/HiDockMenubar/DiagnosticLog.swift`) to open the file
+descriptor directly via POSIX `open(_:O_WRONLY | O_CREAT | O_APPEND, _:)` and write with the raw
+`write(2)` syscall (`import Darwin`), instead of `FileHandle` + `seekToEnd()`. `O_APPEND` makes the
+kernel perform the seek-to-end-and-write as one atomic step per `write(2)` call, and a single
+`write(2)` call is itself atomic for any write under `PIPE_BUF` — every line here is comfortably
+under that. Chose this over a serializing actor/queue because it needed no new type, no new
+isolation domain, and keeps the existing "reopen per call" model — it directly removes the race
+instead of narrowing its window.
+
+`rotateIfNeeded` (unchanged logic) still runs before the `open()` on every call. Verified it stays
+correct if it races a concurrent write: an in-flight writer's fd was opened against the old inode
+before or after the `moveItem`, so its `O_APPEND` write still lands intact in whichever file that
+inode now is (the archived `.log.1` or, once reopened, the fresh live file) — never torn, never
+lost, only ever possibly on the "other side" of the rotation boundary, which is not a correctness
+requirement.
+
+### Mutation-check test (added, confirmed fails before / passes after)
+
+`concurrentAppendsNeitherTearNorLoseALine` (`Tests/HiDockMenubarTests/DiagnosticLogTests.swift`) —
+fires 300 concurrent `DiagnosticLog.append` calls at one temp-directory log via `withTaskGroup`,
+then asserts the line count equals 300 and every line matches `^\d{4}-\d{2}-\d{2}T…` (a `Regex`) and
+contains its event name.
+
+- **Before the fix:** failed on all 3 runs I tried it against the old `FileHandle` implementation.
+- **After the fix:** passed on all 5 runs I tried it against the new one.
+
+Also added `rotationDuringConcurrentAppendsLosesNoLine`, per the request to confirm rotation stays
+correct under the new scheme — 300 concurrent writes against a deliberately tiny 200-byte cap (to
+force several real rotations mid-storm), then checks every line surviving across the live file
+*and* its one `.1` slot is intact (whole lines are expected to be evicted by repeated rotation
+under such a tiny cap; a torn or truncated one is not). `append` gained an optional `cap:` parameter
+so this test can force rotation without writing 5 MB. 5/5 passing runs.
+
+### Verification (fix round 2)
+
+- `swift build` / `swift build --build-tests` — clean, zero warnings.
+- `swift test` — **100 tests** (98 + 2 new), **0 failures**, run **5 times consecutively**, zero
+  flakes.
+- Confirmed `~/Library/Logs/HiDock/` contained no `hidock.log` across those 5 test runs.
+- `./Scripts/make-app.sh release` — built `build/HiDock.app` successfully.
+- `hidock-cli list` — `LIST OK`, all **10** recordings still on the device.
+- Deleted `~/Library/Logs/HiDock/hidock.log*`, launched `build/HiDock.app`, let it run ~40s
+  (attach, sync, and two poll ticks). Captured log has the *exact same near-simultaneous
+  `attach`/`sync.start` race* that produced the original torn line (three lines within 2ms of each
+  other) — this time all intact:
+  ```
+  2026-08-05T14:49:50.793+08:00  attach
+  2026-08-05T14:49:50.794+08:00  sync.start  trigger=attach
+  2026-08-05T14:49:50.795+08:00  attach
+  2026-08-05T14:49:51.103+08:00  sync.device  firmware=1.4.5 serial=HDP1254506027 freeMiB=59520
+  2026-08-05T14:49:51.116+08:00  sync.listed  deviceFiles=10 pending=0
+  2026-08-05T14:49:51.118+08:00  sync.end  downloaded=0 skipped=10 failed=0 seconds=0.02
+  2026-08-05T14:50:01.992+08:00  poll  recording=nil count=10 lastSeen=nil
+  ```
+  Verified programmatically with a regex grep for the timestamp shape: 0 malformed lines out of 11.
+- Quit the app afterward; confirmed via `ps aux` no HiDock process remained.
+
+### Concern noted during this round (not a bug in this change)
+
+Mid-verification, `ps aux` turned up a running `/Applications/HiDock.app` (the previously-installed
+build, unrelated to this branch's `build/HiDock.app`) that had been relaunched as a macOS login item
+and was writing real `poll` lines into the same real log path while I was measuring "does the test
+suite write to the log." It briefly made that measurement look like a regression. Quit it
+(`osascript … to quit`) before re-measuring cleanly. Not something this change caused or touched —
+flagging only so it isn't mistaken for a second bug if seen again.

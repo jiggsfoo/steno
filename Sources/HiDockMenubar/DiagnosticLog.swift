@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// A tiny, best-effort diagnostic logger for `AppModel`/`SyncEngine`.
@@ -105,27 +106,41 @@ public struct DiagnosticLog: Sendable {
     /// Appends `line` to `url`, creating the containing directory and
     /// rotating first if needed. Reopens the file on every call rather than
     /// holding a handle open for the process lifetime -- simplest thing that
-    /// works at "a few lines per 10 seconds".
-    static func append(_ line: String, to url: URL) {
+    /// works at "a few lines per 10 seconds" -- but the open MUST carry
+    /// `O_APPEND`, and the write MUST go through the raw `write(2)` syscall
+    /// rather than `FileHandle`.
+    ///
+    /// `FileHandle(forWritingTo:)` + `seekToEnd()` + `write(contentsOf:)` was
+    /// the original implementation, and it is NOT atomic: seeking to the end
+    /// and writing are two separate steps, so two callers can both resolve
+    /// the same end offset and the second write overwrites (tears) the
+    /// first's bytes on disk. A real capture from the live app showed exactly
+    /// this -- the attach handler and the sync task both logged within a
+    /// millisecond and one line's first ~40 characters were clobbered.
+    /// `O_APPEND` makes the kernel perform the seek-to-end and the write as
+    /// one atomic step per `write(2)` call, and that call is itself atomic
+    /// for any single write under `PIPE_BUF` -- every line here is
+    /// comfortably under that.
+    static func append(_ line: String, to url: URL, cap: Int = rotationCapBytes) {
         do {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         } catch {
             return
         }
-        rotateIfNeeded(url)
+        rotateIfNeeded(url, cap: cap)
 
         let data = Data((line + "\n").utf8)
-        if let handle = try? FileHandle(forWritingTo: url) {
-            defer { try? handle.close() }
-            do {
-                _ = try handle.seekToEnd()
-                try handle.write(contentsOf: data)
-            } catch {
-                // Swallowed -- see the type's doc comment.
-            }
-        } else {
-            try? data.write(to: url)
+        let fd = url.withUnsafeFileSystemRepresentation { path -> Int32 in
+            guard let path else { return -1 }
+            return open(path, O_WRONLY | O_CREAT | O_APPEND, 0o644)
+        }
+        guard fd >= 0 else { return }
+        defer { close(fd) }
+
+        data.withUnsafeBytes { buffer in
+            guard let base = buffer.baseAddress else { return }
+            _ = Darwin.write(fd, base, buffer.count)
         }
     }
 

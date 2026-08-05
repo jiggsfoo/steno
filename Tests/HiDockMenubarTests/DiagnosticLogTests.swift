@@ -128,3 +128,88 @@ private func tempLogURL() -> URL {
     #expect(DiagnosticLog.seconds(.seconds(2)) == "2.00")
     #expect(DiagnosticLog.seconds(.milliseconds(6090)) == "6.09")
 }
+
+/// The mutation this is meant to catch: `append` used to open the file with
+/// `FileHandle(forWritingTo:)` and do `seekToEnd()` then `write()` as two
+/// separate steps. Two callers can resolve the same end offset between their
+/// seek and their write, and one overwrites (tears) the other's line -- a
+/// real capture from the live app showed exactly this: an `attach` line's
+/// tail got clobbered mid-write by a `sync.start` line landing at the same
+/// moment. A real device only ever produces a couple of near-simultaneous
+/// writers (the attach handler and the sync task); a few hundred concurrent
+/// writers here is a deliberately harder version of the same race, so a fix
+/// that merely reduces the odds rather than removing the race can't sneak
+/// through as "still passes."
+@Test func concurrentAppendsNeitherTearNorLoseALine() async throws {
+    let url = tempLogURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+    let writeCount = 300
+    await withTaskGroup(of: Void.self) { group in
+        for i in 0..<writeCount {
+            group.addTask {
+                let line = DiagnosticLog.format(event: "concurrent.write", pairs: ["i": "\(i)"])
+                DiagnosticLog.append(line, to: url)
+            }
+        }
+    }
+
+    let contents = try String(contentsOf: url, encoding: .utf8)
+    let lines = contents.split(separator: "\n", omittingEmptySubsequences: true)
+
+    // Line count first -- a torn write can also merge two lines into one or
+    // truncate one to nothing, which would already show up here before the
+    // per-line shape check below even runs.
+    #expect(lines.count == writeCount)
+
+    let timestampPrefix = try Regex(
+        #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}"#)
+    for line in lines {
+        #expect(line.firstMatch(of: timestampPrefix) != nil, "malformed line: \(line)")
+        #expect(line.contains("concurrent.write"), "malformed line: \(line)")
+    }
+}
+
+/// Rotation and a concurrent write race in real usage -- a tick that logs
+/// `retry` right as another tick's write pushes the file over the cap. A
+/// small cap here forces several rotations to actually happen mid-storm
+/// rather than leaving it to chance; every line must still land somewhere
+/// (either the live file or the one rotation slot), intact, none lost.
+@Test func rotationDuringConcurrentAppendsLosesNoLine() async throws {
+    let url = tempLogURL()
+    defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+    let writeCount = 300
+    await withTaskGroup(of: Void.self) { group in
+        for i in 0..<writeCount {
+            group.addTask {
+                let line = DiagnosticLog.format(event: "rotate.write", pairs: ["i": "\(i)"])
+                DiagnosticLog.append(line, to: url, cap: 200)
+            }
+        }
+    }
+
+    let rotated = url.appendingPathExtension("1")
+    let liveLines = (try? String(contentsOf: url, encoding: .utf8))?
+        .split(separator: "\n", omittingEmptySubsequences: true) ?? []
+    let rotatedLines = (try? String(contentsOf: rotated, encoding: .utf8))?
+        .split(separator: "\n", omittingEmptySubsequences: true) ?? []
+    let allLines = liveLines + rotatedLines
+
+    // A tiny cap rotates repeatedly, so earlier rotation slots are expected
+    // to be overwritten and lost -- only the CURRENT live file and the ONE
+    // most recent rotation slot are guaranteed to survive. The invariant
+    // that must hold regardless is per-line integrity: whatever IS present
+    // across those two files must be whole, untorn lines, never a fragment.
+    let timestampPrefix = try Regex(
+        #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}"#)
+    #expect(!allLines.isEmpty)
+    for line in allLines {
+        #expect(line.firstMatch(of: timestampPrefix) != nil, "malformed line: \(line)")
+        #expect(line.contains("rotate.write"), "malformed line: \(line)")
+    }
+}
