@@ -113,7 +113,7 @@ public enum MenuBarIcon {
         let image = NSImage(size: size, flipped: false) { _ in
             guard let waveform = NSImage(systemSymbolName: "waveform",
                                          accessibilityDescription: nil)?
-                .withSymbolConfiguration(configuration(for: .connected))
+                .withSymbolConfiguration(configuration(for: .syncing))
             else { return false }
             waveform.isTemplate = true
             // Top-aligned in the 21pt canvas so the ink lands at y2-17, the
