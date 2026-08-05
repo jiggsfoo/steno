@@ -562,6 +562,16 @@ public final class AppModel: @unchecked Sendable {
         reclaimCandidates = []
         lastNotice = nil
 
+        // Same reasoning, applied to the warning below. It says "Try again in
+        // a moment", but until now the only thing that ever cleared `lastError`
+        // was `startSync` -- so a user who did exactly what it asked kept
+        // looking at a warning about a poll tick that had finished seconds
+        // earlier, in the menu AND in Settings, until they happened to hit Sync
+        // Now. Clearing here before the guard makes the retry the message asks
+        // for the thing that clears it: a retry that gets through leaves no
+        // message, and one that is blocked again posts a fresh one.
+        lastError = nil
+
         guard let index, syncTask == nil, !isReclaiming, !isPolling else {
             lastError = "Can't check the device while a sync is running. Try again in a moment."
             return
