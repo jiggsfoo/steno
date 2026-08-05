@@ -75,26 +75,38 @@ func draw(size: CGFloat) -> NSBitmapImageRep {
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
     let ctx = NSGraphicsContext.current!.cgContext
 
-    let rect = NSRect(x: 0, y: 0, width: size, height: size)
+    let canvas = NSRect(x: 0, y: 0, width: size, height: size)
+
+    // macOS's icon grid does not fill the canvas: on a 1024pt tile the rounded
+    // rect is 824pt square, centred, with a 185.4pt corner radius. That inset
+    // is what makes icons line up optically beside each other in Finder, the
+    // Dock and Login Items. Drawn edge to edge, this icon rendered visibly
+    // larger than every neighbour.
+    let inset = size * 100 / 1024
+    let rect = canvas.insetBy(dx: inset, dy: inset)
+    let radius = rect.width * 185.4 / 824
 
     // Rounded-rect graphite background, matching macOS icon geometry. The
     // clip still comes from Core Graphics (antialiased rounded corners); only
     // the gradient fill inside it is hand-computed.
-    let radius = size * 0.2237
     let path = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
     path.addClip()
+    // Drawn across the whole canvas and clipped, rather than generated at the
+    // inset rect's fractional pixel size and resampled into it -- resampling
+    // is the noise this hand-computed ramp exists to avoid.
     let background = gradientImage(pixels: px, angleDegrees: -70,
                                     start: (0.29, 0.29, 0.32), end: (0.14, 0.14, 0.15))
-    ctx.draw(background, in: rect)
+    ctx.draw(background, in: canvas)
 
     // Waveform: five rounded bars, symmetric about the centre.
-    // Values are half-length as a fraction of the icon size; the tallest
-    // bar (0.31 → 62% of the full height) leaves margin at top/bottom so
-    // it reads as a rounded bar, not a column that gets clipped square by
-    // the icon's edges.
+    // Values are half-length as a fraction of the rounded rect (not the
+    // canvas, so the art keeps its proportions inside the inset badge); the
+    // tallest bar (0.31 → 62% of the badge height) leaves margin at top/bottom
+    // so it reads as a rounded bar, not a column that gets clipped square by
+    // the badge's edges.
     let heights: [CGFloat] = [0.085, 0.21, 0.31, 0.17, 0.055]
-    let barWidth = size * 0.077
-    let gap = size * 0.153
+    let barWidth = rect.width * 0.077
+    let gap = rect.width * 0.153
     let totalWidth = CGFloat(heights.count - 1) * gap
     NSColor(calibratedWhite: 0.96, alpha: 1).setStroke()
     for (i, h) in heights.enumerated() {
@@ -102,8 +114,8 @@ func draw(size: CGFloat) -> NSBitmapImageRep {
         let bar = NSBezierPath()
         bar.lineWidth = barWidth
         bar.lineCapStyle = .round
-        bar.move(to: NSPoint(x: x, y: rect.midY - size * h))
-        bar.line(to: NSPoint(x: x, y: rect.midY + size * h))
+        bar.move(to: NSPoint(x: x, y: rect.midY - rect.width * h))
+        bar.line(to: NSPoint(x: x, y: rect.midY + rect.width * h))
         bar.stroke()
     }
 
