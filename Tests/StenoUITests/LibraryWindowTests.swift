@@ -53,8 +53,10 @@ private func idViewID(in value: Any, depth: Int = 0) -> String? {
 @MainActor
 @Test func selectingARecordingGivesTheDetailPaneAFreshIdentity() {
     let player = AudioPlayer()
+    let model = AppModel()
     let content = LibraryWindow.detailContent(
         for: recording("abc123"), player: player,
-        query: "", moments: [], capped: false, onPlay: { _ in })
+        query: "", moments: [], capped: false,
+        knownTopics: [], model: model, onPlay: { _ in })
     #expect(idViewID(in: content) == "abc123")
 }

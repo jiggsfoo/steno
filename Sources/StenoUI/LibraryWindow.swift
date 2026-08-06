@@ -24,7 +24,9 @@ public struct LibraryWindow: View {
                 player: player,
                 query: store.query,
                 moments: search.moments,
-                capped: search.capped
+                capped: search.capped,
+                knownTopics: RecordingEditor.topicChoices(from: store.recordings),
+                model: model
             ) { moment in
                 // A moment lands you somewhere: seek and play its recording,
                 // then select it so clearing the query leaves you in that
@@ -77,11 +79,13 @@ public struct LibraryWindow: View {
     /// recording actually is: unrelated content, not a continuation of the
     /// last one.
     ///
-    /// `query`, `moments`, and `capped` are resolved by `body` (which is
-    /// where `store.query` and `store.recordings` live) and handed in here,
-    /// rather than this function reaching for them itself — that keeps this
-    /// a pure composition of already-known values, which is what makes it
-    /// something a test can call directly.
+    /// `query`, `moments`, `capped`, and `knownTopics` are resolved by `body`
+    /// (which is where `store.query` and `store.recordings` live) and handed
+    /// in here, rather than this function reaching for them itself — that
+    /// keeps this a pure composition of already-known values, which is what
+    /// makes it something a test can call directly. `model` is passed through
+    /// unchanged so `TranscriptPane` can hand it to `RecordingEditor`, which
+    /// needs it to save an edit.
     @ViewBuilder
     static func detailContent(
         for recording: LoadedRecording?,
@@ -89,6 +93,8 @@ public struct LibraryWindow: View {
         query: String,
         moments: [Moment],
         capped: Bool,
+        knownTopics: [String],
+        model: AppModel,
         onPlay: @escaping (Moment) -> Void
     ) -> some View {
         // Trimmed to match `TranscriptSearch.moments`, which trims before
@@ -102,7 +108,8 @@ public struct LibraryWindow: View {
                 >= TranscriptSearch.minimumQueryLength {
             MomentsPane(moments: moments, capped: capped, onPlay: onPlay)
         } else if let recording {
-            TranscriptPane(recording: recording, player: player)
+            TranscriptPane(recording: recording, player: player,
+                            knownTopics: knownTopics, model: model)
                 .id(recording.id)
         } else {
             ContentUnavailableView("No recording selected", systemImage: "waveform")

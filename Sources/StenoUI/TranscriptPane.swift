@@ -7,12 +7,18 @@ public struct TranscriptPane: View {
     // pane never writes through `$player` — a plain `let` gets identical
     // observation tracking on `player.currentTime` etc. with less ceremony.
     let player: AudioPlayer
+    let knownTopics: [String]
+    @Bindable var model: AppModel
 
     @State private var isFollowing = true
+    @State private var isEditing = false
 
-    public init(recording: LoadedRecording, player: AudioPlayer) {
+    public init(recording: LoadedRecording, player: AudioPlayer,
+                knownTopics: [String], model: AppModel) {
         self.recording = recording
         self.player = player
+        self.knownTopics = knownTopics
+        self.model = model
     }
 
     public var body: some View {
@@ -33,6 +39,20 @@ public struct TranscriptPane: View {
                                                       in: transcript.segments)
         return ScrollViewReader { proxy in
             VStack(spacing: 0) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(recording.displayTitle).font(.headline)
+                        Text(recording.sidecar.topic ?? LibrarySidebar.unfiled)
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Edit…") { isEditing = true }
+                }
+                .padding(.horizontal, 12).padding(.top, 10)
+                .sheet(isPresented: $isEditing) {
+                    RecordingEditor(recording: recording, knownTopics: knownTopics, model: model)
+                }
+
                 if !isFollowing {
                     HStack {
                         Text("Following paused").font(.caption)
