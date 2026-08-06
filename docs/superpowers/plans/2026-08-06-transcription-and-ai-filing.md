@@ -2310,6 +2310,30 @@ public actor TranscriptionQueue {
         }
     }
 
+    /// The automatic sweep — respects `maxAttempts`.
+    ///
+    /// Runs after every sync and at launch, so a permanently undecodable
+    /// recording must stop re-attempting rather than re-spend forever.
+    public func process(_ sidecar: Sidecar) async -> Sidecar {
+        await run(sidecar, respectingCap: true)
+    }
+
+    /// A deliberate, user-initiated retry — ignores `maxAttempts`.
+    ///
+    /// Two entry points rather than a `Bool` parameter, so intent is legible at
+    /// the call site and the contract is enforced by the API instead of by a
+    /// caller remembering to clear a counter first. `Sidecar.transcriptionAttempts`
+    /// documents that manual retry ignores the cap; this is what makes that true.
+    ///
+    /// Clears the attempt count so a later automatic sweep is not still capped:
+    /// a manual retry that succeeds should leave a clean state, and one that
+    /// fails should start counting fresh rather than inherit a spent budget.
+    public func retry(_ sidecar: Sidecar) async -> Sidecar {
+        var fresh = sidecar
+        fresh.transcriptionAttempts = nil
+        return await run(fresh, respectingCap: false)
+    }
+
     /// Transcribes, files, and returns the updated sidecar. The CALLER persists
     /// it and updates the index — this actor owns no `Library`.
     ///
@@ -2317,7 +2341,7 @@ public actor TranscriptionQueue {
     /// thing is the download, so audio goes first. Here it is transcription, and
     /// the already-done check is the transcript FILE, so a crash between steps
     /// only ever repeats free work.
-    public func process(_ sidecar: Sidecar) async -> Sidecar {
+    private func run(_ sidecar: Sidecar, respectingCap: Bool) async -> Sidecar {
         var updated = sidecar
 
         // 1. Transcript — skipped entirely when one already exists.
@@ -2325,6 +2349,13 @@ public actor TranscriptionQueue {
         if let existing = store.transcript(for: sidecar) {
             transcript = existing
         } else {
+            // The cap must be enforced HERE, not only in `pending()`. Callers
+            // reach this method directly, so a cap checked only at the queue-scan
+            // layer would let a permanently-failing recording re-spend on every
+            // invocation. `retry` passes `respectingCap: false` to get past it.
+            guard !respectingCap || (sidecar.transcriptionAttempts ?? 0) < maxAttempts else {
+                return updated
+            }
             let audio = root.appendingPathComponent(sidecar.relativePath)
             do {
                 let body = try await transcriber.transcribe(
@@ -2813,8 +2844,6 @@ Add stored properties beside the existing ones and two methods. Do **not** restr
         let root = libraryRoot
         let store = TranscriptStore(root: root)
         store.remove(for: sidecar)          // force a fresh run
-        var fresh = sidecar
-        fresh.transcriptionAttempts = nil
         let library = Library(root: root)
 
         Task {
@@ -2822,7 +2851,9 @@ Add stored properties beside the existing ones and two methods. Do **not** restr
                 root: root, store: store, filer: Filer(root: root),
                 resolver: TopicResolver(suggester: OnDeviceSuggester()),
                 transcriber: transcriber)
-            let updated = await queue.process(fresh)
+            // `retry`, not `process`: this is the deliberate user-initiated path
+            // and must ignore the attempt cap. It clears the counter itself.
+            let updated = await queue.retry(sidecar)
             await Task.detached { try? library.updateSidecar(updated) }.value
 
             try? self.index?.upsert(updated)
