@@ -29,7 +29,7 @@ public struct MenuBarView: View {
             separator
             actionsSection
         }
-        .padding(.vertical, MenuMetrics.contentInset)
+        .padding(.vertical, MenuMetrics.popoverInset)
         .frame(width: 272)
     }
 

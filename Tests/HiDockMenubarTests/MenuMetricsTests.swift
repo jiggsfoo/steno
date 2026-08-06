@@ -85,10 +85,16 @@ private let menuWidth = 272.0
 /// the before/after difference on every assertion below is 6pt or more.
 private let onePixel = 1.0 / renderScale
 
+/// Shared, so a row rendered alone below cannot drift from the one the popover
+/// renders.
+private let sampleStatus = DeviceStatus.connected(battery: nil,
+                                                  freeMiB: 10 * 1024,
+                                                  capacityMiB: 32 * 1024)
+
 @MainActor
 private func sampleMenu() -> MenuBarView {
     let model = AppModel()
-    model.status = .connected(battery: nil, freeMiB: 10 * 1024, capacityMiB: 32 * 1024)
+    model.status = sampleStatus
     return MenuBarView(model: model)
 }
 
@@ -212,4 +218,39 @@ private func sampleMenu() -> MenuBarView {
         of: MenuRow("P1 Connected", detail: "10 GB free of 32 GB").frame(width: menuWidth))
     #expect(twoLine > oneLine,
             Comment(rawValue: "a two-line row measured \(twoLine)pt, no taller than a one-line row"))
+}
+
+/// The popover's own top and bottom edge padding, measured as a difference so
+/// the glyphs' top bearing cancels: the same first row and the same last row are
+/// each rendered alone, and what is left over is the container's.
+///
+/// Both ends are asserted because the fix moves them together -- raising the top
+/// alone would leave the popover visibly bottom-light.
+@MainActor
+@Test func renderedPopoverEdgePaddingIsBalancedAndMatchesTheMetric() throws {
+    let menu = sampleMenu()
+    let menuBands = inkBands(of: menu)
+    let menuHeight = renderedHeight(of: menu)
+    try #require(menuBands.count > 1, "the popover drew nothing to measure")
+
+    let first = MenuRow(MenuBarView.statusTitle(for: sampleStatus),
+                        accent: MenuBarView.statusAccent(for: sampleStatus),
+                        detail: "10 GB free of 32 GB").frame(width: menuWidth)
+    let last = MenuRow("Quit HiDock") {}.frame(width: menuWidth)
+
+    let firstInk = try #require(inkBands(of: first).first?.top,
+                                "the status row drew nothing")
+    let lastInk = try #require(inkBands(of: last).last?.bottom,
+                               "the last row drew nothing")
+    let lastTail = renderedHeight(of: last) - lastInk
+
+    let topInset = menuBands[0].top - firstInk
+    let bottomInset = menuHeight - menuBands[menuBands.count - 1].bottom - lastTail
+
+    #expect(abs(topInset - MenuMetrics.popoverInset) <= onePixel,
+            Comment(rawValue: "top inset measured \(topInset)pt, expected \(MenuMetrics.popoverInset)pt"))
+    #expect(abs(bottomInset - MenuMetrics.popoverInset) <= onePixel,
+            Comment(rawValue: "bottom inset measured \(bottomInset)pt, expected \(MenuMetrics.popoverInset)pt"))
+    #expect(abs(topInset - bottomInset) <= onePixel,
+            Comment(rawValue: "popover is unbalanced: \(topInset)pt above, \(bottomInset)pt below"))
 }

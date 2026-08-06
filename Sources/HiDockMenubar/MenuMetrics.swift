@@ -50,8 +50,26 @@ enum MenuMetrics {
     /// Leading inset of an item's text from the edge of the menu.
     static let textInset: CGFloat = 14
 
-    /// Space above the first row and below the last.
+    /// Space above the first row and below the last, as AppKit lays a real menu
+    /// out: an empty `NSMenu.size.height` of 10, split evenly.
+    /// `MenuMetricsTests` re-derives this from AppKit at run time.
     static let contentInset: CGFloat = 5
+
+    /// What the popover actually pads its top and bottom edge by.
+    ///
+    /// **Three of these numbers are measured and the fourth is not.** A real
+    /// `NSMenu` whose first item carries a two-line attributed title -- the same
+    /// shape as our status row -- was popped up and rastered: it leaves 11.0pt
+    /// between the top of the menu and the first pixel of ink, and 11.0pt below
+    /// the last. This popover measured 11.0 / 10.5 at `contentInset`, i.e. it
+    /// already matched AppKit.
+    ///
+    /// It still read as cramped against other menu bar apps, whose popovers are
+    /// not `NSMenu`s and are more generous than one. **The extra 3pt is by eye,
+    /// not measured** -- it is the one number on this type that AppKit did not
+    /// supply. Applied to `.vertical`, so the bottom moves with the top and the
+    /// popover stays balanced.
+    static let popoverInset: CGFloat = contentInset + 3
 
     /// Gap between adjacent rows. AppKit lays menu rows edge to edge.
     static let rowSpacing: CGFloat = 0
