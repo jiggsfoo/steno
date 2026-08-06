@@ -1379,7 +1379,6 @@ Audio loading stays on the `.onChange(of: store.selection)` added to the
 `NavigationSplitView` in Task 5 — it must not move into this branch, because a
 closure built inside a branch captures the selection that was current when the
 branch was built and would load the previous recording's audio.
-```
 
 - [ ] **Step 5: Run the tests**
 
