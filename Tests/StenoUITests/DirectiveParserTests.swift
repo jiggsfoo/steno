@@ -27,6 +27,7 @@ func recognisedPhrasingsYieldADirective(_ text: String) {
     "I need to buy groceries later.",
     "The grocery list is on the fridge.",
     "We filed the paperwork under the wrong client.",
+    "Filing this under Taxes.",
     "Put this in the car when you get home.",
     "take that credit card string, put it into the payment method",
     "I reconstitute it and I put it into a sprayer",

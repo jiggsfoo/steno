@@ -15,24 +15,27 @@ public struct Directive: Sendable, Equatable {
 /// from being filed under Grocery List. The model downstream is free to
 /// interpret; it is not free to invent an instruction that was never given.
 public enum DirectiveParser {
-    /// EXPLICIT FILING VERBS ONLY. `put` and `stick` are deliberately absent.
+    /// EXPLICIT FILING VERBS ONLY. `put`, `stick`, and `filing` are deliberately absent.
     ///
-    /// They were in this list until the Task 4 quality gate ran it against 3
-    /// hours of real recordings, where `put (this|that|it) into` matched
-    /// "put it into the payment method" and "put it into a sprayer" — both
-    /// buried in real client calls, both of which would have filed that call
-    /// under a topic nobody asked for. Twelve directive-shaped phrases turned
-    /// up in that corpus and not one was a real directive.
+    /// `put` and `stick` were in this list until the Task 4 quality gate ran it
+    /// against 3 hours of real recordings, where `put (this|that|it) into` matched
+    /// "put it into the payment method" and "put it into a sprayer" — both buried
+    /// in real client calls, both of which would have filed that call under a
+    /// topic nobody asked for. Twelve directive-shaped phrases turned up in that
+    /// corpus and not one was a real directive.
     ///
-    /// The prefilter's entire value is in what it REFUSES. Recall is the
-    /// cheap side of this trade: an unfiled recording is visible and fixed by
-    /// editing one sidecar field, while a misfiled client call is the failure
-    /// the whole design was built to avoid. If a phrasing you use is missed,
-    /// change the phrasing before widening the grammar.
+    /// `filing` was dropped because nobody narrates it out loud — it is a written
+    /// register, not a spoken one. The pattern was unexercised in positive tests:
+    /// an unused pattern is a false-positive surface with no upside.
+    ///
+    /// The prefilter's entire value is in what it REFUSES. Recall is the cheap
+    /// side of this trade: an unfiled recording is visible and fixed by editing
+    /// one sidecar field, while a misfiled client call is the failure the whole
+    /// design was built to avoid. If a phrasing you use is missed, change the
+    /// phrasing before widening the grammar.
     private static let patterns = [
         #"\bfile\s+(?:this|that|it)\s+under\s+(.+)"#,
         #"\bfile\s+(?:this|that|it)\s+(?:in|to|into)\s+(.+)"#,
-        #"\bfiling\s+(?:this|that|it)\s+under\s+(.+)"#,
         #"\bsave\s+(?:this|that|it)\s+(?:under|in|to|into)\s+(.+)"#,
     ]
 
