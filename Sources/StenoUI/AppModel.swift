@@ -74,6 +74,7 @@ public final class AppModel: @unchecked Sendable {
     private var syncTask: Task<Void, Never>?
     private var syncGeneration = 0
     private var transcriptionTask: Task<Void, Never>?
+    private var transcriptionGeneration = 0
     private var retryDelay: Duration = .seconds(2)
     /// The one real diagnostic logger for this process's lifetime, handed to
     /// every `SyncEngine` this class constructs. Tests never construct
@@ -584,6 +585,28 @@ public final class AppModel: @unchecked Sendable {
         return deviceFileCount > lastSeenCount
     }
 
+    /// Pure decision extracted for testing, same rationale as
+    /// `shouldSyncAfterPoll` above -- `AppModel` itself has no seam for
+    /// exercising a live task race under test, and this project's tests never
+    /// construct `AppModel` at all (it drives real USB I/O).
+    ///
+    /// `true` means the captured generation is still current, so whichever
+    /// transcription task's `defer` is asking is the one `transcriptionTask`
+    /// actually points at, and it owns clearing `transcriptionTask`/
+    /// `transcriptionProgress`. `false` means a STALE, already-cancelled
+    /// task's cleanup is running after a newer task has already been
+    /// assigned -- see `startTranscription`'s comment on `transcriptionGeneration`
+    /// for the exact interleaving this guards against. Clearing unconditionally
+    /// in that case would discard the reference to the newer, still-running
+    /// task and defeat `startTranscription`'s own re-entrancy guard.
+    ///
+    /// `nonisolated`: see `shouldSyncAfterPoll` above -- same rationale.
+    nonisolated static func shouldClearTranscriptionState(
+        capturedGeneration: Int, currentGeneration: Int
+    ) -> Bool {
+        capturedGeneration == currentGeneration
+    }
+
     /// Manual escape hatch for the menu's "Sync now" button -- the same
     /// guard `startSync` already relies on via `.attached` and the poll loop,
     /// just reachable on demand instead of waiting for the next attach or tick.
@@ -621,10 +644,28 @@ public final class AppModel: @unchecked Sendable {
             resolver: TopicResolver(suggester: OnDeviceSuggester()),
             transcriber: TranscriberRegistry.automatic())
 
+        // Identity token, same shape as `syncGeneration` in `startSync` --
+        // read that one's comment for the general case. Here specifically:
+        // `libraryRoot`'s `didSet` can cancel this task and, still
+        // synchronously, call `startTranscription()` again before the
+        // cancelled task's slow `await queue.process(sidecar)` ever resumes.
+        // By the time the cancelled task's `defer` runs, `transcriptionTask`
+        // already points at the NEW task. An unconditional
+        // `self.transcriptionTask = nil` there would discard that reference,
+        // defeating the `guard transcriptionTask == nil` above and letting a
+        // later trigger (e.g. the next `apply(.finished)`) spawn an
+        // unbounded further sweep. Clearing only when the generation still
+        // matches closes that.
+        transcriptionGeneration &+= 1
+        let generation = transcriptionGeneration
+
         transcriptionTask = Task {
             defer {
-                self.transcriptionTask = nil
-                self.transcriptionProgress = nil
+                if Self.shouldClearTranscriptionState(
+                    capturedGeneration: generation, currentGeneration: self.transcriptionGeneration) {
+                    self.transcriptionTask = nil
+                    self.transcriptionProgress = nil
+                }
             }
 
             let all = await Task.detached { (try? library.scanSidecars()) ?? [] }.value

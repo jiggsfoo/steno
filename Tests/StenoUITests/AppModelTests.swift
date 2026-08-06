@@ -64,3 +64,24 @@ import Testing
                 "index.sqlite\(suffix) survived the reset")
     }
 }
+
+/// `shouldClearTranscriptionState` is the pure predicate behind
+/// `transcriptionGeneration` -- the same "cancel A, start B, A's stale unwind
+/// must not clobber B" guard `syncGeneration` already uses for `syncTask`,
+/// applied to `transcriptionTask`. A task's `defer` captures the generation
+/// current when IT started; by the time it runs, a newer task may have
+/// already bumped the counter and been assigned to `transcriptionTask`.
+@Test func transcriptionCleanupRunsWhenTheGenerationStillMatches() {
+    #expect(AppModel.shouldClearTranscriptionState(
+        capturedGeneration: 1, currentGeneration: 1) == true)
+}
+
+/// The exact race this exists for: a cancelled sweep's `defer` finally runs
+/// AFTER `startTranscription` has already bumped the generation and started a
+/// newer task. Clearing here would discard the reference to that newer task
+/// and defeat `startTranscription`'s own re-entrancy guard, letting a later
+/// trigger spawn an unbounded further sweep on top of it.
+@Test func transcriptionCleanupIsSkippedWhenANewerSweepHasAlreadyStarted() {
+    #expect(AppModel.shouldClearTranscriptionState(
+        capturedGeneration: 1, currentGeneration: 2) == false)
+}
