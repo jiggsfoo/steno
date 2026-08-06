@@ -30,9 +30,11 @@ public struct Filer: Sendable {
         // Idempotent by signature. Same recording -> overwrite. DIFFERENT
         // recording at the same path -> the newcomer moves aside rather than
         // destroying the incumbent. `Library` learned this the expensive way:
-        // the signature prefix is not decoration.
+        // the signature prefix is not decoration. Checked against the FRONT
+        // MATTER only, not the whole file — the transcript body is dictated
+        // speech and must never be able to forge a match.
         if let existing = try? String(contentsOf: destination, encoding: .utf8),
-           !existing.contains("signature: \(owner.signature)") {
+           !Self.frontMatter(of: existing).contains("signature: \(owner.signature)") {
             let stem = Self.noteStem(for: owner) + " " + String(owner.signature.prefix(8))
             destination = folder.appendingPathComponent(stem + ".md")
         }
@@ -42,9 +44,27 @@ public struct Filer: Sendable {
         return destination
     }
 
+    /// `noteURL(for:topic:)` only ever computes the UNSUFFIXED path, but
+    /// `write` may have persisted this sidecar's note under a signature-suffixed
+    /// name if it once collided with another recording at that path. Locating
+    /// by front-matter signature — the same identity `write` already uses to
+    /// tell "mine" from "someone else's" — finds it either way, instead of
+    /// silently no-op'ing on a suffixed note and orphaning it.
     public func removeNote(for sidecar: Sidecar, topic: String) {
-        try? FileManager.default.removeItem(at: noteURL(for: sidecar, topic: topic))
-        // Leave the folder even if now empty: the user may have put things in it.
+        let folder = root.appendingPathComponent(topic)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path)
+        else { return }
+
+        for name in names where name.hasSuffix(".md") {
+            let url = folder.appendingPathComponent(name)
+            guard let text = try? String(contentsOf: url, encoding: .utf8),
+                  Self.frontMatter(of: text).contains("signature: \(sidecar.signature)")
+            else { continue }
+            try? FileManager.default.removeItem(at: url)
+            return
+        }
+        // No note found for this sidecar — nothing to do. Leave the folder even
+        // if now empty: the user may have put other things in it.
     }
 
     /// Removes every topic folder this type owns and regenerates them.
@@ -76,7 +96,9 @@ public struct Filer: Sendable {
     /// `signature` in the front matter is what makes writing idempotent — it is
     /// how a rewrite tells "this is my note" from "this is someone else's".
     static func render(sidecar: Sidecar, transcript: Transcript) -> String {
-        let recorded = sidecar.recordedAt.map(Library.iso8601.string(from:)) ?? ""
+        // Value-type format style, not a formatter instance: no shared mutable
+        // state, so nothing here needs a concurrency escape hatch.
+        let recorded = sidecar.recordedAt?.ISO8601Format() ?? ""
         return """
             ---
             signature: \(sidecar.signature)
@@ -90,6 +112,21 @@ public struct Filer: Sendable {
             \(transcript.text)
 
             """
+    }
+
+    /// The text strictly between the two `---` fences `render` writes at the
+    /// top of every note, or the whole string if the fences aren't there. Every
+    /// identity check (the collision guard, `removeNote`) matches against this
+    /// slice rather than the full file, so a transcript that happens to
+    /// contain the literal substring "signature: ..." can never be mistaken
+    /// for the note's own front matter.
+    private static func frontMatter(of text: String) -> Substring {
+        guard text.hasPrefix("---\n") else { return Substring(text) }
+        let afterOpeningFence = text.index(text.startIndex, offsetBy: 4)
+        guard let closingFence = text.range(
+            of: "\n---\n", range: afterOpeningFence..<text.endIndex)
+        else { return Substring(text) }
+        return text[afterOpeningFence..<closingFence.lowerBound]
     }
 
     // en_US_POSIX for the same reason `Library` uses it: under a non-Gregorian

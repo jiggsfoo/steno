@@ -241,11 +241,6 @@ public struct Library: Sendable {
         d.dateDecodingStrategy = .iso8601
         return d
     }()
-
-    // nonisolated(unsafe): unlike DateFormatter above, ISO8601DateFormatter is
-    // not Sendable in this SDK. Read-only `.string(from:)` calls on a shared
-    // instance don't race each other; nothing here ever mutates it after init.
-    nonisolated(unsafe) static let iso8601 = ISO8601DateFormatter()
 }
 
 public enum LibraryError: Error, Equatable {

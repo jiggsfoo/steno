@@ -52,7 +52,8 @@ private func sampleTranscript(_ signature: String = "c8357e00d535682319c8e19d506
 
 @Test func theNoteCarriesFrontMatterBindingItToTheRecording() throws {
     let root = tempRoot()
-    let url = try Filer(root: root).write(for: filed(), transcript: sampleTranscript())
+    let sidecar = filed()
+    let url = try Filer(root: root).write(for: sidecar, transcript: sampleTranscript())
     let text = try String(contentsOf: url, encoding: .utf8)
 
     #expect(text.hasPrefix("---\n"))
@@ -60,6 +61,13 @@ private func sampleTranscript(_ signature: String = "c8357e00d535682319c8e19d506
     #expect(text.contains("audio: ../2026-08-05/130006-c8357e00.mp3"))
     #expect(text.contains("backend: speechanalyzer"))
     #expect(text.contains("buy eggs and milk"))
+
+    // `render` uses `Date.ISO8601Format()` (a value-type format style) rather
+    // than a shared `ISO8601DateFormatter` instance. Proven byte-identical
+    // against that formatter directly — a local instance here, never shared
+    // across tasks, carries none of the concurrency risk a static one would.
+    let expectedRecordedAt = ISO8601DateFormatter().string(from: sidecar.recordedAt!)
+    #expect(text.contains("recordedAt: \(expectedRecordedAt)"))
 }
 
 /// Writing twice must not produce two notes. The front-matter signature is what
@@ -106,6 +114,28 @@ private func sampleTranscript(_ signature: String = "c8357e00d535682319c8e19d506
     #expect(!FileManager.default.fileExists(atPath: oldURL.path))
     #expect(FileManager.default.fileExists(
         atPath: root.appendingPathComponent("Receipts").path))
+}
+
+/// `noteURL(for:topic:)` — and so the unsuffixed path `removeNote` used to
+/// assume — only ever names the BASE stem. A note that collided and took a
+/// signature suffix lives somewhere else, so `removeNote` must locate it by
+/// front-matter signature rather than by recomputing that base path, or the
+/// suffixed note is silently orphaned.
+@Test func removeNoteFindsASuffixedNoteByItsSignature() throws {
+    let root = tempRoot()
+    let filer = Filer(root: root)
+    let a = filed(signature: "aaaa1111aaaa")
+    let b = filed(signature: "bbbb2222bbbb")
+
+    let aURL = try filer.write(for: a, transcript: sampleTranscript("aaaa1111aaaa"))
+    let bURL = try filer.write(for: b, transcript: sampleTranscript("bbbb2222bbbb"))
+    #expect(bURL != aURL)
+    #expect(bURL.lastPathComponent.contains("bbbb2222"))   // confirms b actually took the suffix
+
+    filer.removeNote(for: b, topic: "Grocery List")
+
+    #expect(!FileManager.default.fileExists(atPath: bURL.path))
+    #expect(FileManager.default.fileExists(atPath: aURL.path))
 }
 
 /// The topic tree is DERIVED. Deleting it and rebuilding must give back exactly
