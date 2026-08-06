@@ -1,4 +1,5 @@
 // Tests/StenoUITests/AppModelTests.swift
+import Foundation
 import Testing
 @testable import StenoUI
 
@@ -38,4 +39,28 @@ import Testing
 @Test func pollDoesNotSyncWhileARecordingIsInProgressEvenIfTheCountIncreased() {
     #expect(AppModel.shouldSyncAfterPoll(
         recording: "REC001.hda", deviceFileCount: 5, lastSeenCount: 3) == false)
+}
+
+/// `openIndex()` deletes index.sqlite on a failed open but historically left
+/// `-wal` and `-shm` behind. WAL is enabled, so a stale write-ahead log can be
+/// recovered back into the fresh file, reviving the corruption the delete was
+/// meant to clear.
+@Test func indexResetRemovesWalAndShmAlongsideTheDatabase() throws {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    let db = dir.appendingPathComponent("index.sqlite")
+
+    for suffix in ["", "-wal", "-shm"] {
+        try Data("stale".utf8).write(to: URL(fileURLWithPath: db.path + suffix))
+    }
+
+    let urls = AppModel.indexSidecarURLs(for: db)
+    for url in urls { try? FileManager.default.removeItem(at: url) }
+
+    #expect(urls.count == 3)
+    for suffix in ["", "-wal", "-shm"] {
+        #expect(!FileManager.default.fileExists(atPath: db.path + suffix),
+                "index.sqlite\(suffix) survived the reset")
+    }
 }

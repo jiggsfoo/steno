@@ -119,6 +119,15 @@ public final class AppModel: @unchecked Sendable {
         return base.appendingPathComponent("Steno/index.sqlite")
     }
 
+    /// Every file SQLite may have created for this database.
+    ///
+    /// WAL is enabled, so deleting only `index.sqlite` leaves a write-ahead log
+    /// that can be recovered back into the fresh file — reviving exactly the
+    /// corruption the delete was meant to clear.
+    nonisolated static func indexSidecarURLs(for db: URL) -> [URL] {
+        ["", "-wal", "-shm"].map { URL(fileURLWithPath: db.path + $0) }
+    }
+
     /// Opens the on-disk index, deleting and retrying once on failure.
     ///
     /// `LibraryIndex` is a DERIVED cache (its own doc comment says so) —
@@ -134,7 +143,9 @@ public final class AppModel: @unchecked Sendable {
         let url = Self.indexURL()
         if let index = try? LibraryIndex(url: url) { return index }
 
-        try? FileManager.default.removeItem(at: url)
+        for stale in Self.indexSidecarURLs(for: url) {
+            try? FileManager.default.removeItem(at: stale)
+        }
         do {
             return try LibraryIndex(url: url)
         } catch {
