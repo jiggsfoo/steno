@@ -28,7 +28,11 @@ let package = Package(
             dependencies: ["JensenKit"],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),
-        .testTarget(name: "StenoUITests", dependencies: ["StenoUI", "JensenKit"]),
+        .testTarget(
+            name: "StenoUITests",
+            dependencies: ["StenoUI", "JensenKit"],
+            resources: [.copy("Fixtures")]
+        ),
         // Thin shell: @main plus the bundle plist. All logic and views live in
         // StenoUI (see the comment above) so they stay testable. The plist is
         // copied into the .app bundle by Scripts/make-app.sh, not processed by
