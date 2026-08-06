@@ -16,8 +16,12 @@ public struct Filing: Sendable, Equatable {
 
 /// The model boundary, extracted so `TopicResolver`'s gating logic is testable
 /// without Apple Intelligence being available on the machine running the tests.
+///
+/// Takes the `Directive` itself rather than a "was one spoken" flag: the
+/// suggester only sees an excerpt of a long transcript, so it needs the matched
+/// phrase to be handed the instruction it would otherwise never read.
 public protocol FilingSuggester: Sendable {
-    func suggest(from text: String, directiveWasSpoken: Bool) async -> Filing?
+    func suggest(from text: String, directive: Directive?) async -> Filing?
 }
 
 /// Turns a transcript into a title and, only when permitted, a topic.
@@ -34,8 +38,7 @@ public struct TopicResolver: Sendable {
 
     public func resolve(_ transcript: Transcript) async -> Filing {
         let directive = DirectiveParser.parse(transcript.text)
-        let suggestion = await suggester?.suggest(from: transcript.text,
-                                                  directiveWasSpoken: directive != nil)
+        let suggestion = await suggester?.suggest(from: transcript.text, directive: directive)
         let title = Self.title(suggestedBy: suggestion, orFallingBackTo: transcript.text)
 
         // The regex GRANTS PERMISSION. Without a directive there is no topic,
@@ -84,8 +87,10 @@ public struct OnDeviceSuggester: FilingSuggester {
         var topic: String
     }
 
-    public func suggest(from text: String, directiveWasSpoken: Bool) async -> Filing? {
-        let excerpt = Self.excerpt(of: text)
+    public func suggest(from text: String, directive: Directive?) async -> Filing? {
+        // A new session per recording. `LanguageModelSession` accumulates
+        // `transcript` history, so a hoisted one would carry a previous
+        // recording's content into this recording's prompt.
         let session = LanguageModelSession(instructions: """
             You label voice recordings. Produce a short title. If, and only if, \
             the speaker explicitly asked for this to be filed somewhere, put \
@@ -93,11 +98,26 @@ public struct OnDeviceSuggester: FilingSuggester {
             """)
 
         guard let response = try? await session.respond(
-            to: excerpt, generating: Suggestion.self) else { return nil }
+            to: Self.prompt(for: text, directive: directive),
+            generating: Suggestion.self) else { return nil }
 
         let topic = response.content.topic.trimmingCharacters(in: .whitespacesAndNewlines)
         return Filing(title: response.content.title,
-                      topic: (directiveWasSpoken && !topic.isEmpty) ? topic : nil)
+                      topic: (directive != nil && !topic.isEmpty) ? topic : nil)
+    }
+
+    /// What actually goes to the model.
+    ///
+    /// A directive spoken in the middle of a long recording falls outside the
+    /// excerpt, so the model would be asked to name a folder while being the
+    /// only party that never saw the instruction — and `TopicResolver` prefers
+    /// the model's topic over the regex capture. Appending the instruction
+    /// keeps the tidying ("my grocery list please" → "Grocery List") without
+    /// letting the model answer from evidence it was never shown.
+    static func prompt(for text: String, directive: Directive?, edge: Int = 1_500) -> String {
+        let body = excerpt(of: text, edge: edge)
+        guard let directive else { return body }
+        return body + "\n\nSpoken instruction: " + spokenInstruction(directive)
     }
 
     /// Only the head and tail are sent. Directives are spoken near an edge, and
@@ -105,5 +125,16 @@ public struct OnDeviceSuggester: FilingSuggester {
     static func excerpt(of text: String, edge: Int = 1_500) -> String {
         guard text.count > edge * 2 else { return text }
         return String(text.prefix(edge)) + "\n…\n" + String(text.suffix(edge))
+    }
+
+    /// `matchedPhrase` runs to the end of its line, and a transcript is joined
+    /// into one line — so an unbounded phrase would append the rest of the
+    /// recording and undo the excerpt. Only the instruction's own sentence is
+    /// wanted, capped for the case where the speech had no sentence end at all.
+    static func spokenInstruction(_ directive: Directive, limit: Int = 200) -> String {
+        let phrase = directive.matchedPhrase
+        let stop = phrase.firstIndex { ".!?\n".contains($0) }
+        let sentence = stop.map { String(phrase[phrase.startIndex..<$0]) } ?? phrase
+        return String(sentence.prefix(limit)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
