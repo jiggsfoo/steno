@@ -1229,6 +1229,7 @@ func recognisedPhrasingsYieldADirective(_ text: String) {
     "I need to buy groceries later.",
     "The grocery list is on the fridge.",
     "We filed the paperwork under the wrong client.",
+    "Filing this under Taxes.",
     "Put this in the car when you get home.",
     "take that credit card string, put it into the payment method",
     "I reconstitute it and I put it into a sprayer",
@@ -1294,7 +1295,13 @@ public struct Directive: Sendable, Equatable {
 /// from being filed under Grocery List. The model downstream is free to
 /// interpret; it is not free to invent an instruction that was never given.
 public enum DirectiveParser {
-    /// EXPLICIT FILING VERBS ONLY. `put` and `stick` are deliberately absent.
+    /// EXPLICIT SPOKEN FILING VERBS ONLY. `put`, `stick`, and `filing` are all
+    /// deliberately absent.
+    ///
+    /// `filing this under X` was dropped for a different reason than the other
+    /// two: not because it false-positived, but because nobody narrates it out
+    /// loud. It is a written register. An unexercised pattern is a
+    /// false-positive surface with no offsetting benefit, so it went.
     ///
     /// They were in this list until the Task 4 quality gate ran it against 3
     /// hours of real recordings, where `put (this|that|it) into` matched
@@ -1311,7 +1318,6 @@ public enum DirectiveParser {
     private static let patterns = [
         #"\bfile\s+(?:this|that|it)\s+under\s+(.+)"#,
         #"\bfile\s+(?:this|that|it)\s+(?:in|to|into)\s+(.+)"#,
-        #"\bfiling\s+(?:this|that|it)\s+under\s+(.+)"#,
         #"\bsave\s+(?:this|that|it)\s+(?:under|in|to|into)\s+(.+)"#,
     ]
 
