@@ -19,7 +19,19 @@ public struct LibraryWindow: View {
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } detail: {
             if let selected = store.recordings.first(where: { $0.id == store.selection }) {
+                // `.id(selected.id)`: without this, a selection change is an
+                // UPDATE to the same `TranscriptPane` identity, not a new
+                // instance — SwiftUI preserves `@State private var
+                // isFollowing` across it. A hand-scroll that detaches
+                // following on one recording would then leak into every
+                // recording selected afterwards, each opening already
+                // "paused" with no scroll position of its own. Forcing a
+                // fresh identity per recording resets both `isFollowing` and
+                // the transcript's scroll position together, which is what
+                // a different recording actually is: unrelated content, not
+                // a continuation of the last one.
                 TranscriptPane(recording: selected, player: player)
+                    .id(selected.id)
             } else {
                 // The real empty state, not scaffolding: Task 7 adds a branch
                 // above this one, and this stays as the nothing-selected case.
