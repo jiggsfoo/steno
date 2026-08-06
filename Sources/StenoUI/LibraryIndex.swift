@@ -9,6 +9,15 @@ public final class LibraryIndex: @unchecked Sendable {
     private static let schemaVersion = 2
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
+    /// True when THIS open found a schema below current and had `migrate(to:)`
+    /// drop and recreate `recordings` — i.e. the table just came back EMPTY.
+    /// `AppModel.start()` reads this to know when it must call
+    /// `rebuildIndex()` to refill it from sidecars: without that call, any
+    /// recording excluded from `pending` (a valid transcript AND a non-nil
+    /// `transcribedAt`) is never re-upserted, and stays missing from the
+    /// index until someone presses "Rebuild Index" by hand.
+    private(set) var didRecreateTable = false
+
     public convenience init(url: URL) throws {
         try self.init(url: url, schemaVersionOverride: Self.schemaVersion)
     }
@@ -25,16 +34,19 @@ public final class LibraryIndex: @unchecked Sendable {
             throw LibraryIndexError.cannotOpen(url.path)
         }
         try execute("PRAGMA journal_mode=WAL;")
-        try migrate(to: schemaVersionOverride)
+        didRecreateTable = try migrate(to: schemaVersionOverride)
     }
 
     deinit { sqlite3_close(db) }
 
     /// The index is a DERIVED cache, so a schema change does not need an ALTER
     /// path. Dropping and recreating is correct and total; `AppModel` calls
-    /// `rebuildIndex()` afterwards and the sidecars refill it.
-    private func migrate(to version: Int) throws {
-        if currentUserVersion() < version {
+    /// `rebuildIndex()` afterwards and the sidecars refill it -- see
+    /// `didRecreateTable`, the return value here, for how it knows to.
+    @discardableResult
+    private func migrate(to version: Int) throws -> Bool {
+        let recreated = currentUserVersion() < version
+        if recreated {
             try execute("DROP TABLE IF EXISTS recordings;")
         }
         try execute("""
@@ -57,6 +69,7 @@ public final class LibraryIndex: @unchecked Sendable {
             """)
         try execute("CREATE INDEX IF NOT EXISTS idx_recorded_at ON recordings(recorded_at DESC);")
         try execute("PRAGMA user_version = \(version);")
+        return recreated
     }
 
     private func currentUserVersion() -> Int {

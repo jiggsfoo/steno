@@ -140,7 +140,19 @@ public final class AppModel: @unchecked Sendable {
         try? FileManager.default.createDirectory(
             at: libraryRoot, withIntermediateDirectories: true)
         index = openIndex()
-        reloadRecent()
+        // The v1->v2 migration DROPS `recordings` rather than ALTERing it --
+        // see `LibraryIndex.migrate(to:)`'s own doc comment -- so a table that
+        // was just recreated on this open came back EMPTY. Without refilling
+        // it here, any recording excluded from `pending` (a valid transcript
+        // AND a non-nil `transcribedAt`) is never re-upserted and stays
+        // missing from the index -- and from Recent -- until someone presses
+        // "Rebuild Index" in Settings by hand. `rebuildIndex()` already does
+        // its own `reloadRecent()`, so this branch does not need a second one.
+        if index?.didRecreateTable == true {
+            rebuildIndex()
+        } else {
+            reloadRecent()
+        }
 
         let monitor = DeviceMonitor { [weak self] event in
             Task { @MainActor in self?.handle(event) }

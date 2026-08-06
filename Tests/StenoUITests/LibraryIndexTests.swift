@@ -85,17 +85,22 @@ private func indexSampleSidecar(
 
 /// `migrate()` only ever ran CREATE TABLE IF NOT EXISTS, so it cannot add a
 /// column to a table that already exists. A v1 database must be dropped and
-/// recreated — which is safe precisely because the index is derived.
+/// recreated — which is safe precisely because the index is derived, PROVIDED
+/// something refills it afterwards. `AppModel.start()` is that something,
+/// gated on `didRecreateTable`; this test proves the signal the gate reads,
+/// and that a row genuinely present under v1 is genuinely gone (not just
+/// superseded) until something re-upserts it.
 @Test func aV1DatabaseIsRecreatedAtV2() throws {
     let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let url = dir.appendingPathComponent("index.sqlite")
 
-    // Genuine pre-migration schema, built OUTSIDE LibraryIndex so it really
-    // lacks the four spec-2 columns. Going through
-    // LibraryIndex(url:schemaVersionOverride:) would NOT produce this — it
-    // creates the full v2 table and only stamps a lower user_version, so the
-    // migration would have nothing real to do.
+    // Genuine pre-migration schema AND DATA, built OUTSIDE LibraryIndex so it
+    // really lacks the four spec-2 columns, and really has a row for the
+    // migration to lose. Going through LibraryIndex(url:schemaVersionOverride:)
+    // would NOT produce this — it creates the full v2 table and only stamps a
+    // lower user_version, so there would be no real row at risk and this test
+    // could not have caught `AppModel.start()` skipping the refill.
     var raw: OpaquePointer?
     #expect(sqlite3_open(url.path, &raw) == SQLITE_OK)
     #expect(sqlite3_exec(raw, """
@@ -111,12 +116,27 @@ private func indexSampleSidecar(
             device_model TEXT NOT NULL,
             timezone TEXT NOT NULL
         );
+        INSERT INTO recordings
+          (signature, device_filename, relative_path, length_bytes,
+           duration_seconds, recorded_at, synced_at, device_serial, device_model, timezone)
+        VALUES
+          ('c8357e00d535682319c8e19d50685d1a', '2026Aug05-130006-Rec09.hda',
+           '2026-08-05/130006-c8357e00.mp3', 47814924, 3984.576, 1754370006,
+           1754380000, 'HDP1254506027', 'hidock-p1', 'Asia/Manila');
         PRAGMA user_version = 1;
         """, nil, nil, nil) == SQLITE_OK)
     sqlite3_close(raw)
 
-    // The migration now has something real to do.
+    // Opening at v2 drops the v1 table — the row above is genuinely gone, not
+    // merely superseded — and reports that it happened.
     let v2 = try LibraryIndex(url: url)
+    #expect(v2.didRecreateTable)
+    #expect(v2.record(signature: "c8357e00d535682319c8e19d50685d1a") == nil)
+
+    // That signal is exactly what `AppModel.start()` uses to know it must
+    // call `rebuildIndex()`. Simulated here by re-upserting the same
+    // recording — standing in for `rebuildIndex()`'s real sidecar rescan —
+    // and asserting the ORIGINAL row's signature is present again afterwards.
     let refilled = indexSampleSidecar(title: "Grocery list", topic: "Grocery List")
     try v2.upsert(refilled)
 
