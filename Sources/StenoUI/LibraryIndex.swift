@@ -6,10 +6,16 @@ public final class LibraryIndex: @unchecked Sendable {
     private var db: OpaquePointer?
     private let lock = NSLock()
 
-    private static let schemaVersion = 1
+    private static let schemaVersion = 2
     private static let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
-    public init(url: URL) throws {
+    public convenience init(url: URL) throws {
+        try self.init(url: url, schemaVersionOverride: Self.schemaVersion)
+    }
+
+    /// `schemaVersionOverride` exists only so tests can build a v1 database and
+    /// prove the migration. Production always goes through `init(url:)`.
+    init(url: URL, schemaVersionOverride: Int) throws {
         try FileManager.default.createDirectory(
             at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         guard sqlite3_open(url.path, &db) == SQLITE_OK else {
@@ -19,12 +25,18 @@ public final class LibraryIndex: @unchecked Sendable {
             throw LibraryIndexError.cannotOpen(url.path)
         }
         try execute("PRAGMA journal_mode=WAL;")
-        try migrate()
+        try migrate(to: schemaVersionOverride)
     }
 
     deinit { sqlite3_close(db) }
 
-    private func migrate() throws {
+    /// The index is a DERIVED cache, so a schema change does not need an ALTER
+    /// path. Dropping and recreating is correct and total; `AppModel` calls
+    /// `rebuildIndex()` afterwards and the sidecars refill it.
+    private func migrate(to version: Int) throws {
+        if currentUserVersion() < version {
+            try execute("DROP TABLE IF EXISTS recordings;")
+        }
         try execute("""
             CREATE TABLE IF NOT EXISTS recordings (
                 signature TEXT PRIMARY KEY,
@@ -36,11 +48,25 @@ public final class LibraryIndex: @unchecked Sendable {
                 synced_at REAL NOT NULL,
                 device_serial TEXT NOT NULL,
                 device_model TEXT NOT NULL,
-                timezone TEXT NOT NULL
+                timezone TEXT NOT NULL,
+                title TEXT,
+                topic TEXT,
+                transcribed_at REAL,
+                transcript_backend TEXT
             );
             """)
         try execute("CREATE INDEX IF NOT EXISTS idx_recorded_at ON recordings(recorded_at DESC);")
-        try execute("PRAGMA user_version = \(Self.schemaVersion);")
+        try execute("PRAGMA user_version = \(version);")
+    }
+
+    private func currentUserVersion() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA user_version;", -1, &stmt, nil) == SQLITE_OK
+        else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(stmt, 0))
     }
 
     public func contains(signature: String) -> Bool {
@@ -65,8 +91,9 @@ public final class LibraryIndex: @unchecked Sendable {
         let sql = """
             INSERT INTO recordings
               (signature, device_filename, relative_path, length_bytes, duration_seconds,
-               recorded_at, synced_at, device_serial, device_model, timezone)
-            VALUES (?,?,?,?,?,?,?,?,?,?)
+               recorded_at, synced_at, device_serial, device_model, timezone,
+               title, topic, transcribed_at, transcript_backend)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(signature) DO UPDATE SET
               device_filename=excluded.device_filename,
               relative_path=excluded.relative_path,
@@ -76,7 +103,11 @@ public final class LibraryIndex: @unchecked Sendable {
               synced_at=excluded.synced_at,
               device_serial=excluded.device_serial,
               device_model=excluded.device_model,
-              timezone=excluded.timezone;
+              timezone=excluded.timezone,
+              title=excluded.title,
+              topic=excluded.topic,
+              transcribed_at=excluded.transcribed_at,
+              transcript_backend=excluded.transcript_backend;
             """
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
             throw LibraryIndexError.prepareFailed(lastMessage())
@@ -93,6 +124,10 @@ public final class LibraryIndex: @unchecked Sendable {
         sqlite3_bind_text(stmt, 8, s.deviceSerial, -1, Self.transient)
         sqlite3_bind_text(stmt, 9, s.deviceModel, -1, Self.transient)
         sqlite3_bind_text(stmt, 10, s.timeZoneIdentifier, -1, Self.transient)
+        if let t = s.title { sqlite3_bind_text(stmt, 11, t, -1, Self.transient) } else { sqlite3_bind_null(stmt, 11) }
+        if let t = s.topic { sqlite3_bind_text(stmt, 12, t, -1, Self.transient) } else { sqlite3_bind_null(stmt, 12) }
+        if let d = s.transcribedAt { sqlite3_bind_double(stmt, 13, d.timeIntervalSince1970) } else { sqlite3_bind_null(stmt, 13) }
+        if let b = s.transcriptBackend { sqlite3_bind_text(stmt, 14, b, -1, Self.transient) } else { sqlite3_bind_null(stmt, 14) }
 
         guard sqlite3_step(stmt) == SQLITE_DONE else {
             throw LibraryIndexError.writeFailed(lastMessage())
@@ -180,6 +215,11 @@ public final class LibraryIndex: @unchecked Sendable {
         func optionalDouble(_ i: Int32) -> Double? {
             sqlite3_column_type(stmt, i) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, i)
         }
+        func optionalText(_ i: Int32) -> String? {
+            guard sqlite3_column_type(stmt, i) != SQLITE_NULL,
+                  let c = sqlite3_column_text(stmt, i) else { return nil }
+            return String(cString: c)
+        }
         return Sidecar(
             signature: text(0),
             deviceFilename: text(1),
@@ -190,7 +230,12 @@ public final class LibraryIndex: @unchecked Sendable {
             syncedAt: Date(timeIntervalSince1970: sqlite3_column_double(stmt, 6)),
             deviceSerial: text(7),
             deviceModel: text(8),
-            timeZoneIdentifier: text(9))
+            timeZoneIdentifier: text(9),
+            title: optionalText(10),
+            topic: optionalText(11),
+            transcribedAt: optionalDouble(12).map(Date.init(timeIntervalSince1970:)),
+            transcriptBackend: optionalText(13),
+            transcriptionAttempts: nil)
     }
 
     private func execute(_ sql: String) throws {
