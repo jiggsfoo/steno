@@ -2720,7 +2720,7 @@ captured fixture and never touch the network."
 **Interfaces:**
 - Consumes: everything from Tasks 2, 3, 9, 10, 11, 12.
 - Produces:
-  - `enum TranscriberRegistry { static let selectionKey: String; static func all() -> [any Transcriber]; static func automatic() -> any Transcriber; static func selected() -> any Transcriber }`
+  - `enum TranscriberRegistry { static func all() -> [any Transcriber]; static func automatic() -> any Transcriber }`
   - `AppModel.transcriptionProgress: QueueProgress?`
   - `AppModel.startTranscription()`
   - `AppModel.retranscribe(_ sidecar: Sidecar, using: any Transcriber)`
@@ -2776,8 +2776,6 @@ import Foundation
 
 /// Which backends exist and which one the user picked.
 public enum TranscriberRegistry {
-    public static let selectionKey = "transcriberID"
-
     public static func all() -> [any Transcriber] {
         [SpeechAnalyzerTranscriber(), DeepgramTranscriber()]
     }
@@ -2788,14 +2786,14 @@ public enum TranscriberRegistry {
     public static func automatic() -> any Transcriber {
         SpeechAnalyzerTranscriber()
     }
-
-    /// The backend chosen in Settings, used for explicit re-transcription.
-    public static func selected() -> any Transcriber {
-        let id = UserDefaults.standard.string(forKey: selectionKey)
-        return all().first { $0.id == id } ?? automatic()
-    }
 }
 ```
+
+There is deliberately no `selected()`. Re-transcription picks its backend at the
+call site — the context menu offers each one by name — so a persisted global
+choice would be state nothing reads and the user has to remember. An earlier
+draft had both, and the picker turned out to be inert UI promising behaviour the
+app never delivered.
 
 - [ ] **Step 4: Add the pure label helper to `MenuBarView`**
 
@@ -3003,18 +3001,10 @@ Insert into `Sources/StenoUI/SettingsView.swift` after the `Library` section:
 
 ```swift
             Section("Transcription") {
-                // On-device always runs automatically; this picker chooses what
-                // "Transcribe again" uses. Stated in the help text because a
-                // picker that silently means something narrower is a lie.
-                Picker("Model for re-transcribing", selection: $selectedTranscriberID) {
-                    ForEach(TranscriberRegistry.all(), id: \.id) { backend in
-                        Text(backend.displayName).tag(backend.id)
-                    }
-                }
-                .onChange(of: selectedTranscriberID) { _, id in
-                    UserDefaults.standard.set(id, forKey: TranscriberRegistry.selectionKey)
-                }
-
+                // No picker. The context menu names the backend at the point of
+                // action, so a persisted "which model" setting would be state
+                // nothing reads and the user has to remember. This text is the
+                // only place the free/paid boundary is stated on screen.
                 Text("New recordings are always transcribed on this Mac, for free. "
                      + "Cloud models run only when you ask, one recording at a time.")
                     .font(.caption).foregroundStyle(.secondary)
@@ -3030,12 +3020,12 @@ Insert into `Sources/StenoUI/SettingsView.swift` after the `Library` section:
 with these `@State` properties beside the existing ones:
 
 ```swift
-    @State private var selectedTranscriberID =
-        UserDefaults.standard.string(forKey: TranscriberRegistry.selectionKey)
-        ?? SpeechAnalyzerTranscriber().id
     @State private var deepgramKey =
         Keychain.string(for: DeepgramTranscriber.keychainAccount) ?? ""
+    @State private var deepgramKeyError: String?
 ```
+
+`Keychain.set` throws, and a failed write must be shown rather than swallowed — losing a key silently is the failure the update-or-add fix exists to prevent. Render `deepgramKeyError` as a red caption beneath the field, matching how the `Startup` section already surfaces `loginItemError`.
 
 - [ ] **Step 4: Add `rebuildTopicFolders()` to `AppModel`**
 
