@@ -18,25 +18,8 @@ public struct LibraryWindow: View {
                 .searchable(text: $store.query, prompt: "Search transcripts")
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } detail: {
-            if let selected = store.recordings.first(where: { $0.id == store.selection }) {
-                // `.id(selected.id)`: without this, a selection change is an
-                // UPDATE to the same `TranscriptPane` identity, not a new
-                // instance — SwiftUI preserves `@State private var
-                // isFollowing` across it. A hand-scroll that detaches
-                // following on one recording would then leak into every
-                // recording selected afterwards, each opening already
-                // "paused" with no scroll position of its own. Forcing a
-                // fresh identity per recording resets both `isFollowing` and
-                // the transcript's scroll position together, which is what
-                // a different recording actually is: unrelated content, not
-                // a continuation of the last one.
-                TranscriptPane(recording: selected, player: player)
-                    .id(selected.id)
-            } else {
-                // The real empty state, not scaffolding: Task 7 adds a branch
-                // above this one, and this stays as the nothing-selected case.
-                ContentUnavailableView("No recording selected", systemImage: "waveform")
-            }
+            Self.detailContent(for: store.recordings.first(where: { $0.id == store.selection }),
+                               player: player)
         }
         .task { await reload() }
         // Loading audio belongs here rather than inside a detail branch: a
@@ -53,6 +36,31 @@ public struct LibraryWindow: View {
         // is `@Observable`, so this needs no timer and no polling.
         .onChange(of: model.transcriptionProgress) { _, progress in
             if progress == nil { Task { await reload() } }
+        }
+    }
+
+    /// The `detail:` pane's content, factored out of `body` so a test can
+    /// call it directly and inspect the returned view's runtime type.
+    ///
+    /// `.id(recording.id)` here is load-bearing, not decorative: without it,
+    /// a selection change is an UPDATE to the same `TranscriptPane`
+    /// identity, not a new instance — SwiftUI preserves `@State private var
+    /// isFollowing` across it. A hand-scroll that detaches following on one
+    /// recording would then leak into every recording selected afterwards,
+    /// each opening already "paused" with no scroll position of its own.
+    /// Forcing a fresh identity per recording resets both `isFollowing` and
+    /// the transcript's scroll position together, which is what a different
+    /// recording actually is: unrelated content, not a continuation of the
+    /// last one.
+    @ViewBuilder
+    static func detailContent(for recording: LoadedRecording?, player: AudioPlayer) -> some View {
+        if let recording {
+            TranscriptPane(recording: recording, player: player)
+                .id(recording.id)
+        } else {
+            // The real empty state, not scaffolding: Task 7 adds a branch
+            // above this one, and this stays as the nothing-selected case.
+            ContentUnavailableView("No recording selected", systemImage: "waveform")
         }
     }
 
