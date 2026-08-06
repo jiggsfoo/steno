@@ -1535,7 +1535,7 @@ Produces a title for every transcript and a topic only when `DirectiveParser` gr
 - Consumes: `DirectiveParser.parse(_:)` (Task 7), `TopicName.sanitised(_:)` (Task 8), `Transcript` (Task 2).
 - Produces:
   - `struct Filing: Sendable, Equatable { let title: String; let topic: String? }`
-  - `protocol FilingSuggester: Sendable { func suggest(from text: String, directiveWasSpoken: Bool) async -> Filing? }`
+  - `protocol FilingSuggester: Sendable { func suggest(from text: String, directive: Directive?) async -> Filing? }`
   - `struct TopicResolver: Sendable` with `init(suggester: FilingSuggester?)` and `func resolve(_ transcript: Transcript) async -> Filing`
   - `struct OnDeviceSuggester: FilingSuggester` (wraps `FoundationModels`)
   - `TopicResolver.fallbackTitle(from:) -> String` (static, internal)
@@ -1561,7 +1561,7 @@ import Testing
 
 private struct StubSuggester: FilingSuggester {
     var filing: Filing?
-    func suggest(from text: String, directiveWasSpoken: Bool) async -> Filing? { filing }
+    func suggest(from text: String, directive: Directive?) async -> Filing? { filing }
 }
 
 private func transcript(_ text: String) -> Transcript {
@@ -1658,7 +1658,15 @@ public struct Filing: Sendable, Equatable {
 /// The model boundary, extracted so `TopicResolver`'s gating logic is testable
 /// without Apple Intelligence being available on the machine running the tests.
 public protocol FilingSuggester: Sendable {
-    func suggest(from text: String, directiveWasSpoken: Bool) async -> Filing?
+    /// Takes the `Directive` itself, not a `directiveWasSpoken` flag.
+    ///
+    /// The flag version had a hole. `directiveWasSpoken` is computed from the
+    /// FULL transcript, but the model only receives head+tail — so for a
+    /// directive spoken mid-recording the gate opened while the model never saw
+    /// the instruction, invented a topic from the surrounding small talk, and
+    /// that invented topic then won. Passing the directive lets the suggester
+    /// put the real spoken instruction in front of the model.
+    func suggest(from text: String, directive: Directive?) async -> Filing?
 }
 
 /// Turns a transcript into a title and, only when permitted, a topic.
@@ -1674,7 +1682,7 @@ public struct TopicResolver: Sendable {
     public func resolve(_ transcript: Transcript) async -> Filing {
         let directive = DirectiveParser.parse(transcript.text)
         let suggestion = await suggester?.suggest(from: transcript.text,
-                                                  directiveWasSpoken: directive != nil)
+                                                  directive: directive)
 
         let title = suggestion?.title.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedTitle = (title?.isEmpty == false)
@@ -1714,10 +1722,11 @@ public struct OnDeviceSuggester: FilingSuggester {
         var topic: String
     }
 
-    public func suggest(from text: String, directiveWasSpoken: Bool) async -> Filing? {
-        // Only the head and tail are sent. Directives are spoken near an edge,
-        // and a 66-minute transcript would blow the context window.
-        let excerpt = Self.excerpt(of: text)
+    public func suggest(from text: String, directive: Directive?) async -> Filing? {
+        // Head and tail only — a 66-minute transcript is ~55,000 characters and
+        // will not fit the context window. The directive is appended separately
+        // so a mid-recording instruction is never invisible to the model.
+        let excerpt = Self.excerpt(of: text, directive: directive)
         let session = LanguageModelSession(instructions: """
             You label voice recordings. Produce a short title. If, and only if, \
             the speaker explicitly asked for this to be filed somewhere, put \
@@ -1729,12 +1738,23 @@ public struct OnDeviceSuggester: FilingSuggester {
 
         let topic = response.content.topic.trimmingCharacters(in: .whitespacesAndNewlines)
         return Filing(title: response.content.title,
-                      topic: (directiveWasSpoken && !topic.isEmpty) ? topic : nil)
+                      topic: (directive != nil && !topic.isEmpty) ? topic : nil)
     }
 
-    static func excerpt(of text: String, edge: Int = 1_500) -> String {
-        guard text.count > edge * 2 else { return text }
-        return String(text.prefix(edge)) + "\n…\n" + String(text.suffix(edge))
+    /// Head + tail, plus the spoken instruction when there was one.
+    ///
+    /// Appending the directive is what stops the model choosing a topic while
+    /// being denied the only evidence that matters. Without it, a directive at
+    /// minute 30 of a 40-minute call falls outside both edges and the model
+    /// answers from small talk it happens to be able to see.
+    static func excerpt(of text: String, directive: Directive? = nil,
+                        edge: Int = 1_500) -> String {
+        var body = text
+        if text.count > edge * 2 {
+            body = String(text.prefix(edge)) + "\n…\n" + String(text.suffix(edge))
+        }
+        guard let directive else { return body }
+        return body + "\n\nSpoken instruction: " + directive.matchedPhrase
     }
 }
 ```
