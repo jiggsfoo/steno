@@ -192,10 +192,7 @@ public struct MenuRow: View {
         .padding(.vertical, MenuMetrics.rowVerticalPadding)
         .frame(minHeight: MenuMetrics.rowHeight)
         .foregroundStyle(rowForeground)
-        .background(
-            RoundedRectangle(cornerRadius: 5)
-                .fill(isHovering && isInteractive ? Color.accentColor : .clear)
-        )
+        .background(MenuRowHighlight(isActive: isHovering && isInteractive))
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
     }
@@ -215,5 +212,34 @@ public struct MenuRow: View {
     private var rowForeground: Color {
         if !isEnabled && action == nil { return .secondary }
         return isHovering && isInteractive ? .white : .primary
+    }
+}
+
+/// The hover highlight behind an interactive row.
+///
+/// Its own view rather than an inline `.background` shape for one reason: hover
+/// cannot be simulated in a headless render, so the only way to measure what
+/// this actually draws is to render the thing itself with `isActive` forced on.
+/// `MenuMetricsTests` does exactly that.
+///
+/// It was a full-width, square-cornered bar running the popover edge to edge.
+/// A real menu highlights a rounded rect inset from both edges -- narrower than
+/// the popover, wider than the separator.
+struct MenuRowHighlight: View {
+    let isActive: Bool
+
+    /// Inactive draws no view at all rather than a `.clear` fill. A cleared
+    /// shape is still a shape: it rasterises, and the pixels it touches are not
+    /// reliably empty -- measured, an inactive `.fill(.clear)` left a band of
+    /// exactly the highlight's extents behind. Drawing nothing is also what
+    /// keeps the highlight off the non-interactive status, error and notice
+    /// rows, which is the whole point of the flag.
+    @ViewBuilder
+    var body: some View {
+        if isActive {
+            RoundedRectangle(cornerRadius: MenuMetrics.highlightCornerRadius)
+                .fill(Color.accentColor)
+                .padding(.horizontal, MenuMetrics.highlightInset)
+        }
     }
 }

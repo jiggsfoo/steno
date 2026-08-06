@@ -71,6 +71,41 @@ func renderedHeight(of view: some View) -> Double {
     return Double(renderer.nsImage?.size.height ?? 0)
 }
 
+/// Corner radius, read off what the shape drew rather than asked for.
+///
+/// At its leftmost inked column a rounded rect has only just started, so the ink
+/// there is short by both corners: `chord = (height - inked) / 2`. For a
+/// circular corner of radius `r` measured at depth `d` into the shape,
+/// `chord = r - sqrt(r² - (r - d)²)`, which solves to
+/// `r = chord + d + sqrt(2·chord·d)`.
+@MainActor
+func measuredCornerRadius(of view: some View, height: Double) -> Double? {
+    guard let rep = bitmap(of: view) else { return nil }
+
+    for px in 0..<rep.pixelsWide {
+        var inked = 0
+        for py in 0..<rep.pixelsHigh
+        where (rep.colorAt(x: px, y: py)?.alphaComponent ?? 0) > 0.5 { inked += 1 }
+        guard inked > 0 else { continue }
+
+        let chord = (height - Double(inked) / renderScale) / 2
+        // That column's centre, i.e. half a rendered pixel into the shape.
+        let depth = 0.5 / renderScale
+        return chord + depth + (2 * chord * depth).squareRoot()
+    }
+    return nil
+}
+
+/// Every pixel a view drew, for the two helpers above that need colours rather
+/// than coverage.
+@MainActor
+func bitmap(of view: some View) -> NSBitmapImageRep? {
+    let renderer = ImageRenderer(content: view)
+    renderer.scale = CGFloat(renderScale)
+    guard let tiff = renderer.nsImage?.tiffRepresentation else { return nil }
+    return NSBitmapImageRep(data: tiff)
+}
+
 /// The horizontal rules in a rendered menu. Text ink never spans most of the
 /// menu width in one unbroken run of pixel rows, so width plus thinness
 /// separates a rule from a line of text without knowing where either sits.
@@ -253,4 +288,65 @@ private func sampleMenu() -> MenuBarView {
             Comment(rawValue: "bottom inset measured \(bottomInset)pt, expected \(MenuMetrics.popoverInset)pt"))
     #expect(abs(topInset - bottomInset) <= onePixel,
             Comment(rawValue: "popover is unbalanced: \(topInset)pt above, \(bottomInset)pt below"))
+}
+
+/// The hover highlight was a full-width, square-cornered bar running the popover
+/// edge to edge. A native menu highlights a rounded rect inset from both edges.
+///
+/// Hover cannot be simulated headlessly, which is why `MenuRowHighlight` is its
+/// own view: this renders it with `isActive` forced on and measures what it drew,
+/// rather than asserting the constants against themselves.
+@MainActor
+@Test func renderedHoverHighlightIsInsetFromBothEdgesAndRounded() throws {
+    let highlight = MenuRowHighlight(isActive: true)
+        .frame(width: menuWidth, height: MenuMetrics.rowHeight)
+    // Crisp coverage only: a corner's antialiased fringe is not its geometry.
+    let band = try #require(inkBands(of: highlight, alphaFloor: 0.5).first,
+                            "the active highlight drew nothing")
+
+    #expect(abs(band.minX - MenuMetrics.highlightInset) <= onePixel,
+            Comment(rawValue: "highlight starts at \(band.minX), expected \(MenuMetrics.highlightInset)"))
+    #expect(abs((menuWidth - band.maxX) - MenuMetrics.highlightInset) <= onePixel,
+            Comment(rawValue: "highlight ends \(menuWidth - band.maxX) from the right edge, expected \(MenuMetrics.highlightInset)"))
+    // The one relationship the reference screenshot fixes: wider than the
+    // separator, still short of the popover edge.
+    #expect(band.minX > 0 && band.minX < MenuMetrics.separatorInset,
+            Comment(rawValue: "highlight inset \(band.minX) must sit between flush and the separator's \(MenuMetrics.separatorInset)"))
+
+    let radius = try #require(measuredCornerRadius(of: highlight,
+                                                   height: Double(MenuMetrics.rowHeight)),
+                              "could not read a corner off the rendered highlight")
+    #expect(abs(radius - Double(MenuMetrics.highlightCornerRadius)) <= 0.5,
+            Comment(rawValue: "corner radius measured \(radius)pt, expected \(MenuMetrics.highlightCornerRadius)pt"))
+}
+
+/// The highlight belongs to hover on an interactive row and nothing else. A
+/// popover with nothing hovered must carry none of it -- not on the status row,
+/// not on the error or notice rows, not on the disabled actions.
+///
+/// Asserted by colour on the whole popover rather than by rendering one
+/// unhighlighted row and checking it is empty: an "it drew nothing" assertion is
+/// not reliable here, because `ImageRenderer` hands back a previous render of the
+/// same pixel size when the content draws nothing at all. Colour on a render this
+/// size cannot be fooled that way, and it tests the real composition.
+@MainActor
+@Test func nothingIsHighlightedUntilARowIsHovered() throws {
+    let lit = try #require(bitmap(of: MenuRowHighlight(isActive: true)
+        .frame(width: menuWidth, height: MenuMetrics.rowHeight))?
+        .colorAt(x: 200, y: 20)?.usingColorSpace(.deviceRGB),
+                           "could not sample the highlight's own colour")
+    let menu = try #require(bitmap(of: sampleMenu()), "the popover rendered nothing")
+
+    for py in 0..<menu.pixelsHigh {
+        for px in 0..<menu.pixelsWide {
+            guard let c = menu.colorAt(x: px, y: py)?.usingColorSpace(.deviceRGB),
+                  c.alphaComponent > 0.5 else { continue }
+            let distance = abs(c.redComponent - lit.redComponent)
+                + abs(c.greenComponent - lit.greenComponent)
+                + abs(c.blueComponent - lit.blueComponent)
+            #expect(distance > 0.3,
+                    Comment(rawValue: "pixel (\(px), \(py)) is the hover highlight's colour with nothing hovered"))
+            if distance <= 0.3 { return }
+        }
+    }
 }

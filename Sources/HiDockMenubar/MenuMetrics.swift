@@ -71,6 +71,22 @@ enum MenuMetrics {
     /// popover stays balanced.
     static let popoverInset: CGFloat = contentInset + 3
 
+    /// How far the hover highlight is inset from each edge of the popover.
+    ///
+    /// **Matched by eye, not measured.** AppKit does not expose the rect a menu
+    /// highlights: `NSTableRowView.isSelected` draws nothing in a live menu (no
+    /// selection layer appears and the rastered row is pixel-identical before
+    /// and after), and synthetic key events never reach a menu's tracking loop.
+    /// What is measured is the bound it sits inside -- a native highlight is
+    /// visibly wider than the separator, whose 16pt inset *was* measured, and
+    /// still short of the popover edge. This is the modern macOS menu look
+    /// within that bound.
+    static let highlightInset: CGFloat = 5
+
+    /// Corner radius of the hover highlight. **Matched by eye** for the same
+    /// reason as `highlightInset` -- a square-cornered bar is the tell.
+    static let highlightCornerRadius: CGFloat = 5
+
     /// Gap between adjacent rows. AppKit lays menu rows edge to edge.
     static let rowSpacing: CGFloat = 0
 
