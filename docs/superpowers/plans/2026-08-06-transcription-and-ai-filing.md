@@ -2483,10 +2483,27 @@ import Testing
             "diarization requested but no speaker came back")
 }
 
-@Test func malformedResponseThrowsRatherThanReturningEmptyText() {
+@Test func undecodableResponseThrows() {
     #expect(throws: (any Error).self) {
         try DeepgramTranscriber.body(fromResponse: Data("{}".utf8), locale: "en_PH")
     }
+}
+
+/// The guard that stops a silently blank transcript being written to disk and
+/// marked done. Without it, a paid transcription is wasted and re-running costs
+/// money the user already spent. `{}` above does NOT reach this branch — it
+/// fails earlier at `JSONDecoder` on the missing `results` key.
+@Test(arguments: [#"{"results":{"utterances":[]}}"#, #"{"results":{}}"#])
+func aResponseWithNoUtterancesThrowsRatherThanReturningEmptyText(_ json: String) {
+    #expect(throws: (any Error).self) {
+        try DeepgramTranscriber.body(fromResponse: Data(json.utf8), locale: "en_PH")
+    }
+}
+
+@Test func aBadKeyIsReportedAsACredentialProblemNotAServerFault() {
+    #expect(DeepgramTranscriber.error(forStatus: 401) == .missingCredential("Deepgram"))
+    #expect(DeepgramTranscriber.error(forStatus: 500) == .backendFailed("HTTP 500"))
+    #expect(DeepgramTranscriber.error(forStatus: 429) == .backendFailed("HTTP 429"))
 }
 
 @Test func transcriberIdIsStableBecauseItIsPersistedInEveryTranscript() {
@@ -2519,13 +2536,30 @@ public enum Keychain {
         return value
     }
 
+    /// Update-or-add, deliberately NOT delete-then-add.
+    ///
+    /// An earlier draft deleted first and then called `SecItemAdd`. A failed add
+    /// then left the user with no key at all and the cloud backend silently
+    /// unavailable — destroying working credentials to write new ones is never
+    /// the right order.
     public static func set(_ value: String, for account: String) throws {
-        remove(account)
-        guard !value.isEmpty else { return }
+        guard !value.isEmpty else { remove(account); return }
+
+        let attributes = [kSecValueData as String: Data(value.utf8)]
+        let status = SecItemUpdate(baseQuery(account: account) as CFDictionary,
+                                   attributes as CFDictionary)
+        if status == errSecSuccess { return }
+
+        guard status == errSecItemNotFound else {
+            throw KeychainError.writeFailed(status)
+        }
+
         var query = baseQuery(account: account)
         query[kSecValueData as String] = Data(value.utf8)
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else { throw KeychainError.writeFailed(status) }
+        let addStatus = SecItemAdd(query as CFDictionary, nil)
+        guard addStatus == errSecSuccess else {
+            throw KeychainError.writeFailed(addStatus)
+        }
     }
 
     public static func remove(_ account: String) {
@@ -2583,10 +2617,22 @@ public struct DeepgramTranscriber: Transcriber {
             throw TranscriberError.backendFailed("no HTTP response")
         }
         guard http.statusCode == 200 else {
-            throw TranscriberError.backendFailed("HTTP \(http.statusCode)")
+            throw Self.error(forStatus: http.statusCode)
         }
 
         return try Self.body(fromResponse: data, locale: locale.identifier)
+    }
+
+    /// Extracted so status mapping is testable without stubbing `URLSession`.
+    ///
+    /// 401 is the one status a user can act on, and `.missingCredential` already
+    /// carries the right words for it. Folding it into a generic `HTTP 401`
+    /// makes a mistyped key read as a server fault. Everything else stays
+    /// generic — nothing consumes 429 or 5xx differently yet.
+    static func error(forStatus status: Int) -> TranscriberError {
+        status == 401
+            ? .missingCredential("Deepgram")
+            : .backendFailed("HTTP \(status)")
     }
 
     /// The key travels in the Authorization header, never the URL — query
