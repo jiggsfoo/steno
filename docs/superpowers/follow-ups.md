@@ -283,3 +283,42 @@ nobody "fixes" them later without first reading why they're this way.
   pins to `en_US` on purpose. This is a permanent decision, not a TODO —
   revisiting it means re-solving the non-determinism, not swapping in a
   different constant.
+
+### Residuals parked at the final whole-branch review
+
+Both are Low. Neither blocks merge; both were adjudicated rather than dropped.
+
+**Closing Settings with an empty key field deletes the stored key.**
+`SettingsView`'s `.onDisappear` commits whatever is in the field, and
+`Keychain.set("")` short-circuits to `Keychain.remove`. Two ways in: the user
+clears the field and closes without meaning to save, which is defensible as
+"commit what's shown"; or `Keychain.string(for:)` returned nil when the view
+initialised — a transient Keychain read error — while a key really does exist,
+in which case merely opening and closing Settings destroys a working
+credential with no prompt. The loss is visible, because Deepgram then vanishes
+from the context menu, and recoverable by pasting the key again. The fix is one
+line: skip the commit when the field is empty on the `onDisappear` path only,
+leaving the explicit-clear path through focus-loss intact.
+
+**An empty context menu when nothing is available.** The menu is now filtered
+for both backends, not just the cloud one. On a Mac where `SpeechTranscriber`
+is unavailable and no Deepgram key is set, right-clicking a recent row yields
+an empty menu with no explanation — worse feedback than the always-fail click
+the filtering was added to prevent. The availability cache also refreshes only
+at launch and on a key commit, so on-device availability flipping true
+mid-session (a model asset finishing its download) goes unnoticed until
+relaunch. Deepgram's own staleness is handled correctly in both directions.
+
+### Two documentation drifts, recorded so they are not mistaken for design
+
+- The spec still says *"`Rebuild Topic Folders` removes the whole tree and
+  regenerates it from sidecars, which is the catch-all for any orphan a crash
+  leaves behind."* The final review's Critical fix deliberately overrode that:
+  `rebuild` now deletes only notes it owns by front-matter signature, because
+  the wholesale delete destroyed user-authored files in topic folders. The
+  "catch-all for orphans" property is now partial — an orphan whose recording
+  no longer exists survives.
+- `Filer.removeNote` identifies a note with a substring `contains("signature:
+  …")` while `rebuild` uses an exact-line match. Harmless while signatures are
+  fixed width, but the same file now answers the same identity question two
+  ways.
