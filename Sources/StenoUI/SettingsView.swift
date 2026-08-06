@@ -11,6 +11,8 @@ public struct SettingsView: View {
     @State private var deepgramKey =
         Keychain.string(for: DeepgramTranscriber.keychainAccount) ?? ""
     @State private var deepgramKeyError: String?
+    /// Drives the focus-loss commit below — see `shouldCommitOnFocusChange(_:_:)`.
+    @FocusState private var deepgramKeyFocused: Bool
 
     public init(model: AppModel) {
         self.model = model
@@ -55,8 +57,21 @@ public struct SettingsView: View {
                 // fixed `set` itself to avoid, and swallowing it one layer up
                 // here would undo that. Same red-caption pattern as
                 // `loginItemError` below.
+                // `.onSubmit` (Return) is not the only way this field loses
+                // its content's only chance to be saved: pasting the key and
+                // clicking away, tabbing out, or closing Settings without
+                // pressing Return all used to discard it silently while the
+                // field kept showing what was typed. `.focused` plus the
+                // focus-loss `onChange` below, and `.onDisappear` on the whole
+                // view further down, cover those.
                 SecureField("Deepgram API key", text: $deepgramKey)
+                    .focused($deepgramKeyFocused)
                     .onSubmit { commitDeepgramKey() }
+                    .onChange(of: deepgramKeyFocused) { wasFocused, isFocused in
+                        if Self.shouldCommitOnFocusChange(wasFocused: wasFocused, isFocused: isFocused) {
+                            commitDeepgramKey()
+                        }
+                    }
                     .accessibilityLabel("Deepgram API key")
                 if let deepgramKeyError {
                     Text(deepgramKeyError).font(.caption).foregroundStyle(.red)
@@ -101,6 +116,31 @@ public struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 460)
         .padding()
+        // Closing the window is the other way this field's content could be
+        // lost — SwiftUI's `Settings` scene can also retain and later tear
+        // down this view without a focus-loss event ever firing for a field
+        // that was never blurred first. Committing here is idempotent: it
+        // just re-saves whatever the field currently shows, which is a no-op
+        // when nothing changed since the last commit.
+        .onDisappear { commitDeepgramKey() }
+    }
+
+    /// Pure predicate behind the focus-loss commit above. `SettingsView` has
+    /// no test seam of its own — this project's tests never render a live
+    /// SwiftUI view (see `follow-ups.md`'s deferred "Settings, rendered"
+    /// check) — so the DECISION is extracted here to stay testable, same
+    /// rationale as `AppModel.shouldSyncAfterPoll` and friends.
+    ///
+    /// Focus-LOSS, not focus-gain: clicking INTO the field must not commit
+    /// (there's nothing new to save yet, and it would fire on every open);
+    /// clicking OUT of it, after having been in it, must.
+    ///
+    /// `nonisolated`: a static member of a type inferred `@MainActor` (via
+    /// its `View` conformance) is MainActor-isolated by default, which would
+    /// force the synchronous test below onto the main actor for no reason —
+    /// this has no actor-isolated state of its own to protect.
+    nonisolated static func shouldCommitOnFocusChange(wasFocused: Bool, isFocused: Bool) -> Bool {
+        wasFocused && !isFocused
     }
 
     /// Writes `deepgramKey` to the Keychain and refreshes `AppModel`'s cached

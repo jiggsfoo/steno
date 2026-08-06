@@ -53,3 +53,25 @@ import Testing
         #expect(!backend.id.isEmpty)
     }
 }
+
+/// IMPORTANT: the Deepgram key field used to commit on `.onSubmit` (Return)
+/// only. Pasting the key and clicking away, tabbing out, or closing Settings
+/// silently discarded it while the field kept showing what was typed --
+/// since the key gates the entire cloud path, "I pasted it and nothing
+/// works" was the likely first experience. `shouldCommitOnFocusChange` is
+/// the decision behind the fix: commit when focus is LOST, not gained.
+@Test func losingFocusAfterHavingItCommits() {
+    #expect(SettingsView.shouldCommitOnFocusChange(wasFocused: true, isFocused: false))
+}
+
+/// Gaining focus (clicking INTO the field) must not commit -- there is
+/// nothing new to save yet, and it would fire spuriously on every open.
+@Test func gainingFocusDoesNotCommit() {
+    #expect(!SettingsView.shouldCommitOnFocusChange(wasFocused: false, isFocused: true))
+}
+
+/// Neither steady state is a transition, so neither commits.
+@Test func steadyFocusStatesDoNotCommit() {
+    #expect(!SettingsView.shouldCommitOnFocusChange(wasFocused: true, isFocused: true))
+    #expect(!SettingsView.shouldCommitOnFocusChange(wasFocused: false, isFocused: false))
+}
