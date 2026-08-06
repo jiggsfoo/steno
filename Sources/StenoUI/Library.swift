@@ -149,6 +149,21 @@ public struct Library: Sendable {
         return sidecar
     }
 
+    /// Rewrites an existing sidecar in place. Used when transcription adds
+    /// fields to a recording already on disk. Never touches the audio.
+    public func updateSidecar(_ sidecar: Sidecar) throws {
+        let audio = root.appendingPathComponent(sidecar.relativePath)
+        let destination = Self.sidecarURL(forAudio: audio)
+        let staged = destination.appendingPathExtension("part")
+        try Self.encoder.encode(sidecar).write(to: staged)
+        do {
+            try Self.install(staged, at: destination)
+        } catch {
+            try? FileManager.default.removeItem(at: staged)
+            throw error
+        }
+    }
+
     /// Path relative to `root`, by path components rather than string
     /// replacement — the latter replaces every occurrence and silently yields
     /// an absolute path when the prefix does not match.

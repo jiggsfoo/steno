@@ -28,6 +28,8 @@ public final class AppModel: @unchecked Sendable {
     /// The recording currently in progress on the device, or nil when idle.
     /// Set from the idle-poll loop (see `pollTick`); cleared on detach.
     public private(set) var recordingInProgress: String?
+    /// nil when nothing is queued. Drives the menu's progress line.
+    public var transcriptionProgress: QueueProgress?
 
     public var libraryRoot: URL {
         didSet {
@@ -53,6 +55,7 @@ public final class AppModel: @unchecked Sendable {
     private var index: LibraryIndex?
     private var syncTask: Task<Void, Never>?
     private var syncGeneration = 0
+    private var transcriptionTask: Task<Void, Never>?
     private var retryDelay: Duration = .seconds(2)
     /// The one real diagnostic logger for this process's lifetime, handed to
     /// every `SyncEngine` this class constructs. Tests never construct
@@ -110,6 +113,11 @@ public final class AppModel: @unchecked Sendable {
         monitor.start()
         self.monitor = monitor
         monitor.rescan()
+
+        // Whatever missed the sweep at the end of a previous sync (the app
+        // quit mid-queue, or was never running when one finished) gets picked
+        // up here too -- `startTranscription` is safe to call repeatedly.
+        startTranscription()
     }
 
     private static func indexURL() -> URL {
@@ -408,7 +416,12 @@ public final class AppModel: @unchecked Sendable {
             // any failures — is handled once, after `engine.sync` returns in
             // `startSync`, where it's actually available. This progress event
             // only ever carried counts, not enough to report anything useful.
-            break
+            //
+            // Kick the transcription sweep here rather than after `engine.sync`
+            // returns: `.finished` fires on every exit path -- including the
+            // early `libraryUnreachable`/listing-failure returns in
+            // `SyncEngine.sync` -- so this is the one place that always runs.
+            startTranscription()
         }
     }
 
@@ -570,6 +583,70 @@ public final class AppModel: @unchecked Sendable {
             return
         }
         startSync(trigger: "manual")
+    }
+
+    // MARK: - Transcription
+
+    /// Transcribes everything that lacks a transcript, one at a time.
+    ///
+    /// The work list is recomputed from sidecars each run rather than stored, so
+    /// there is nothing to resume and nothing to corrupt. Safe to call at launch,
+    /// after every sync, and repeatedly — `pending` filters out finished work.
+    public func startTranscription() {
+        guard transcriptionTask == nil else { return }
+        let root = libraryRoot
+        let library = Library(root: root)
+        let queue = TranscriptionQueue(
+            root: root,
+            store: TranscriptStore(root: root),
+            filer: Filer(root: root),
+            resolver: TopicResolver(suggester: OnDeviceSuggester()),
+            transcriber: TranscriberRegistry.automatic())
+
+        transcriptionTask = Task {
+            defer {
+                self.transcriptionTask = nil
+                self.transcriptionProgress = nil
+            }
+
+            let all = await Task.detached { (try? library.scanSidecars()) ?? [] }.value
+            let todo = await queue.pending(from: all)
+            guard !todo.isEmpty else { return }
+
+            for (offset, sidecar) in todo.enumerated() {
+                if Task.isCancelled { return }
+                self.transcriptionProgress = QueueProgress(done: offset, total: todo.count)
+
+                let updated = await queue.process(sidecar)
+                await Task.detached { try? library.updateSidecar(updated) }.value
+
+                try? self.index?.upsert(updated)
+                self.reloadRecent()
+            }
+        }
+    }
+
+    /// Explicit, one recording, one backend. The ONLY path by which audio leaves
+    /// this machine.
+    public func retranscribe(_ sidecar: Sidecar, using transcriber: any Transcriber) {
+        let root = libraryRoot
+        let store = TranscriptStore(root: root)
+        store.remove(for: sidecar)          // force a fresh run
+        let library = Library(root: root)
+
+        Task {
+            let queue = TranscriptionQueue(
+                root: root, store: store, filer: Filer(root: root),
+                resolver: TopicResolver(suggester: OnDeviceSuggester()),
+                transcriber: transcriber)
+            // `retry`, not `process`: this is the deliberate user-initiated path
+            // and must ignore the attempt cap. It clears the counter itself.
+            let updated = await queue.retry(sidecar)
+            await Task.detached { try? library.updateSidecar(updated) }.value
+
+            try? self.index?.upsert(updated)
+            self.reloadRecent()
+        }
     }
 
     public var reclaimCandidates: [FileInfo] = []

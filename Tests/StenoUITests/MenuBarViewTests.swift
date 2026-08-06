@@ -89,3 +89,17 @@ private let everyStatus: [DeviceStatus] = [
     #expect(!MenuBarView.reclaimWindowID.isEmpty)
     #expect(MenuBarView.settingsWindowID != MenuBarView.reclaimWindowID)
 }
+
+@Test func transcriptionLabelReadsAsProgressWhileWorking() {
+    #expect(MenuBarView.transcriptionLabel(for: QueueProgress(done: 2, total: 11))
+            == "Transcribing 3 of 11")
+}
+
+@Test func transcriptionLabelIsAbsentWhenIdleOrFinished() {
+    #expect(MenuBarView.transcriptionLabel(for: nil) == nil)
+    #expect(MenuBarView.transcriptionLabel(for: QueueProgress(done: 11, total: 11)) == nil)
+}
+
+@Test func transcriptionLabelHandlesAnEmptyQueueWithoutDividingByZero() {
+    #expect(MenuBarView.transcriptionLabel(for: QueueProgress(done: 0, total: 0)) == nil)
+}

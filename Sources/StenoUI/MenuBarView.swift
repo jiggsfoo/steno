@@ -126,6 +126,12 @@ public struct MenuBarView: View {
         if let notice = model.lastNotice {
             MenuRow("", accent: .notice, detail: notice, detailLineLimit: 3)
         }
+
+        // The transcription sweep runs silently after every sync; without
+        // this the menu gave no sign it was working through the backlog.
+        if let label = Self.transcriptionLabel(for: model.transcriptionProgress) {
+            MenuRow("", accent: .notice, detail: label, detailLineLimit: 1)
+        }
     }
 
     private var statusDetail: String? {
@@ -168,11 +174,24 @@ public struct MenuBarView: View {
         } else {
             ForEach(model.recent, id: \.signature) { item in
                 MenuRow(Self.dateLabel(item.recordedAt),
-                        value: Self.durationLabel(item.durationSeconds)) {
+                        value: Self.durationLabel(item.durationSeconds),
+                        // The second line spec 1.5 added `detail` for. Absent
+                        // until the queue has been through this recording.
+                        detail: item.title,
+                        detailLineLimit: 1) {
                     reveal(item)
                 }
             }
         }
+    }
+
+    /// Pure, and therefore the testable part. `done` is a completed count, so
+    /// the item being worked on is `done + 1`.
+    ///
+    /// `nonisolated`: see `statusTitle(for:)` above -- same rationale.
+    nonisolated static func transcriptionLabel(for progress: QueueProgress?) -> String? {
+        guard let progress, progress.total > 0, progress.done < progress.total else { return nil }
+        return "Transcribing \(progress.done + 1) of \(progress.total)"
     }
 
     // MARK: - Actions
