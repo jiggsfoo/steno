@@ -176,8 +176,21 @@ public actor TranscriptionQueue {
         // 2. Sidecar fields.
         let filing = await resolver.resolve(transcript)
         let previousTopic = sidecar.topic
-        updated.title = filing.title
-        updated.topic = filing.topic
+
+        // The unattended sweep (`process`, `respectingCap: true`) must never
+        // destroy a title or topic a human already typed -- e.g. via the
+        // library window, before this recording ever got transcribed.
+        // "Already has one" is the signal, because `retry` is the only path
+        // that is a DELIBERATE request for a replacement -- it alone
+        // (`respectingCap: false`) is allowed to cross this. Without it, a
+        // recording synced but not yet transcribed -- user opens it, types a
+        // real title, saves, durably -- gets silently overwritten the moment
+        // the next sweep pass transcribes it: no error, no log, nothing the
+        // user could notice except their edit quietly reverting. That is the
+        // exact failure `sidecarsInFlight` protects against concurrently,
+        // reached here sequentially instead.
+        if !respectingCap || sidecar.title == nil { updated.title = filing.title }
+        if !respectingCap || sidecar.topic == nil { updated.topic = filing.topic }
         updated.transcribedAt = transcript.transcribedAt
         updated.transcriptBackend = transcript.backend
         updated.transcriptionAttempts = nil

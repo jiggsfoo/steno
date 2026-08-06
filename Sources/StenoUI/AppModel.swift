@@ -876,12 +876,23 @@ public final class AppModel: @unchecked Sendable {
     /// Write order: sidecar first, then the index, then the note. The sidecar
     /// is the source of truth and the only step that can fail the edit -- once
     /// it lands, the correction is durable even if everything after it fails.
-    /// The index and the note are both derived, rebuildable caches (see
-    /// `LibraryIndex`'s and `Filer`'s own doc comments), so a failure in
-    /// either leaves them stale rather than wrong-forever, recoverable via
-    /// "Rebuild Index" / `rebuildTopicFolders()` -- not worth failing the edit
-    /// over, matching `TranscriptionQueue.run`'s own note-write, which is
-    /// `try?` for the same reason.
+    ///
+    /// The index is a fully derived, rebuildable cache (see `LibraryIndex`'s
+    /// own doc comment): a failure there leaves it stale, and the next
+    /// `rebuildIndex()` self-heals it unconditionally, because it rescans
+    /// every sidecar on disk regardless of topic.
+    ///
+    /// The note is only PARTLY self-healing, and this doc comment used to
+    /// overclaim otherwise. `rebuildTopicFolders()` / `Filer.rebuild(from:
+    /// store:)` only revisits folders that are some CURRENT sidecar's topic
+    /// (see its own doc comment) -- so on a topic change (A -> B), a failure
+    /// that leaves a stale note behind in the OLD folder A is NOT fixed by
+    /// it: A is no longer any sidecar's topic, rebuild never enumerates it,
+    /// and the orphan sits there until removed by hand. A title-only edit
+    /// (topic unchanged) DOES self-heal, because the folder stays owned.
+    /// Both failures are worth reporting, neither is worth failing the edit
+    /// over -- matching `TranscriptionQueue.run`'s own note-write, which is
+    /// also `try?`.
     ///
     /// The note removal is unconditional on a PREVIOUS topic existing, not on
     /// the topic having changed -- same as `TranscriptionQueue.run`. A note's
@@ -889,6 +900,13 @@ public final class AppModel: @unchecked Sendable {
     /// edit with the topic unchanged still moves the note to a new path;
     /// removing only on a topic change would leave the old, stale-titled note
     /// behind as an orphan next to the new one.
+    ///
+    /// The `Filer` work (steps 3 and 4) runs off MainActor, same as the sweep
+    /// and `retranscribe` do theirs inside `TranscriptionQueue`'s own actor --
+    /// `removeNote` reads every `.md` file in a topic folder and `write`
+    /// renders a whole transcript body, and a save on a large folder must not
+    /// hitch the window. `index?.upsert` stays on MainActor: it is small, and
+    /// matches `retranscribe`'s existing precedent.
     public func updateRecording(
         _ sidecar: Sidecar, title: String, topic: String?
     ) async -> RecordingEditOutcome {
@@ -914,14 +932,16 @@ public final class AppModel: @unchecked Sendable {
 
         try? index?.upsert(edited)
 
-        let filer = Filer(root: root)
-        if let previousTopic = sidecar.topic {
-            filer.removeNote(for: sidecar, topic: previousTopic)
-        }
-        if edited.topic != nil,
-           let transcript = TranscriptStore(root: root).transcript(for: edited) {
-            _ = try? filer.write(for: edited, transcript: transcript)
-        }
+        await Task.detached {
+            let filer = Filer(root: root)
+            if let previousTopic = sidecar.topic {
+                filer.removeNote(for: sidecar, topic: previousTopic)
+            }
+            if edited.topic != nil,
+               let transcript = TranscriptStore(root: root).transcript(for: edited) {
+                _ = try? filer.write(for: edited, transcript: transcript)
+            }
+        }.value
 
         reloadRecent()
         return .updated(edited)

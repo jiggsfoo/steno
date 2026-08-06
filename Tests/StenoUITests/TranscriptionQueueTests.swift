@@ -157,6 +157,49 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
         atPath: root.appendingPathComponent("Grocery List").path))
 }
 
+/// The headline failure this branch's guard exists to prevent, reached
+/// SEQUENTIALLY rather than concurrently: `sidecarsInFlight` stops the sweep
+/// and a manual edit from writing the SAME sidecar at once, but does nothing
+/// about a sweep that runs AFTER a save already landed. A recording synced
+/// but not yet transcribed, given a real title and topic by a human before
+/// the sweep ever reaches it, must survive an automatic `process` pass
+/// untouched -- the transcript still gets written, but the fields a person
+/// already set are not silently replaced with model output.
+@Test func processPreservesAUserSetTitleAndTopicButStillWritesTheTranscript() async throws {
+    let root = tempRoot()
+    let counter = CallCounter()
+    let queue = makeQueue(root: root, transcriber: CountingTranscriber(counter: counter))
+    var sidecar = queueSidecar()
+    sidecar.title = "My real title"
+    sidecar.topic = "My Topic"
+
+    let updated = await queue.process(sidecar).sidecar
+
+    #expect(updated.title == "My real title")
+    #expect(updated.topic == "My Topic")
+    #expect(updated.transcribedAt != nil)
+    #expect(await counter.count == 1)
+}
+
+/// `retry` is the one path that is a DELIBERATE request for a replacement --
+/// per `Sidecar.transcriptionAttempts`'s own contract, manual retry crosses
+/// what the automatic sweep respects. Unlike `process` above, it must still
+/// replace a title and topic that are already there.
+@Test func retryReplacesAUserSetTitleAndTopic() async throws {
+    let root = tempRoot()
+    let counter = CallCounter()
+    let queue = makeQueue(root: root, transcriber: CountingTranscriber(counter: counter))
+    var sidecar = queueSidecar()
+    sidecar.title = "My real title"
+    sidecar.topic = "My Topic"
+
+    let updated = await queue.retry(sidecar).sidecar
+
+    #expect(updated.title != "My real title")
+    #expect(updated.topic == "Grocery List")
+    #expect(await counter.count == 1)
+}
+
 /// A permanently undecodable recording must stop being retried, or it re-spends
 /// on every launch forever.
 @Test func repeatedFailuresStopBeingRetriedAtTheCap() async throws {

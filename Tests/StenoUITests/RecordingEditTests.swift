@@ -13,30 +13,30 @@ private func editable(title: String? = "Old title", topic: String? = "Old Topic"
             transcriptBackend: "speechanalyzer")
 }
 
+/// `Sidecar` is `Equatable`, so build the expected value wholesale and compare
+/// against it rather than enumerating fields one at a time -- that also
+/// covers every field `Sidecar` gains later, not just the ones listed here
+/// today.
 @Test func editingRewritesOnlyTitleAndTopic() {
     let before = editable()
     let after = AppModel.editedSidecar(from: before, title: "New title", topic: "New Topic")
 
-    #expect(after.title == "New title")
-    #expect(after.topic == "New Topic")
-
-    // Everything identifying or provenance-bearing must survive untouched.
-    #expect(after.signature == before.signature)
-    #expect(after.relativePath == before.relativePath)
-    #expect(after.deviceModel == "hidock-p1")
-    #expect(after.transcribedAt == before.transcribedAt)
-    #expect(after.transcriptBackend == before.transcriptBackend)
-    #expect(after.lengthBytes == before.lengthBytes)
-    #expect(after.recordedAt == before.recordedAt)
+    var expected = before
+    expected.title = "New title"
+    expected.topic = "New Topic"
+    #expect(after == expected)
 }
 
 /// Clearing the topic unfiles the recording. It must become nil rather than an
 /// empty string, because `TopicName` rejects empty and a `""` topic would make
 /// `Filer` build a path at the library root itself.
 @Test func clearingTheTopicUnfilesRatherThanFilingUnderNothing() {
-    let after = AppModel.editedSidecar(from: editable(), title: "T", topic: nil)
+    #expect(AppModel.editedSidecar(from: editable(), title: "T", topic: nil).topic == nil)
 
-    #expect(after.topic == nil)
+    // The case the doc comment above actually describes: a topic that trims
+    // down to nothing must ALSO come back nil, not "" -- the literal-nil case
+    // alone proves nothing about that claim.
+    #expect(AppModel.editedSidecar(from: editable(), title: "T", topic: "   ").topic == nil)
 }
 
 /// A blank title means "no title", the same state a recording has before
