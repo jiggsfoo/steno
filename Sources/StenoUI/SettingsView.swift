@@ -8,12 +8,6 @@ public struct SettingsView: View {
     /// Suppresses the onChange that the revert below would otherwise re-trigger,
     /// issuing a spurious opposite-direction register/unregister.
     @State private var isSyncingToggle = false
-    /// What "Transcribe again" uses -- NEVER what runs automatically after a
-    /// sync. `TranscriberRegistry.automatic()` is not user-overridable: see
-    /// its own doc comment for why.
-    @State private var selectedTranscriberID =
-        UserDefaults.standard.string(forKey: TranscriberRegistry.selectionKey)
-        ?? SpeechAnalyzerTranscriber().id
     @State private var deepgramKey =
         Keychain.string(for: DeepgramTranscriber.keychainAccount) ?? ""
     @State private var deepgramKeyError: String?
@@ -42,24 +36,17 @@ public struct SettingsView: View {
             }
 
             Section("Transcription") {
-                // On-device always runs automatically; this picker chooses
-                // what "Transcribe again" uses, never what runs unattended.
-                // Automatic transcription only stays honest while it is free
-                // -- a cloud backend running unattended would bill on every
-                // 66-minute meeting -- so the scope of this picker is stated
-                // plainly below rather than left to look broader than it is.
-                Picker("Model for re-transcribing", selection: $selectedTranscriberID) {
-                    ForEach(TranscriberRegistry.all(), id: \.id) { backend in
-                        Text(backend.displayName).tag(backend.id)
-                    }
-                }
-                .onChange(of: selectedTranscriberID) { _, id in
-                    UserDefaults.standard.set(id, forKey: TranscriberRegistry.selectionKey)
-                }
-
+                // No picker here: which backend re-transcribes a recording is
+                // named at the moment of the action, in that recording's own
+                // context menu (`TranscriberRegistry.all()`, in
+                // `MenuBarView`) -- not a persisted mode chosen ahead of time.
+                // A remembered setting is hidden state you have to recall
+                // correctly before every click, and recalling it wrong here
+                // spends money. `TranscriberRegistry.automatic()` is the one
+                // backend that runs unattended, and it is not
+                // user-overridable at all: see its own doc comment for why.
                 Text("New recordings are always transcribed on this Mac, for free. "
-                     + "Cloud models run only when you ask, one recording at a time, "
-                     + "from that recording's own menu.")
+                     + "Cloud models run only when you ask, one recording at a time.")
                     .font(.caption).foregroundStyle(.secondary)
 
                 // The brief this task started from swallowed `Keychain.set`'s
