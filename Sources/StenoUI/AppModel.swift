@@ -35,10 +35,28 @@ public final class AppModel: @unchecked Sendable {
         didSet {
             guard libraryRoot != oldValue else { return }
             UserDefaults.standard.set(libraryRoot.path, forKey: Self.rootKey)
+
+            // An in-flight sweep captured the OLD root in its own local
+            // `library`/`queue` and keeps writing sidecars there even after
+            // `rebuildIndex()` below repoints `index` at the NEW root -- its
+            // next `self.index?.upsert(updated)` would then insert an OLD-root
+            // row into the just-rebuilt NEW-root index, exactly the failure
+            // `rebuildIndex` exists to prevent (see its own comment). Cancel
+            // first: `startTranscription`'s loop checks `Task.isCancelled`
+            // between recordings, so this stops it from starting the NEXT one
+            // under the old root. This is `transcriptionTask`'s first real
+            // cancellation call site.
+            transcriptionTask?.cancel()
+            transcriptionTask = nil
+
             // Rebuild, not just reload: the index still holds rows for the OLD
             // root, and the menubar would resolve those relative paths against
             // the new one and open nothing.
             rebuildIndex()
+
+            // The new root has its own backlog -- possibly including
+            // recordings the old root's sweep never got to.
+            startTranscription()
         }
     }
 
@@ -614,6 +632,11 @@ public final class AppModel: @unchecked Sendable {
             guard !todo.isEmpty else { return }
 
             for (offset, sidecar) in todo.enumerated() {
+                // Reached when `libraryRoot`'s `didSet` cancels this task
+                // between recordings, so a sweep started under the OLD root
+                // stops rather than going on to upsert further OLD-root rows
+                // into the index `rebuildIndex()` just repointed at the NEW
+                // one. Does not abort a recording already mid-transcription.
                 if Task.isCancelled { return }
                 self.transcriptionProgress = QueueProgress(done: offset, total: todo.count)
 
@@ -628,10 +651,17 @@ public final class AppModel: @unchecked Sendable {
 
     /// Explicit, one recording, one backend. The ONLY path by which audio leaves
     /// this machine.
+    ///
+    /// Does NOT delete the existing transcript up front. `retry` (see
+    /// `TranscriptionQueue.run`) always re-transcribes rather than reusing what
+    /// is on disk, and `store.write` installs the result by atomically
+    /// replacing the old file — so removing here first would only reopen a
+    /// window where a failed or interrupted retry leaves the recording with
+    /// NEITHER transcript, while the sidecar still advertises the old,
+    /// now-deleted one's `transcribedAt`/`transcriptBackend`.
     public func retranscribe(_ sidecar: Sidecar, using transcriber: any Transcriber) {
         let root = libraryRoot
         let store = TranscriptStore(root: root)
-        store.remove(for: sidecar)          // force a fresh run
         let library = Library(root: root)
 
         Task {

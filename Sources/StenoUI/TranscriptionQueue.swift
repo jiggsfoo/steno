@@ -45,10 +45,20 @@ public actor TranscriptionQueue {
     /// Everything still owed work, cheapest check first: the in-memory attempt
     /// count before the disk read+decode `store.has(sidecar)` performs. A
     /// capped sidecar is excluded without ever touching disk.
+    ///
+    /// `sidecar.transcribedAt == nil` also admits a sidecar THAT HAS a valid
+    /// transcript: `run` writes the transcript before the caller persists the
+    /// sidecar, so a crash in between leaves a transcript on disk describing a
+    /// sidecar that never learned about it. Without this, `!store.has(sidecar)`
+    /// alone reads that state as "already done" -- title, topic, transcribedAt,
+    /// and the topic-folder note are then never written, permanently, because
+    /// nothing ever revisits it again. `run`'s own step 1 already skips
+    /// re-transcribing when a transcript exists, so this only pays for the
+    /// cheap steps (filing, note) a second time, never the transcription itself.
     public func pending(from sidecars: [Sidecar]) -> [Sidecar] {
         sidecars.filter { sidecar in
             guard (sidecar.transcriptionAttempts ?? 0) < maxAttempts else { return false }
-            return !store.has(sidecar)
+            return !store.has(sidecar) || sidecar.transcribedAt == nil
         }
     }
 
@@ -76,20 +86,32 @@ public actor TranscriptionQueue {
 
     /// Transcribes, files, and returns the updated sidecar. Shared by
     /// `process` and `retry` so the money-protection logic exists in exactly
-    /// one place; the two entry points differ only in whether the attempt cap
-    /// applies.
+    /// one place; the two entry points differ in whether the attempt cap
+    /// applies AND in whether an existing transcript is reused.
     ///
     /// Write order is the inverse of `Library.commit`'s. There the expensive
     /// thing is the download, so audio goes first. Here it is transcription, and
     /// the already-done check is the transcript FILE, so a crash between steps
-    /// only ever repeats free work. That check is unconditional — neither
-    /// entry point may skip it, only the attempt cap is negotiable.
+    /// only ever repeats free work.
+    ///
+    /// `process` skips re-transcribing when a transcript already exists — that
+    /// is what makes the automatic sweep idempotent. `retry` is the deliberate,
+    /// user-initiated "do this again, maybe with a different backend" path, so
+    /// it must NEVER take that skip; it always calls the transcriber. The
+    /// caller therefore does not need to (and must not) delete the old
+    /// transcript first: `store.write` installs via `Library.install`, which
+    /// atomically REPLACES an existing file at that path rather than requiring
+    /// it be gone first, so the old transcript stays valid and readable right
+    /// up to the instant the new one lands — no window where a crash or a
+    /// failed backend call leaves neither on disk.
     private func run(_ sidecar: Sidecar, respectingCap: Bool) async -> Sidecar {
         var updated = sidecar
 
-        // 1. Transcript — skipped entirely when one already exists.
+        // 1. Transcript. `respectingCap` doubles as "is this `process`, not
+        // `retry`" here — see the doc comment above for why `retry` must
+        // never take this reuse branch.
         let transcript: Transcript
-        if let existing = store.transcript(for: sidecar) {
+        if respectingCap, let existing = store.transcript(for: sidecar) {
             transcript = existing
         } else {
             // The cap protects the AUTOMATIC sweeps from re-spending on a

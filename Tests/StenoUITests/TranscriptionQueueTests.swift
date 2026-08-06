@@ -69,13 +69,47 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
     let root = tempRoot()
     let counter = CallCounter()
     let queue = makeQueue(root: root, transcriber: CountingTranscriber(counter: counter))
-    let done = queueSidecar(signature: "done")
+    var done = queueSidecar(signature: "done")
     let todo = queueSidecar(signature: "todo")
 
-    _ = await queue.process(done)
+    // The persisted sidecar, as a fresh `scanSidecars()` would read it back --
+    // NOT the pre-process value. `process`'s own return is what carries
+    // `transcribedAt`, and `pending` now also keys off that field (see
+    // `pendingReadmitsATranscriptWrittenButNeverPersistedToTheSidecar`), so a
+    // fully-persisted "done" sidecar has to actually carry it to prove this
+    // case is distinct from that one.
+    done = await queue.process(done)
 
     let pending = await queue.pending(from: [done, todo])
     #expect(pending.map(\.signature) == ["todo"])
+}
+
+/// Reconciliation for the crash window `run` documents: the transcript lands
+/// on disk before the caller persists the sidecar, so a crash in between
+/// leaves a transcript describing a sidecar whose OWN `transcribedAt` never
+/// learned about it. `pending` must still surface that sidecar -- otherwise
+/// `store.has` alone reads it as "already done" and title/topic/note are never
+/// written, permanently -- but re-processing it must not pay for another
+/// transcription: `run`'s step 1 still finds the valid transcript and reuses it.
+@Test func pendingReadmitsATranscriptWrittenButNeverPersistedToTheSidecar() async throws {
+    let root = tempRoot()
+    let counter = CallCounter()
+    let queue = makeQueue(root: root, transcriber: CountingTranscriber(counter: counter))
+    let sidecar = queueSidecar()
+
+    // Simulate the crash window directly: a valid transcript exists, but this
+    // sidecar (as if freshly re-read from disk) never recorded it.
+    _ = try TranscriptStore(root: root).write(
+        TranscriptBody(text: "buy eggs", segments: [], locale: "en_US",
+                      backend: "counting", modelID: "counting-1"),
+        for: sidecar, at: Date())
+    #expect(sidecar.transcribedAt == nil)
+
+    #expect(await queue.pending(from: [sidecar]).map(\.signature) == [sidecar.signature])
+
+    let updated = await queue.process(sidecar)
+    #expect(await counter.count == 0)          // reused the existing transcript
+    #expect(updated.transcribedAt != nil)      // and is now persisted
 }
 
 @Test func processingWritesTranscriptSidecarFieldsAndNote() async throws {
@@ -126,6 +160,39 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
     #expect(after.transcribedAt == nil)
     #expect(FileManager.default.fileExists(atPath: audioURL.path))
     #expect(try Data(contentsOf: audioURL) == audioBytes)
+}
+
+/// A failed retry must not destroy what was already there. The old design had
+/// `AppModel.retranscribe` delete the transcript BEFORE calling `retry`, so a
+/// retry that then failed (a bad key, no network, a quit) left the recording
+/// with NEITHER transcript, while the sidecar still claimed the now-deleted
+/// old one's `transcribedAt`/`transcriptBackend`. `retry` itself never
+/// deletes anything -- `store.write`'s atomic install is what replaces the
+/// old file, and only once a new transcription has actually succeeded.
+@Test func aFailedRetryLeavesThePreviousTranscriptIntact() async throws {
+    let root = tempRoot()
+    let workingQueue = makeQueue(root: root, transcriber: CountingTranscriber(counter: CallCounter()))
+    var sidecar = queueSidecar()
+
+    sidecar = await workingQueue.process(sidecar)
+    #expect(sidecar.transcribedAt != nil)
+    #expect(sidecar.transcriptBackend == "counting")
+
+    let store = TranscriptStore(root: root)
+    let original = try #require(store.transcript(for: sidecar))
+
+    let failingQueue = makeQueue(
+        root: root, transcriber: CountingTranscriber(counter: CallCounter(), failing: true))
+    let afterFailedRetry = await failingQueue.retry(sidecar)
+
+    // The retry attempt is recorded as failed...
+    #expect(afterFailedRetry.transcriptionAttempts == 1)
+    // ...but the sidecar still describes a transcript that is STILL REAL, not
+    // one that used to exist and is now gone.
+    #expect(afterFailedRetry.transcribedAt == sidecar.transcribedAt)
+    #expect(afterFailedRetry.transcriptBackend == "counting")
+    let stillThere = try #require(store.transcript(for: sidecar))
+    #expect(stillThere == original)
 }
 
 /// The cap in `Sidecar.transcriptionAttempts`'s own contract is scoped to

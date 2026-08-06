@@ -151,11 +151,21 @@ public struct Library: Sendable {
 
     /// Rewrites an existing sidecar in place. Used when transcription adds
     /// fields to a recording already on disk. Never touches the audio.
+    ///
+    /// UUID-suffixed staging, written `.atomic`: the automatic transcription
+    /// sweep and a manual retry can both call this for the SAME sidecar. A
+    /// shared `.part` name means two writers share one inode, and a plain
+    /// (non-atomic) `Data.write` is open/truncate/write, so two interleaved
+    /// calls could tear the staged file before either install runs. Unlike a
+    /// torn `.transcript` (which self-heals -- it fails to decode, reads as
+    /// absent, and is redone free), a torn SIDECAR is fatal: `scanSidecars`
+    /// skips anything that fails to decode, so the recording would vanish
+    /// from the library permanently, with no way back once it is off the P1.
     public func updateSidecar(_ sidecar: Sidecar) throws {
         let audio = root.appendingPathComponent(sidecar.relativePath)
         let destination = Self.sidecarURL(forAudio: audio)
-        let staged = destination.appendingPathExtension("part")
-        try Self.encoder.encode(sidecar).write(to: staged)
+        let staged = destination.appendingPathExtension("\(UUID().uuidString).part")
+        try Self.encoder.encode(sidecar).write(to: staged, options: .atomic)
         do {
             try Self.install(staged, at: destination)
         } catch {

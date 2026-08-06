@@ -193,6 +193,38 @@ private func sampleFile(name: String = "20260804143022REC001.mp3", length: Int =
     }
 }
 
+/// Pins `updateSidecar`'s "never touches the audio" invariant -- nothing
+/// currently exercised this, and it is the fix's whole point: two writers
+/// racing on the sidecar must never be able to corrupt the audio next to it.
+@Test func updateSidecarRewritesTheSidecarWithoutTouchingTheAudio() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let lib = Library(root: root)
+    let file = sampleFile()
+    let audio = lib.destinationURL(for: file)
+    try FileManager.default.createDirectory(
+        at: audio.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let audioBytes = Data([1, 2, 3, 4])
+    try audioBytes.write(to: audio)
+
+    var sidecar = Sidecar(signature: file.signature, deviceFilename: file.name,
+                          relativePath: Library.relativePath(of: audio, under: root),
+                          lengthBytes: 4, durationSeconds: 1.0, recordedAt: file.recordedAt,
+                          syncedAt: Date(), deviceSerial: "SN1", deviceModel: "hidock-p1",
+                          timeZoneIdentifier: "UTC")
+    try Library.encoder.encode(sidecar).write(to: lib.sidecarURL(for: file))
+
+    sidecar.title = "New Title"
+    sidecar.topic = "Meetings"
+    try lib.updateSidecar(sidecar)
+
+    #expect(try Data(contentsOf: audio) == audioBytes)
+
+    let rewritten = try Library.decoder.decode(
+        Sidecar.self, from: Data(contentsOf: lib.sidecarURL(for: file)))
+    #expect(rewritten.title == "New Title")
+    #expect(rewritten.topic == "Meetings")
+}
+
 @Test func reachabilityIsFalseForMissingRoot() {
     let lib = Library(root: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"))
     #expect(lib.isReachable() == false)

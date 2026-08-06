@@ -46,8 +46,18 @@ public struct TranscriptStore: Sendable {
         try FileManager.default.createDirectory(
             at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
 
-        let staged = destination.appendingPathExtension("part")
-        try Library.encoder.encode(transcript).write(to: staged)
+        // UUID-suffixed, not a fixed `.part`: the automatic sweep and a
+        // manual retry can both be writing THIS sidecar's transcript at
+        // once, and a shared staging name means two writers share one
+        // inode. `.write(options: .atomic)` on top closes the other half of
+        // that race -- without it, `Data.write` is a plain open/truncate/
+        // write and two interleaved calls can still tear the staged file
+        // before either install ever runs. `.part` stays the trailing
+        // extension (`appendingPathExtension` just adds another dot-segment)
+        // so `pathExtension` still reads "part" and this file is still
+        // skipped by anything scanning for a different suffix.
+        let staged = destination.appendingPathExtension("\(UUID().uuidString).part")
+        try Library.encoder.encode(transcript).write(to: staged, options: .atomic)
         do {
             try Library.install(staged, at: destination)
         } catch {
