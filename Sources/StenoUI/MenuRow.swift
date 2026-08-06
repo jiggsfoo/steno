@@ -191,6 +191,20 @@ public struct MenuRow: View {
         .padding(.horizontal, MenuMetrics.textInset)
         .padding(.vertical, MenuMetrics.rowVerticalPadding)
         .frame(minHeight: MenuMetrics.rowHeight)
+        // `minHeight` alone is a floor, not a commitment: it clamps the
+        // proposal it forwards but still hands an undersized one straight to
+        // the content. A `VStack` short on height therefore squeezed every
+        // two-line row toward 24pt — the single-line height — and each detail
+        // line collapsed into the title below it. Measured on the live menu:
+        // 330pt rendered against a 412pt ideal, exactly the 84pt you get when
+        // all six two-line rows sit at 24.
+        //
+        // This says the row's height is not negotiable. Content that no longer
+        // fits is clipped at the menu's edge, which is visible and honest;
+        // overlapping text is neither.
+        //
+        // Harmless for a one-line row, whose ideal is already the 24pt floor.
+        .fixedSize(horizontal: false, vertical: true)
         .foregroundStyle(rowForeground)
         .background(MenuRowHighlight(isActive: isHovering && isInteractive))
         .contentShape(Rectangle())

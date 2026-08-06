@@ -350,3 +350,54 @@ private func sampleMenu() -> MenuBarView {
         }
     }
 }
+
+/// The whole menu, offered the height it had before recordings carried titles.
+///
+/// `MenuRow` sized itself with `.frame(minHeight:)`, which is a floor rather
+/// than a commitment: it clamps the proposal it forwards but still hands an
+/// undersized one to its content. A `VStack` short on height therefore squeezed
+/// every FLEXIBLE two-line row toward 24pt — the single-line height — while the
+/// rigid single-line rows kept their size, and each detail line collapsed into
+/// the title below it.
+///
+/// Measured on the live app: the popover drew at 330pt against a 412pt ideal.
+/// That gap is exactly 84pt, which is what you get when all six two-line rows
+/// sit at 24 instead of 38.
+///
+/// Invisible before spec 2, because only the status row had two lines. Five
+/// recent titles turned one row's worth of squeeze into six.
+///
+/// Asserted on the SPACING of the lines still drawn, not on how many are drawn:
+/// content that no longer fits is clipped at the menu's edge, which also drops
+/// bands. Collapsing changes the spacing; clipping does not.
+@MainActor
+@Test func theMenuDoesNotSqueezeTwoLineRowsWhenHeightIsShort() {
+    let model = AppModel()
+    model.status = .connected(battery: nil, freeMiB: 59520, capacityMiB: 59648)
+    model.recent = (0..<5).map { i in
+        Sidecar(signature: "sig\(i)", deviceFilename: "a.hda",
+                relativePath: "2026-08-05/sig\(i).mp3", lengthBytes: 10,
+                durationSeconds: 3985,
+                recordedAt: Date(timeIntervalSince1970: 1_754_400_000 - Double(i) * 3600),
+                syncedAt: Date(timeIntervalSince1970: 1_754_400_000),
+                deviceSerial: "S", deviceModel: "hidock-p1",
+                timeZoneIdentifier: "Asia/Manila",
+                title: "Distribution Networking Explained")
+    }
+    let menu = MenuBarView(model: model)
+
+    func minimumLineGap(_ view: some View) -> Double {
+        let bands = inkBands(of: view)
+        guard bands.count > 1 else { return 0 }
+        return (1..<bands.count).map { bands[$0].top - bands[$0 - 1].bottom }.min() ?? 0
+    }
+
+    let relaxed = minimumLineGap(menu)
+    // 330pt is what the live popover offered: the height this menu needed back
+    // when every row was one line.
+    let squeezed = minimumLineGap(menu.frame(height: 330))
+
+    #expect(relaxed > 0, "the unconstrained menu should draw separated lines")
+    #expect(squeezed >= relaxed - onePixel,
+            Comment(rawValue: "lines sit \(squeezed)pt apart at 330pt versus \(relaxed)pt unconstrained — two-line rows are being squeezed into each other"))
+}
