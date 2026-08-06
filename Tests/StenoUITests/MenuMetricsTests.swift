@@ -271,7 +271,7 @@ private func sampleMenu() -> MenuBarView {
     let first = MenuRow(MenuBarView.statusTitle(for: sampleStatus),
                         accent: MenuBarView.statusAccent(for: sampleStatus),
                         detail: "10 GB free of 32 GB").frame(width: menuWidth)
-    let last = MenuRow("Quit HiDock") {}.frame(width: menuWidth)
+    let last = MenuRow("Quit Steno") {}.frame(width: menuWidth)
 
     let firstInk = try #require(inkBands(of: first).first?.top,
                                 "the status row drew nothing")

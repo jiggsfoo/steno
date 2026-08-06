@@ -12,7 +12,7 @@ public enum JensenError: Error, Equatable, Sendable {
 }
 
 /// Without this, every case renders in the menubar as the generic Cocoa
-/// fallback — "The operation couldn't be completed. (StenoUI.JensenError
+/// fallback — "The operation couldn't be completed. (JensenKit.JensenError
 /// error 0.)" — meaningless to someone reading a status line, not a stack trace.
 extension JensenError: LocalizedError {
     public var errorDescription: String? {
@@ -22,7 +22,7 @@ extension JensenError: LocalizedError {
         case .interfaceUnavailable(let detail):
             return "Couldn't connect to the P1 (\(detail))."
         case .invalidHeader:
-            return "The P1 sent a response HiDock didn't understand."
+            return "The P1 sent a response Steno didn't understand."
         case .timeout:
             return "The P1 didn't respond in time. It may be recording, or in Vibe Mic Bluetooth mode."
         case .shortBody:

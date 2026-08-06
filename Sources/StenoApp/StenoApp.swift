@@ -37,7 +37,7 @@ struct StenoApp: App {
         // that never activates on its own -- the window would open behind
         // every other app and be effectively invisible. MenuBarView activates
         // the app before calling openWindow(id: MenuBarView.settingsWindowID).
-        Window("HiDock Settings", id: MenuBarView.settingsWindowID) {
+        Window("Steno Settings", id: MenuBarView.settingsWindowID) {
             SettingsView(model: appDelegate.model)
         }
         .windowResizability(.contentSize)

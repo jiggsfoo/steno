@@ -134,7 +134,7 @@ import Testing
     let labels = MenuBarIcon.State.allCases.map { MenuBarIcon.accessibilityLabel(for: $0) }
     #expect(labels.allSatisfy { !$0.isEmpty })
     #expect(Set(labels).count == labels.count)
-    #expect(labels.allSatisfy { $0.hasPrefix("HiDock") })
+    #expect(labels.allSatisfy { $0.hasPrefix("Steno") })
 }
 
 @Test func everyStateRendersAnImageWithTheAccessibilityLabelAttached() {

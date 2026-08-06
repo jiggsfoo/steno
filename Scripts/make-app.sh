@@ -4,7 +4,7 @@ set -euo pipefail
 CONFIG="${1:-debug}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$(swift build --configuration "$CONFIG" --show-bin-path)"
-APP="$ROOT/build/HiDock.app"
+APP="$ROOT/build/Steno.app"
 
 swift build --configuration "$CONFIG" --product StenoApp
 

@@ -115,6 +115,9 @@ public struct Library: Sendable {
             recordedAt: file.recordedAt,
             syncedAt: Date(),
             deviceSerial: deviceSerial,
+            // The hardware's model identifier, persisted into every sidecar on
+            // disk. Not an app name, and not renameable: changing it would
+            // make new sidecars disagree with every one already written.
             deviceModel: "hidock-p1",
             timeZoneIdentifier: TimeZone.current.identifier)
 

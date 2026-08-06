@@ -87,7 +87,7 @@ struct CLI {
             print("LIST OK")
 
         case "pull":
-            guard args.count >= 2 else { print("usage: hidock-cli pull <device-filename>"); exit(2) }
+            guard args.count >= 2 else { print("usage: steno pull <device-filename>"); exit(2) }
             let target = args[1]
 
             let transport = try IOUSBHostTransport.openFirstAvailable()
@@ -145,7 +145,7 @@ struct CLI {
             }
 
         default:
-            print("usage: hidock-cli [probe|info|list|pull <name>|watch]")
+            print("usage: steno [probe|info|list|pull <name>|watch]")
             exit(2)
         }
     }

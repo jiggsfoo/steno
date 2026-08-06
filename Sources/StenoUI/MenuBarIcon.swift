@@ -45,11 +45,11 @@ public enum MenuBarIcon {
 
     public static func accessibilityLabel(for state: State) -> String {
         switch state {
-        case .disconnected: return "HiDock: no device"
-        case .connected:    return "HiDock: connected"
-        case .syncing:      return "HiDock: syncing"
-        case .recording:    return "HiDock: recording"
-        case .attention:    return "HiDock: needs attention"
+        case .disconnected: return "Steno: no device"
+        case .connected:    return "Steno: connected"
+        case .syncing:      return "Steno: syncing"
+        case .recording:    return "Steno: recording"
+        case .attention:    return "Steno: needs attention"
         }
     }
 

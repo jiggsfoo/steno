@@ -78,7 +78,7 @@ public final class AppModel: @unchecked Sendable {
         let stored = UserDefaults.standard.string(forKey: Self.rootKey)
         self.libraryRoot = stored.map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Recordings/HiDock")
+                .appendingPathComponent("Recordings/Steno")
     }
 
     public func start() {
@@ -99,7 +99,7 @@ public final class AppModel: @unchecked Sendable {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser
                 .appendingPathComponent("Library/Application Support")
-        return base.appendingPathComponent("HiDock/index.sqlite")
+        return base.appendingPathComponent("Steno/index.sqlite")
     }
 
     /// Opens the on-disk index, deleting and retrying once on failure.
@@ -424,7 +424,7 @@ public final class AppModel: @unchecked Sendable {
     /// marks this tick's own claim on the interface so nothing else races it.
     ///
     /// Same open/close discipline as `startSync`: the interface must be free
-    /// BETWEEN polls so `hidock-cli` and a user-triggered sync can still claim
+    /// BETWEEN polls so `steno` and a user-triggered sync can still claim
     /// it, so every tick opens its own transport, does its work, and closes it
     /// again on every path -- capture the error, close unconditionally, then
     /// handle. `startSync` (called below) opens its own transport separately,

@@ -186,7 +186,7 @@ public struct MenuBarView: View {
         }
         separator
         MenuRow("Settings…") { open(Self.settingsWindowID) }
-        MenuRow("Quit HiDock") { NSApplication.shared.terminate(nil) }
+        MenuRow("Quit Steno") { NSApplication.shared.terminate(nil) }
     }
 
     /// Opens one of `StenoApp`'s `Window(_:id:)` scenes.

@@ -2,6 +2,13 @@ import Foundation
 import IOKit
 import IOUSBHost
 
+/// IOKit matching for the vendor's hardware.
+///
+/// The "HiDock" in this type's name — and in `isHiDockP1Interface` below — is
+/// a nominative reference to the device being matched, not to this app. It
+/// stays. What was renamed is our own identity (the app, its bundle, and its
+/// modules); the names of someone else's USB hardware are what they are, and
+/// obscuring them here would only make the VID/PID table harder to read.
 public enum HiDockDeviceMatching {
     public static let vendorIDs: [Int] = [0x10d6, 0x3887]
     public static let p1ProductIDs: [Int] = [0xaf0e, 0xb00e, 0x2040]

@@ -26,7 +26,7 @@ import Testing
 }
 
 @Test func aRowIsNeverAnnouncedAsEmpty() {
-    #expect(!MenuRow.composedAccessibilityLabel(title: "Quit HiDock", value: nil, detail: nil)
+    #expect(!MenuRow.composedAccessibilityLabel(title: "Quit Steno", value: nil, detail: nil)
              .isEmpty)
 }
 

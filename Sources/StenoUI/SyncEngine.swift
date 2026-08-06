@@ -62,7 +62,7 @@ public actor SyncEngine {
     private let index: LibraryIndex
     /// Injected, not looked up. `nil` means "don't log" -- the default, and
     /// what every test uses, so a `FakeDevice`-driven `sync()` call cannot
-    /// write into the real `~/Library/Logs/HiDock/hidock.log`. `AppModel`
+    /// write into the real `~/Library/Logs/Steno/steno.log`. `AppModel`
     /// passes its one real instance.
     private let log: DiagnosticLog?
 

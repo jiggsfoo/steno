@@ -13,7 +13,7 @@ import Foundation
 /// An actual instance (not a bare namespace), so it can be injected. `nil` is
 /// the "don't log" case: `SyncEngine`'s tests construct it with no logger at
 /// all, so a `FakeDevice`-driven test run cannot write a single byte to the
-/// user's real `~/Library/Logs/HiDock/hidock.log` -- there is no shared
+/// user's real `~/Library/Logs/Steno/steno.log` -- there is no shared
 /// mutable path or environment variable to override, just a dependency that
 /// either is or isn't there. `AppModel` owns the one real instance for the
 /// app's process lifetime and hands it to every `SyncEngine` it constructs.
@@ -33,15 +33,15 @@ public struct DiagnosticLog: Sendable {
         self.destinationURL = destinationURL
     }
 
-    /// `~/Library/Logs/HiDock/hidock.log`. Same convention as any other
+    /// `~/Library/Logs/Steno/steno.log`. Same convention as any other
     /// per-app log under `~/Library/Logs`.
     static let defaultURL: URL = {
         let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library")
-        return base.appendingPathComponent("Logs/HiDock/hidock.log")
+        return base.appendingPathComponent("Logs/Steno/steno.log")
     }()
 
-    /// The file is rotated to `hidock.log.1` once it exceeds this size, so a
+    /// The file is rotated to `steno.log.1` once it exceeds this size, so a
     /// device left plugged in for months can't grow the log without bound.
     static let rotationCapBytes = 5_000_000
 

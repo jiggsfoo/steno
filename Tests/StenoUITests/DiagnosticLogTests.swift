@@ -12,7 +12,7 @@ import Testing
 private func tempLogURL() -> URL {
     FileManager.default.temporaryDirectory
         .appendingPathComponent("DiagnosticLogTests-\(UUID().uuidString)")
-        .appendingPathComponent("hidock.log")
+        .appendingPathComponent("steno.log")
 }
 
 @Test func formattedLineContainsTimestampEventAndPairs() {
@@ -119,7 +119,7 @@ private func tempLogURL() -> URL {
 /// The hard requirement: a broken destination must never throw or crash --
 /// it must be swallowed exactly like every other logging failure.
 @Test func loggingToAnUnwritablePathDoesNotThrowOrCreateAnything() {
-    let unwritable = URL(fileURLWithPath: "/System/DiagnosticLogTests-unwritable/hidock.log")
+    let unwritable = URL(fileURLWithPath: "/System/DiagnosticLogTests-unwritable/steno.log")
     DiagnosticLog.append("should be swallowed", to: unwritable)
     #expect(FileManager.default.fileExists(atPath: unwritable.path) == false)
 }

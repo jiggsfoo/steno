@@ -65,9 +65,9 @@ Both need a person at the cable and were never performed.
    `kIOReturnNoDevice` rather than a spin to the full timeout. The
    `kIOReturnTimeout`-only tolerance in `IOUSBHostTransport.transfer` is correct
    by inspection; this confirms it end to end.
-   Command: `swift run hidock-cli info`, pull the cable during the run.
+   Command: `swift run steno info`, pull the cable during the run.
 
-2. **Attach/detach notifications.** With `swift run hidock-cli watch` running:
+2. **Attach/detach notifications.** With `swift run steno watch` running:
    unplug and replug the P1, expecting `DETACHED` then `ATTACHED`. Then plug in
    an unrelated USB device and confirm it produces **no** output. That second
    half matters: the IOKit matching dictionary is a bare `IOUSBHostInterface`
@@ -119,7 +119,7 @@ The first item is the only one that can invalidate the branch.
    ever applied red, so the one state that must never be missed was invisible.
    Pixel tests now gate it, but nobody has seen it in the bar.
 
-5. **Reveal Log on a machine with no `~/Library/Logs/HiDock/`.** Task 4 dropped
+5. **Reveal Log on a machine with no `~/Library/Logs/Steno/`.** Task 4 dropped
    the `createDirectory` guard rather than moving it, so the button silently did
    nothing on a fresh install. Restored, but unreproducible here without
    deleting the real log.
