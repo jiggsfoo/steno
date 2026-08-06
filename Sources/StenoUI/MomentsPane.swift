@@ -21,7 +21,7 @@ public struct MomentsPane: View {
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 10) {
-                    ForEach(Self.grouped(moments), id: \.title) { group in
+                    ForEach(Self.grouped(moments), id: \.signature) { group in
                         VStack(alignment: .leading, spacing: 4) {
                             Text(group.title).font(.caption).foregroundStyle(.secondary)
                             ForEach(group.moments) { moment in
@@ -61,16 +61,29 @@ public struct MomentsPane: View {
     ///
     /// PURE. First-appearance rather than alphabetical, so the order matches
     /// the order the search walked the library — which is recency.
+    ///
+    /// Keyed on `signature`, not `recordingTitle`: titles are model output,
+    /// and two recordings can legitimately get the same one (a weekly
+    /// meeting called "Weekly Work Update" every time). Keying on title
+    /// would merge those into a single group with interleaved moments and
+    /// no way to tell which recording a line came from. `signature` is the
+    /// one thing guaranteed unique per recording — `onPlay` already routes
+    /// on it, not on the title, so the display grouping now agrees with the
+    /// click routing.
     nonisolated static func grouped(
         _ moments: [Moment]
-    ) -> [(title: String, moments: [Moment])] {
+    ) -> [(signature: String, title: String, moments: [Moment])] {
         var order: [String] = []
         var buckets: [String: [Moment]] = [:]
         for moment in moments {
-            if buckets[moment.recordingTitle] == nil { order.append(moment.recordingTitle) }
-            buckets[moment.recordingTitle, default: []].append(moment)
+            if buckets[moment.signature] == nil { order.append(moment.signature) }
+            buckets[moment.signature, default: []].append(moment)
         }
-        return order.map { (title: $0, moments: buckets[$0] ?? []) }
+        return order.map {
+            (signature: $0,
+             title: buckets[$0]?.first?.recordingTitle ?? "",
+             moments: buckets[$0] ?? [])
+        }
     }
 
     /// What the header says above the results.

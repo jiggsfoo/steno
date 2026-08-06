@@ -91,7 +91,15 @@ public struct LibraryWindow: View {
         capped: Bool,
         onPlay: @escaping (Moment) -> Void
     ) -> some View {
-        if !moments.isEmpty || query.count >= TranscriptSearch.minimumQueryLength {
+        // Trimmed to match `TranscriptSearch.moments`, which trims before
+        // comparing against `minimumQueryLength`. Comparing the raw query
+        // here would let an all-whitespace query past the minimum count
+        // show the (empty) search pane instead of the transcript, even
+        // though `TranscriptSearch` itself would treat it as too short to
+        // search on.
+        if !moments.isEmpty
+            || query.trimmingCharacters(in: .whitespacesAndNewlines).count
+                >= TranscriptSearch.minimumQueryLength {
             MomentsPane(moments: moments, capped: capped, onPlay: onPlay)
         } else if let recording {
             TranscriptPane(recording: recording, player: player)

@@ -22,6 +22,9 @@ public final class AudioPlayer {
     /// down and rebuilding playback state that a caller may have just set up
     /// (see `load(_:)`).
     @ObservationIgnored private var loadedURL: URL?
+    /// Watches the loading item for `.failed`, so a load that never becomes
+    /// playable does not permanently wedge `loadedURL` (see `load(_:)`).
+    @ObservationIgnored private var statusObserver: NSKeyValueObservation?
 
     public init() {}
 
@@ -40,17 +43,33 @@ public final class AudioPlayer {
         if let observer, let player { player.removeTimeObserver(observer) }
     }
 
-    /// A second `load(_:)` for the URL already loaded is a no-op.
+    /// A second `load(_:)` for the URL already loaded is a no-op — unless
+    /// the first attempt failed.
     ///
-    /// Without this, two callers that both react to the same selection
-    /// change — the `.onChange(of: store.selection)` that owns loading, and
-    /// a moment's "play" action which sets that same selection and then
-    /// wants to seek immediately — race to rebuild `player` for the same
-    /// file. Whichever runs second would tear down the just-built player,
-    /// reset `currentTime` to 0, and drop the rate back to 0 — silently
-    /// undoing a seek and pause that already landed. Guarding by URL makes
-    /// the redundant call inert instead of destructive, without either
-    /// caller needing to know about the other.
+    /// Without the no-op guard, two callers that both react to the same
+    /// selection change — the `.onChange(of: store.selection)` that owns
+    /// loading, and a moment's "play" action which sets that same selection
+    /// and then wants to seek immediately — race to rebuild `player` for the
+    /// same file. Whichever runs second would tear down the just-built
+    /// player, reset `currentTime` to 0, and drop the rate back to 0 —
+    /// silently undoing a seek and pause that already landed. Guarding by
+    /// URL makes the redundant call inert instead of destructive, without
+    /// either caller needing to know about the other.
+    ///
+    /// But committing `loadedURL` unconditionally would wedge a *failed*
+    /// load (missing file, unsupported format, ...) as "loaded" forever:
+    /// every later click on a moment in that recording would silently do
+    /// nothing, with no way to retry short of loading a different recording
+    /// first. `statusObserver` watches for `.failed` and frees `loadedURL`
+    /// when it happens, so the next `load(_:)` for that URL is a real retry
+    /// rather than another no-op. It re-checks `loadedURL == url` before
+    /// clearing, so a stale failure notification from a since-superseded
+    /// item can't clobber a newer, successful load. Deferring the
+    /// `loadedURL` commit until the item is confirmed good, instead, was
+    /// not an option: readiness is inherently asynchronous — it can never
+    /// resolve within the same synchronous turn `load(_:)` runs in — so the
+    /// redundant call above would always land in the "not yet committed"
+    /// window and reopen the exact race this guard exists to close.
     public func load(_ url: URL) {
         guard url != loadedURL else { return }
         stop()
@@ -60,6 +79,14 @@ public final class AudioPlayer {
         self.player = player
         currentTime = 0
         duration = 0
+
+        statusObserver = item.observe(\.status, options: [.new]) { [weak self] item, _ in
+            guard item.status == .failed else { return }
+            Task { @MainActor [weak self] in
+                guard let self, self.loadedURL == url else { return }
+                self.loadedURL = nil
+            }
+        }
 
         // Four times a second: fine enough that a highlight lands on the right
         // line, coarse enough not to churn the view for a text list.
@@ -98,6 +125,7 @@ public final class AudioPlayer {
         pause()
         if let observer, let player { player.removeTimeObserver(observer) }
         observer = nil
+        statusObserver = nil
         player = nil
         currentTime = 0
         duration = 0

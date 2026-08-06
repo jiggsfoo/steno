@@ -18,6 +18,21 @@ private func moment(_ signature: String, _ title: String, at start: Double) -> M
     #expect(groups.first?.moments.count == 2)
 }
 
+/// Titles are model output and can collide (a recurring weekly meeting gets
+/// the same AI-generated title every time). Grouping has to key on the one
+/// thing actually unique per recording — `signature`, the same field
+/// `onPlay` already routes clicks on — or two distinct recordings sharing a
+/// title would merge into one group with interleaved, unattributable moments.
+@Test func distinctRecordingsSharingATitleStayInSeparateGroups() {
+    let groups = MomentsPane.grouped([
+        moment("a", "Weekly Work Update", at: 1),
+        moment("b", "Weekly Work Update", at: 2),
+    ])
+
+    #expect(groups.count == 2)
+    #expect(groups.map(\.signature) == ["a", "b"])
+}
+
 /// The count is what tells you whether it is worth reading the list, so it has
 /// to say when it was truncated rather than implying it showed everything.
 @Test func theSummarySaysWhenTheCapBit() {
