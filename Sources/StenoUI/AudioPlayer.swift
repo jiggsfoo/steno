@@ -17,6 +17,11 @@ public final class AudioPlayer {
 
     @ObservationIgnored private var player: AVPlayer?
     @ObservationIgnored private var observer: Any?
+    /// The URL the current `player` was built from, so a second `load(_:)`
+    /// for that same URL can be recognized as redundant rather than tearing
+    /// down and rebuilding playback state that a caller may have just set up
+    /// (see `load(_:)`).
+    @ObservationIgnored private var loadedURL: URL?
 
     public init() {}
 
@@ -35,8 +40,21 @@ public final class AudioPlayer {
         if let observer, let player { player.removeTimeObserver(observer) }
     }
 
+    /// A second `load(_:)` for the URL already loaded is a no-op.
+    ///
+    /// Without this, two callers that both react to the same selection
+    /// change — the `.onChange(of: store.selection)` that owns loading, and
+    /// a moment's "play" action which sets that same selection and then
+    /// wants to seek immediately — race to rebuild `player` for the same
+    /// file. Whichever runs second would tear down the just-built player,
+    /// reset `currentTime` to 0, and drop the rate back to 0 — silently
+    /// undoing a seek and pause that already landed. Guarding by URL makes
+    /// the redundant call inert instead of destructive, without either
+    /// caller needing to know about the other.
     public func load(_ url: URL) {
+        guard url != loadedURL else { return }
         stop()
+        loadedURL = url
         let item = AVPlayerItem(url: url)
         let player = AVPlayer(playerItem: item)
         self.player = player
@@ -83,6 +101,7 @@ public final class AudioPlayer {
         player = nil
         currentTime = 0
         duration = 0
+        loadedURL = nil
     }
 
     /// Which segment is being spoken at `time`, or nil in a gap.

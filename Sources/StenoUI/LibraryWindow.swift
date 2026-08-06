@@ -18,8 +18,32 @@ public struct LibraryWindow: View {
                 .searchable(text: $store.query, prompt: "Search transcripts")
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } detail: {
-            Self.detailContent(for: store.recordings.first(where: { $0.id == store.selection }),
-                               player: player)
+            let search = TranscriptSearch.moments(matching: store.query, in: store.recordings)
+            Self.detailContent(
+                for: store.recordings.first(where: { $0.id == store.selection }),
+                player: player,
+                query: store.query,
+                moments: search.moments,
+                capped: search.capped
+            ) { moment in
+                // A moment lands you somewhere: seek and play its recording,
+                // then select it so clearing the query leaves you in that
+                // transcript at that position. Loading is left to the
+                // `.onChange(of: store.selection)` below where possible;
+                // `player.load` here is the one that actually runs when the
+                // recording is not already the loaded one, and it is a
+                // guarded no-op (see `AudioPlayer.load`) on the redundant
+                // call that `.onChange` schedules for the same URL — so
+                // whichever of the two runs second cannot reset the seek
+                // this closure is about to perform.
+                if let recording = store.recordings.first(where: { $0.id == moment.signature }) {
+                    player.load(model.libraryRoot
+                        .appendingPathComponent(recording.sidecar.relativePath))
+                    player.seek(to: moment.segment.start)
+                    player.play()
+                }
+                store.selection = moment.signature
+            }
         }
         .task { await reload() }
         // Loading audio belongs here rather than inside a detail branch: a
@@ -52,14 +76,27 @@ public struct LibraryWindow: View {
     /// the transcript's scroll position together, which is what a different
     /// recording actually is: unrelated content, not a continuation of the
     /// last one.
+    ///
+    /// `query`, `moments`, and `capped` are resolved by `body` (which is
+    /// where `store.query` and `store.recordings` live) and handed in here,
+    /// rather than this function reaching for them itself — that keeps this
+    /// a pure composition of already-known values, which is what makes it
+    /// something a test can call directly.
     @ViewBuilder
-    static func detailContent(for recording: LoadedRecording?, player: AudioPlayer) -> some View {
-        if let recording {
+    static func detailContent(
+        for recording: LoadedRecording?,
+        player: AudioPlayer,
+        query: String,
+        moments: [Moment],
+        capped: Bool,
+        onPlay: @escaping (Moment) -> Void
+    ) -> some View {
+        if !moments.isEmpty || query.count >= TranscriptSearch.minimumQueryLength {
+            MomentsPane(moments: moments, capped: capped, onPlay: onPlay)
+        } else if let recording {
             TranscriptPane(recording: recording, player: player)
                 .id(recording.id)
         } else {
-            // The real empty state, not scaffolding: Task 7 adds a branch
-            // above this one, and this stays as the nothing-selected case.
             ContentUnavailableView("No recording selected", systemImage: "waveform")
         }
     }
