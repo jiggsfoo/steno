@@ -24,6 +24,37 @@ private struct CountingTranscriber: Transcriber {
     }
 }
 
+/// Hands out one string per call, sticking on the last once exhausted.
+/// `actor`-backed so it is safely shared with a `Sendable` `Transcriber`.
+private actor TextQueue {
+    private var items: [String]
+    private var index = 0
+    init(_ items: [String]) { self.items = items }
+    func next() -> String {
+        defer { index = min(index + 1, items.count - 1) }
+        return items[index]
+    }
+}
+
+/// Returns a DIFFERENT transcript text on each call, both carrying the SAME
+/// filing directive ("File this under Grocery List.") so the topic a
+/// re-transcription resolves to stays fixed while the title — derived from
+/// the transcript's own leading words — changes. This is what a real Deepgram
+/// re-transcription looks like: same topic, different title, almost always.
+private struct RetitlingTranscriber: Transcriber {
+    let id = "retitling"
+    let displayName = "Retitling"
+    let texts: TextQueue
+
+    func isAvailable() async -> Bool { true }
+
+    func transcribe(audio: URL, locale: Locale) async throws -> TranscriptBody {
+        let text = await texts.next()
+        return TranscriptBody(text: text, segments: [], locale: "en_US",
+                              backend: "retitling", modelID: "retitling-1")
+    }
+}
+
 private func tempRoot() -> URL {
     let u = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try! FileManager.default.createDirectory(at: u, withIntermediateDirectories: true)
@@ -193,6 +224,43 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
     #expect(afterFailedRetry.transcriptBackend == "counting")
     let stillThere = try #require(store.transcript(for: sidecar))
     #expect(stillThere == original)
+}
+
+/// IMPORTANT: the note's FILENAME embeds the title, not just the topic
+/// (`"<stamp> <title>.md"`). Before this fix, `run` only removed the previous
+/// note when `previousTopic != filing.topic` — so a re-run that keeps the
+/// SAME topic but produces a DIFFERENT title (the branch's flagship action:
+/// Deepgram re-transcription almost always retitles) wrote a second note at a
+/// new filename and left the first one behind, so two notes on disk claimed
+/// the same recording via identical `signature:` front matter. Driven through
+/// `TranscriptionQueue` itself, not by calling `removeNote` by hand, because
+/// the defect is in `run`'s own removal condition.
+@Test func reprocessingWithADifferentTitleButTheSameTopicLeavesOnlyOneNote() async throws {
+    let root = tempRoot()
+    let texts = TextQueue([
+        "Quick note about eggs. File this under Grocery List.",
+        "Second recording about milk. File this under Grocery List.",
+    ])
+    let queue = makeQueue(root: root, transcriber: RetitlingTranscriber(texts: texts))
+    let sidecar = queueSidecar()
+
+    let first = await queue.process(sidecar)
+    #expect(first.topic == "Grocery List")
+
+    // A different backend run over the same recording -- new text, same
+    // directive, so the topic must resolve identically while the title does not.
+    let second = await queue.retry(first)
+    #expect(second.topic == "Grocery List")
+    #expect(second.title != first.title)
+
+    let folder = root.appendingPathComponent("Grocery List")
+    let notes = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        .filter { $0.hasSuffix(".md") }
+    #expect(notes.count == 1)
+
+    let survivor = try String(
+        contentsOf: folder.appendingPathComponent(notes[0]), encoding: .utf8)
+    #expect(survivor.contains("Second recording about milk"))
 }
 
 /// The cap in `Sidecar.transcriptionAttempts`'s own contract is scoped to

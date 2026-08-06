@@ -146,7 +146,20 @@ public actor TranscriptionQueue {
         updated.transcriptionAttempts = nil
 
         // 3. Note. Regenerable, so a failure here is not worth failing the run.
-        if let previousTopic, previousTopic != filing.topic {
+        //
+        // The note's FILENAME embeds the title, not just the topic -- see
+        // `Filer.noteStem(for:)`, `"<stamp> <title>.md"`. Removing only when
+        // the TOPIC changed therefore missed the far more common case: a
+        // re-run that keeps the same topic but produces a different title
+        // (re-transcribing almost always retitles) writes a new file at a new
+        // path and leaves the old one behind, orphaned -- two notes then
+        // claim the same recording via identical `signature:` front matter.
+        // Removing unconditionally whenever a previous topic existed, before
+        // writing the new note, closes that: `removeNote` locates by
+        // front-matter signature, not by recomputing a path, so it finds the
+        // old note (wherever its title put it) regardless of whether the
+        // topic is about to change, stay the same, or go away entirely.
+        if let previousTopic {
             filer.removeNote(for: sidecar, topic: previousTopic)
         }
         if filing.topic != nil {
