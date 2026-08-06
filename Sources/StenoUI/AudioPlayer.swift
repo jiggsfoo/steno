@@ -16,19 +16,20 @@ public final class AudioPlayer {
     public private(set) var duration: Double = 0
 
     @ObservationIgnored private var player: AVPlayer?
-    // `Any` is not `Sendable`, and a `nonisolated deinit` requires every
-    // property it touches to be. This property is genuinely protected by
-    // actor isolation — it's only ever written from `@MainActor` methods,
-    // and `deinit` on an `@MainActor` class is itself isolated (it either
-    // runs synchronously if already on the main actor, or is hopped there),
-    // so the compiler's inability to see that through `Any`'s existential
-    // erasure is the thing being overridden here, not the isolation
-    // guarantee itself.
-    @ObservationIgnored private nonisolated(unsafe) var observer: Any?
+    @ObservationIgnored private var observer: Any?
 
     public init() {}
 
-    deinit {
+    // The observer token is typed `Any`, which can never be proven
+    // `Sendable` — so a plain `nonisolated deinit` (the default) cannot
+    // legally touch it, regardless of how carefully access is actually
+    // synchronized. `isolated deinit` (SE-0371) makes this deinit genuinely
+    // isolated to the main actor instead of merely asserting past the
+    // check: it hops to the main actor if invoked off it, or runs
+    // synchronously if already there. That turns the read below into an
+    // ordinary same-actor access, so the Sendable-crossing check never
+    // fires — the access is proven safe, not just asserted safe.
+    isolated deinit {
         // The observer holds the player; without this the pair outlives the
         // window and keeps ticking.
         if let observer, let player { player.removeTimeObserver(observer) }
