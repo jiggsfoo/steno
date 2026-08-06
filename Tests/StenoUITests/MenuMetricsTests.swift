@@ -203,9 +203,9 @@ private func sampleMenu() -> MenuBarView {
 /// the separator's 9pt footprint where AppKit uses 11.
 ///
 /// Measured centre-to-centre between the last two separators, which enclose
-/// exactly the three action rows -- Sync Now, Show in Finder, Free Up Space on
-/// P1. Each separator contributes half its footprint to that span, so the
-/// distance is 3 rows plus one whole separator, and it is wrong if the row
+/// exactly the four action rows -- Sync Now, Show in Finder, Library…, Free Up
+/// Space on P1. Each separator contributes half its footprint to that span, so
+/// the distance is 4 rows plus one whole separator, and it is wrong if the row
 /// height, the row spacing OR the separator footprint is wrong.
 @MainActor
 @Test func renderedRowPitchMatchesTheNativeMenu() throws {
@@ -213,7 +213,7 @@ private func sampleMenu() -> MenuBarView {
     try #require(dividers.count == 3,
                  "expected 3 separators in the menu, measured \(dividers.count)")
 
-    let actionRows = 3.0
+    let actionRows = 4.0
     let expected = actionRows * MenuMetrics.rowHeight + MenuMetrics.separatorHeight
     let measured = dividers[2].midY - dividers[1].midY
 

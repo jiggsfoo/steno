@@ -52,5 +52,14 @@ struct StenoApp: App {
             ReclaimView(model: appDelegate.model)
         }
         .windowResizability(.contentSize)
+
+        // Resizable, unlike Settings and Reclaim: those are fixed-size forms,
+        // this is a library you will want to make bigger. `.contentMinSize`
+        // keeps the split view from being dragged narrower than it can draw.
+        Window("Steno Library", id: MenuBarView.libraryWindowID) {
+            LibraryWindow(model: appDelegate.model)
+        }
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 900, height: 600)
     }
 }

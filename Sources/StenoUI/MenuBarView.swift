@@ -12,6 +12,11 @@ public struct MenuBarView: View {
     /// `open(_:)`.
     public static let reclaimWindowID = "reclaim"
 
+    /// The third `Window(_:id:)` scene `StenoApp` declares. Unlike the other
+    /// two it is resizable — it is the first surface in this app anyone would
+    /// want to make bigger.
+    public static let libraryWindowID = "library"
+
     @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
 
@@ -230,6 +235,7 @@ public struct MenuBarView: View {
     private var actionsSection: some View {
         MenuRow("Sync Now", isEnabled: model.status != .disconnected) { model.syncNow() }
         MenuRow("Show in Finder") { NSWorkspace.shared.open(model.libraryRoot) }
+        MenuRow("Library…") { open(Self.libraryWindowID) }
         MenuRow("Free Up Space on P1…", isEnabled: model.status != .disconnected) {
             open(Self.reclaimWindowID)
         }
