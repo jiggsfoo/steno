@@ -5,6 +5,36 @@ public struct QueueProgress: Sendable, Equatable {
     public let total: Int
 }
 
+/// What one `process`/`retry` call produced. The spec says errors surface
+/// through `lastError` and notice rows; that needs the error to leave this
+/// actor at all, which the old `Sidecar`-only return silently did not do.
+///
+/// `errorDescription` rather than the thrown `Error` itself: captured at the
+/// point of the catch inside `run`, where it is still synchronously
+/// available, so nothing outside this file has to reason about an arbitrary
+/// `any Error`'s Sendability crossing the actor boundary — the same
+/// `error.localizedDescription` shape every other failure path in this app
+/// already surfaces through `lastError`.
+public struct TranscriptionOutcome: Sendable, Equatable {
+    public let sidecar: Sidecar
+    /// nil on success, or when `process` declined to run at all because this
+    /// recording was already capped from a PREVIOUS call.
+    public let errorDescription: String?
+    /// True only when THIS call's own failure was the one that pushed
+    /// `transcriptionAttempts` to the cap — i.e. the automatic sweep will not
+    /// try this recording again until a human retries it. `AppModel`'s sweep
+    /// uses this to decide when a failure is worth a `lastError`: surfacing
+    /// every transient failure the sweep is about to retry on its own anyway
+    /// would just be noise; a recording the sweep has now given up on is not.
+    public let didExhaustAttempts: Bool
+
+    init(sidecar: Sidecar, errorDescription: String? = nil, didExhaustAttempts: Bool = false) {
+        self.sidecar = sidecar
+        self.errorDescription = errorDescription
+        self.didExhaustAttempts = didExhaustAttempts
+    }
+}
+
 /// Serialised transcription and filing.
 ///
 /// The work list is DERIVED, never persisted. "What needs transcribing" is
@@ -66,7 +96,7 @@ public actor TranscriptionQueue {
     /// `transcriptionAttempts`'s cap, so a permanently undecodable recording
     /// stops being retried forever. The CALLER persists the returned sidecar
     /// and updates the index — this actor owns no `Library`.
-    public func process(_ sidecar: Sidecar) async -> Sidecar {
+    public func process(_ sidecar: Sidecar) async -> TranscriptionOutcome {
         await run(sidecar, respectingCap: true)
     }
 
@@ -78,7 +108,7 @@ public actor TranscriptionQueue {
     /// fails again counts from zero instead of inheriting an already-spent
     /// budget; a retry that succeeds is already left clean by the normal
     /// success path in `run`, which clears the field outright.
-    public func retry(_ sidecar: Sidecar) async -> Sidecar {
+    public func retry(_ sidecar: Sidecar) async -> TranscriptionOutcome {
         var reset = sidecar
         reset.transcriptionAttempts = nil
         return await run(reset, respectingCap: false)
@@ -104,7 +134,7 @@ public actor TranscriptionQueue {
     /// it be gone first, so the old transcript stays valid and readable right
     /// up to the instant the new one lands — no window where a crash or a
     /// failed backend call leaves neither on disk.
-    private func run(_ sidecar: Sidecar, respectingCap: Bool) async -> Sidecar {
+    private func run(_ sidecar: Sidecar, respectingCap: Bool) async -> TranscriptionOutcome {
         var updated = sidecar
 
         // 1. Transcript. `respectingCap` doubles as "is this `process`, not
@@ -121,7 +151,10 @@ public actor TranscriptionQueue {
             // `Sidecar.transcriptionAttempts`'s own contract.
             if respectingCap {
                 guard (sidecar.transcriptionAttempts ?? 0) < maxAttempts else {
-                    return sidecar
+                    // Already capped from a PREVIOUS call, not this one — no
+                    // new error to report, and definitely not a fresh
+                    // exhaustion event to surface again on every later sweep.
+                    return TranscriptionOutcome(sidecar: sidecar)
                 }
             }
 
@@ -131,8 +164,12 @@ public actor TranscriptionQueue {
                     audio: audio, locale: Self.locale)
                 transcript = try store.write(body, for: sidecar, at: Date())
             } catch {
-                updated.transcriptionAttempts = (sidecar.transcriptionAttempts ?? 0) + 1
-                return updated
+                let attempts = (sidecar.transcriptionAttempts ?? 0) + 1
+                updated.transcriptionAttempts = attempts
+                return TranscriptionOutcome(
+                    sidecar: updated,
+                    errorDescription: error.localizedDescription,
+                    didExhaustAttempts: attempts >= maxAttempts)
             }
         }
 
@@ -166,6 +203,6 @@ public actor TranscriptionQueue {
             _ = try? filer.write(for: updated, transcript: transcript)
         }
 
-        return updated
+        return TranscriptionOutcome(sidecar: updated)
     }
 }

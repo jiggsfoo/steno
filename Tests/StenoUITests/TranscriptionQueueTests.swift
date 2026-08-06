@@ -109,7 +109,7 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
     // `pendingReadmitsATranscriptWrittenButNeverPersistedToTheSidecar`), so a
     // fully-persisted "done" sidecar has to actually carry it to prove this
     // case is distinct from that one.
-    done = await queue.process(done)
+    done = await queue.process(done).sidecar
 
     let pending = await queue.pending(from: [done, todo])
     #expect(pending.map(\.signature) == ["todo"])
@@ -138,7 +138,7 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
 
     #expect(await queue.pending(from: [sidecar]).map(\.signature) == [sidecar.signature])
 
-    let updated = await queue.process(sidecar)
+    let updated = await queue.process(sidecar).sidecar
     #expect(await counter.count == 0)          // reused the existing transcript
     #expect(updated.transcribedAt != nil)      // and is now persisted
 }
@@ -147,7 +147,7 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
     let root = tempRoot()
     let queue = makeQueue(root: root, transcriber: CountingTranscriber(counter: CallCounter()))
 
-    let updated = await queue.process(queueSidecar())
+    let updated = await queue.process(queueSidecar()).sidecar
 
     #expect(updated.transcribedAt != nil)
     #expect(updated.transcriptBackend == "counting")
@@ -166,7 +166,7 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
                           transcriber: CountingTranscriber(counter: counter, failing: true))
     var sidecar = queueSidecar()
 
-    for _ in 0..<5 { sidecar = await queue.process(sidecar) }
+    for _ in 0..<5 { sidecar = await queue.process(sidecar).sidecar }
 
     #expect(sidecar.transcriptionAttempts == 3)
     #expect(await counter.count == 3)
@@ -184,7 +184,7 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
     let audioBytes = Data("fake audio bytes".utf8)
     try audioBytes.write(to: audioURL)
 
-    let after = await queue.process(original)
+    let after = await queue.process(original).sidecar
 
     #expect(after.signature == original.signature)
     #expect(after.relativePath == original.relativePath)
@@ -205,7 +205,7 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
     let workingQueue = makeQueue(root: root, transcriber: CountingTranscriber(counter: CallCounter()))
     var sidecar = queueSidecar()
 
-    sidecar = await workingQueue.process(sidecar)
+    sidecar = await workingQueue.process(sidecar).sidecar
     #expect(sidecar.transcribedAt != nil)
     #expect(sidecar.transcriptBackend == "counting")
 
@@ -214,7 +214,7 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
 
     let failingQueue = makeQueue(
         root: root, transcriber: CountingTranscriber(counter: CallCounter(), failing: true))
-    let afterFailedRetry = await failingQueue.retry(sidecar)
+    let afterFailedRetry = await failingQueue.retry(sidecar).sidecar
 
     // The retry attempt is recorded as failed...
     #expect(afterFailedRetry.transcriptionAttempts == 1)
@@ -244,12 +244,12 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
     let queue = makeQueue(root: root, transcriber: RetitlingTranscriber(texts: texts))
     let sidecar = queueSidecar()
 
-    let first = await queue.process(sidecar)
+    let first = await queue.process(sidecar).sidecar
     #expect(first.topic == "Grocery List")
 
     // A different backend run over the same recording -- new text, same
     // directive, so the topic must resolve identically while the title does not.
-    let second = await queue.retry(first)
+    let second = await queue.retry(first).sidecar
     #expect(second.topic == "Grocery List")
     #expect(second.title != first.title)
 
@@ -273,17 +273,76 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
                           transcriber: CountingTranscriber(counter: counter, failing: true))
     var sidecar = queueSidecar()
 
-    for _ in 0..<3 { sidecar = await queue.process(sidecar) }
+    for _ in 0..<3 { sidecar = await queue.process(sidecar).sidecar }
     #expect(sidecar.transcriptionAttempts == 3)
     #expect(await counter.count == 3)
 
     // `process` refuses: capped, no further backend call.
-    sidecar = await queue.process(sidecar)
+    sidecar = await queue.process(sidecar).sidecar
     #expect(await counter.count == 3)
 
     // `retry` ignores the cap: the backend is invoked again, and the
     // attempt count starts fresh rather than climbing from the spent budget.
-    sidecar = await queue.retry(sidecar)
+    sidecar = await queue.retry(sidecar).sidecar
     #expect(await counter.count == 4)
     #expect(sidecar.transcriptionAttempts == 1)
+}
+
+/// IMPORTANT: every transcription failure used to be discarded -- `run`
+/// caught the error, bumped `transcriptionAttempts`, and returned only the
+/// bare `Sidecar`, so nothing downstream ever learned WHY a recording failed.
+/// The spec: "Errors surface through the existing lastError and notice
+/// rows" -- which requires the error to leave this actor at all.
+@Test func aFailedTranscriptionCarriesTheErrorDescription() async throws {
+    let root = tempRoot()
+    let queue = makeQueue(root: root,
+                          transcriber: CountingTranscriber(counter: CallCounter(), failing: true))
+
+    let outcome = await queue.process(queueSidecar())
+
+    #expect(outcome.errorDescription != nil)
+    #expect(outcome.sidecar.transcriptionAttempts == 1)
+}
+
+@Test func aSuccessfulTranscriptionCarriesNoErrorDescription() async throws {
+    let root = tempRoot()
+    let queue = makeQueue(root: root, transcriber: CountingTranscriber(counter: CallCounter()))
+
+    let outcome = await queue.process(queueSidecar())
+
+    #expect(outcome.errorDescription == nil)
+}
+
+/// `didExhaustAttempts` is what `AppModel`'s automatic sweep uses to decide
+/// whether a failure is worth a `lastError`: true only on the ONE call whose
+/// OWN failure pushes `transcriptionAttempts` to the cap -- not on every
+/// later call against an already-capped recording, which `process` declines
+/// to even attempt and which would otherwise spam `lastError` on every
+/// subsequent sweep for a recording nothing new happened to.
+@Test func onlyTheCallThatExhaustsTheCapReportsExhaustion() async throws {
+    let root = tempRoot()
+    let counter = CallCounter()
+    let queue = makeQueue(root: root,
+                          transcriber: CountingTranscriber(counter: counter, failing: true))
+    var sidecar = queueSidecar()
+
+    let first = await queue.process(sidecar)
+    #expect(first.didExhaustAttempts == false)
+    sidecar = first.sidecar
+
+    let second = await queue.process(sidecar)
+    #expect(second.didExhaustAttempts == false)
+    sidecar = second.sidecar
+
+    let third = await queue.process(sidecar)   // maxAttempts is 3 -- this is the one
+    #expect(third.didExhaustAttempts == true)
+    #expect(third.errorDescription != nil)
+    sidecar = third.sidecar
+
+    // A later call against the now-capped recording must not report a FRESH
+    // exhaustion -- `process` declines to even call the transcriber.
+    let fourth = await queue.process(sidecar)
+    #expect(fourth.didExhaustAttempts == false)
+    #expect(fourth.errorDescription == nil)
+    #expect(await counter.count == 3)
 }

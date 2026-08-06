@@ -733,11 +733,21 @@ public final class AppModel: @unchecked Sendable {
                 sidecarsInFlight.insert(sidecar.signature)
                 defer { sidecarsInFlight.remove(sidecar.signature) }
 
-                let updated = await queue.process(sidecar)
+                let outcome = await queue.process(sidecar)
+                let updated = outcome.sidecar
                 await Task.detached { try? library.updateSidecar(updated) }.value
 
                 try? self.index?.upsert(updated)
                 self.reloadRecent()
+
+                // The spec: "Errors surface through the existing lastError and
+                // notice rows." Only on CAP EXHAUSTION, though -- every
+                // transient failure the sweep is about to retry on its own
+                // next launch/sync would just be noise; a recording the sweep
+                // has now given up on (until a human retries it) is not.
+                if outcome.didExhaustAttempts, let description = outcome.errorDescription {
+                    self.lastError = "\(updated.deviceFilename) couldn't be transcribed: \(description)"
+                }
             }
         }
     }
@@ -777,11 +787,23 @@ public final class AppModel: @unchecked Sendable {
                 transcriber: transcriber)
             // `retry`, not `process`: this is the deliberate user-initiated path
             // and must ignore the attempt cap. It clears the counter itself.
-            let updated = await queue.retry(sidecar)
+            let outcome = await queue.retry(sidecar)
+            let updated = outcome.sidecar
             await Task.detached { try? library.updateSidecar(updated) }.value
 
             try? self.index?.upsert(updated)
             self.reloadRecent()
+
+            // This is one deliberate click on one recording -- unlike the
+            // automatic sweep, there is no "wait for the next pass" to fall
+            // back on, so every failure here is worth surfacing, not just the
+            // ones that exhaust the retry cap. The spec: "Errors surface
+            // through the existing lastError and notice rows", and
+            // `TranscriberError` already carries the copy (e.g. "Deepgram
+            // needs an API key. Add one in Settings.") that nothing rendered.
+            if let description = outcome.errorDescription {
+                self.lastError = description
+            }
         }
     }
 
