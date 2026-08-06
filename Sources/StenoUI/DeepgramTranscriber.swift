@@ -34,10 +34,26 @@ public struct DeepgramTranscriber: Transcriber {
             throw TranscriberError.backendFailed("no HTTP response")
         }
         guard http.statusCode == 200 else {
-            throw TranscriberError.backendFailed("HTTP \(http.statusCode)")
+            throw Self.error(forStatus: http.statusCode)
         }
 
         return try Self.body(fromResponse: data, locale: locale.identifier)
+    }
+
+    /// A revoked or mistyped key comes back as 401, not a transport failure.
+    /// `.missingCredential` already carries the right copy ("Add one in
+    /// Settings") — collapsing it into `.backendFailed` would tell the user
+    /// to retry a call that will never succeed until the key itself is
+    /// fixed. Every other non-200 status stays a generic backend failure;
+    /// no case is added for 429 or 5xx since nothing consumes them
+    /// differently yet.
+    static func error(forStatus status: Int) -> TranscriberError {
+        switch status {
+        case 401:
+            return .missingCredential("Deepgram")
+        default:
+            return .backendFailed("HTTP \(status)")
+        }
     }
 
     /// The key travels in the Authorization header, never the URL — query

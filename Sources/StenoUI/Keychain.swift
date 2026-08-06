@@ -20,13 +20,30 @@ public enum Keychain {
         return value
     }
 
+    /// Update-then-add-on-not-found, never delete-then-add: if the write to
+    /// replace an existing key fails partway, delete-then-add would have
+    /// already destroyed the working key, silently making the cloud backend
+    /// unavailable. `remove(_:)` stays the only way a key is deliberately
+    /// destroyed.
     public static func set(_ value: String, for account: String) throws {
-        remove(account)
-        guard !value.isEmpty else { return }
-        var query = baseQuery(account: account)
-        query[kSecValueData as String] = Data(value.utf8)
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else { throw KeychainError.writeFailed(status) }
+        guard !value.isEmpty else {
+            remove(account)
+            return
+        }
+
+        let searchQuery = baseQuery(account: account)
+        let updateStatus = SecItemUpdate(
+            searchQuery as CFDictionary,
+            [kSecValueData as String: Data(value.utf8)] as CFDictionary)
+        if updateStatus == errSecSuccess { return }
+        guard updateStatus == errSecItemNotFound else {
+            throw KeychainError.writeFailed(updateStatus)
+        }
+
+        var addQuery = baseQuery(account: account)
+        addQuery[kSecValueData as String] = Data(value.utf8)
+        let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
+        guard addStatus == errSecSuccess else { throw KeychainError.writeFailed(addStatus) }
     }
 
     public static func remove(_ account: String) {
