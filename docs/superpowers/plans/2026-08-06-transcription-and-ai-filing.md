@@ -2038,7 +2038,15 @@ public struct Filer: Sendable {
     /// `signature` in the front matter is what makes writing idempotent — it is
     /// how a rewrite tells "this is my note" from "this is someone else's".
     static func render(sidecar: Sidecar, transcript: Transcript) -> String {
-        let recorded = sidecar.recordedAt.map(Library.iso8601.string(from:)) ?? ""
+        // `Date.ISO8601Format()`, NOT a shared ISO8601DateFormatter.
+        //
+        // That type does not conform to Sendable, so a static instance needs
+        // `nonisolated(unsafe)` — and unlike DateFormatter, which was given
+        // internal locking years ago, ISO8601DateFormatter never was. Concurrent
+        // `.string(from:)` calls on one instance are documented to emit
+        // malformed output. The value-type format style has no shared state,
+        // needs no escape hatch, and produces the identical string.
+        let recorded = sidecar.recordedAt.map { $0.ISO8601Format() } ?? ""
         return """
             ---
             signature: \(sidecar.signature)
@@ -2070,11 +2078,7 @@ public enum FilerError: Error, Equatable {
 }
 ```
 
-Add to `Library`, beside the existing `encoder` and `decoder` — it already owns the date handling, so the formatter belongs there rather than as a second copy in `Filer`:
-
-```swift
-    static let iso8601 = ISO8601DateFormatter()
-```
+**`Library.swift` is not modified by this task.** An earlier draft added a shared `ISO8601DateFormatter` here; it was removed once that type turned out to require a `nonisolated(unsafe)` annotation to compile under strict concurrency. `Date.ISO8601Format()` in `render` does the same job with no shared state.
 
 - [ ] **Step 4: Run the tests**
 
