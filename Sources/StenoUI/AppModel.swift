@@ -75,6 +75,16 @@ public final class AppModel: @unchecked Sendable {
     private var isPolling = false
 
     public init() {
+        // MUST be the first thing here, ahead of the read below. Renaming the
+        // bundle identifier moved this app to a fresh `UserDefaults` domain,
+        // so without the carry-over the stored library root is invisible, the
+        // fallback default folder wins, and the app re-syncs the whole device
+        // into somewhere the user never chose. Synchronous by necessity: there
+        // is no point in the launch at which "settings, but later" is useful.
+        LegacyMigration.runIfNeeded(
+            logURL: DiagnosticLog.defaultURL,
+            applicationSupport: Self.indexURL().deletingLastPathComponent())
+
         let stored = UserDefaults.standard.string(forKey: Self.rootKey)
         self.libraryRoot = stored.map { URL(fileURLWithPath: $0) }
             ?? FileManager.default.homeDirectoryForCurrentUser
