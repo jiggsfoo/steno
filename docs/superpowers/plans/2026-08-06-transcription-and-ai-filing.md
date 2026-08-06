@@ -953,10 +953,33 @@ Append to `Tests/StenoUITests/LibraryIndexTests.swift`:
     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
     let url = dir.appendingPathComponent("index.sqlite")
 
-    // A v1 index holding one row.
-    let v1 = try LibraryIndex(url: url, schemaVersionOverride: 1)
-    try v1.upsert(indexSampleSidecar())
-    #expect(v1.contains(signature: indexSampleSidecar().signature))
+    // Genuine pre-migration schema, built OUTSIDE LibraryIndex so it really
+    // lacks the four spec-2 columns.
+    //
+    // Going through LibraryIndex(url:schemaVersionOverride:) does NOT work
+    // here: migrate(to:) has exactly one CREATE TABLE and it already includes
+    // the new columns, so that path produces a full v2 table and merely stamps
+    // a lower user_version. The migration would then have nothing real to do,
+    // the DROP would destroy the row just inserted, and the final assertions
+    // would be checking data the test itself had written one line earlier.
+    var raw: OpaquePointer?
+    #expect(sqlite3_open(url.path, &raw) == SQLITE_OK)
+    #expect(sqlite3_exec(raw, """
+        CREATE TABLE recordings (
+            signature TEXT PRIMARY KEY,
+            device_filename TEXT NOT NULL,
+            relative_path TEXT NOT NULL,
+            length_bytes INTEGER NOT NULL,
+            duration_seconds REAL,
+            recorded_at REAL,
+            synced_at REAL NOT NULL,
+            device_serial TEXT NOT NULL,
+            device_model TEXT NOT NULL,
+            timezone TEXT NOT NULL
+        );
+        PRAGMA user_version = 1;
+        """, nil, nil, nil) == SQLITE_OK)
+    sqlite3_close(raw)
 
     // Reopening at v2 must not throw on the missing columns.
     let v2 = try LibraryIndex(url: url)
@@ -999,6 +1022,7 @@ Append to `Tests/StenoUITests/LibraryIndexTests.swift`:
     #expect(read.timeZoneIdentifier == sidecar.timeZoneIdentifier)
     #expect(read.title == "T")
     #expect(read.topic == "P")
+    #expect(read.transcribedAt == sidecar.transcribedAt)
     #expect(read.transcriptBackend == "B")
 }
 ```
