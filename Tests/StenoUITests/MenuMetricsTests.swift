@@ -350,3 +350,41 @@ private func sampleMenu() -> MenuBarView {
         }
     }
 }
+
+/// A two-line row must not crowd its own second line into the row beneath it.
+///
+/// `MenuRow`'s `VStack` originally used a spacing of 1, which the fonts' own
+/// leading turned into 4.0pt of clear space between the title's descenders and
+/// the detail's ascenders. On a recent row -- "Aug 5 13:00" over "Distribution
+/// Networking Explained", both carrying a `g` -- that read as the two lines
+/// touching, and the second line looked like it belonged to the next row.
+///
+/// Measured off the ink rather than asserted against the constant, because the
+/// constant is not what the eye judges: the fonts add ~3pt of leading on top of
+/// whatever the `VStack` is told, so `detailSpacing` and the visible gap are
+/// different numbers.
+@MainActor
+@Test func aTwoLineRowGivesItsSecondLineRoomToBreathe() {
+    let rows = VStack(alignment: .leading, spacing: MenuMetrics.rowSpacing) {
+        MenuRow("Aug 5  19:59", value: "0:05",
+                detail: "Test recording", detailLineLimit: 1) {}
+        MenuRow("Aug 5  13:00", value: "66:25",
+                detail: "Distribution Networking Explained", detailLineLimit: 1) {}
+    }
+    .frame(width: menuWidth)
+
+    let bands = inkBands(of: rows)
+    #expect(bands.count == 4, "expected two title lines and two detail lines")
+    guard bands.count == 4 else { return }
+
+    let withinRow = bands[1].top - bands[0].bottom
+    let betweenRows = bands[2].top - bands[1].bottom
+
+    #expect(withinRow >= 6.0 - onePixel,
+            Comment(rawValue: "a title and its detail are \(withinRow)pt apart -- too tight to read as separate lines"))
+
+    // Still unmistakably one row: the pair must sit closer to each other than
+    // to the next row, or the detail reads as a heading for the row below.
+    #expect(withinRow < betweenRows - onePixel,
+            Comment(rawValue: "within-row \(withinRow)pt vs between-row \(betweenRows)pt -- the detail no longer groups with its own title"))
+}
