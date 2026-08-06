@@ -18,6 +18,7 @@ import Testing
     "1999-01-31",
     "undated",
     "UNDATED",
+    "Old:Name",
 ])
 func hostileOrCollidingNamesAreRejected(_ raw: String) {
     #expect(TopicName.sanitised(raw) == nil, "should have been rejected: \(raw)")
