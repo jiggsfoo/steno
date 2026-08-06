@@ -40,7 +40,15 @@ public final class AppModel: @unchecked Sendable {
         }
     }
 
-    private static let rootKey = "libraryRoot"
+    /// One definition, shared with the migration that has to find this key in
+    /// the old domain -- two copies of the string could drift.
+    private static let rootKey = LegacyMigration.libraryRootKey
+
+    /// Where recordings go when the user has never chosen a folder. Stored
+    /// nowhere: an unset `libraryRoot` means "this", which is exactly why the
+    /// migration has to move the folder this used to name.
+    static let defaultLibraryRoot = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Recordings/Steno")
     private var monitor: DeviceMonitor?
     private var index: LibraryIndex?
     private var syncTask: Task<Void, Never>?
@@ -83,12 +91,11 @@ public final class AppModel: @unchecked Sendable {
         // is no point in the launch at which "settings, but later" is useful.
         LegacyMigration.runIfNeeded(
             logURL: DiagnosticLog.defaultURL,
-            applicationSupport: Self.indexURL().deletingLastPathComponent())
+            applicationSupport: Self.indexURL().deletingLastPathComponent(),
+            defaultLibraryRoot: Self.defaultLibraryRoot)
 
         let stored = UserDefaults.standard.string(forKey: Self.rootKey)
-        self.libraryRoot = stored.map { URL(fileURLWithPath: $0) }
-            ?? FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent("Recordings/Steno")
+        self.libraryRoot = stored.map { URL(fileURLWithPath: $0) } ?? Self.defaultLibraryRoot
     }
 
     public func start() {

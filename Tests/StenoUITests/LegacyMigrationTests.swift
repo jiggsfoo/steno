@@ -34,6 +34,11 @@ private final class Fixture {
     var legacyLogDirectory: URL { root.appendingPathComponent("Logs/HiDock") }
     var applicationSupport: URL { root.appendingPathComponent("Application Support/Steno") }
     var legacyApplicationSupport: URL { root.appendingPathComponent("Application Support/HiDock") }
+    /// The computed default library folder, in the same `<root>/Recordings/Steno`
+    /// shape the app uses -- so the `Recordings/HiDock` derivation under test is
+    /// the production one, not a test-only copy.
+    var defaultLibraryRoot: URL { root.appendingPathComponent("Recordings/Steno") }
+    var legacyDefaultLibraryRoot: URL { root.appendingPathComponent("Recordings/HiDock") }
 
     func migration(legacyDefaults override: UserDefaults?? = nil) -> LegacyMigration {
         LegacyMigration(
@@ -43,6 +48,8 @@ private final class Fixture {
             legacyLogDirectory: LegacyMigration.sibling(of: logURL.deletingLastPathComponent()),
             applicationSupport: applicationSupport,
             legacyApplicationSupport: LegacyMigration.sibling(of: applicationSupport),
+            defaultLibraryRoot: defaultLibraryRoot,
+            legacyDefaultLibraryRoot: LegacyMigration.sibling(of: defaultLibraryRoot),
             fileManager: .default)
     }
 
@@ -155,6 +162,101 @@ private final class Fixture {
     // The pointer moves; the recordings do not.
     #expect(fixture.defaults.string(forKey: "libraryRoot") == library.path)
     #expect(fixture.read(library.appendingPathComponent("meeting.hda")) == "an hour-long meeting")
+}
+
+// MARK: - The library folder nobody chose
+
+/// The common case on a real machine: the folder picker was never opened, so
+/// nothing was ever stored and the recordings sit in the folder the OLD name
+/// computed. Nothing to carry, and everything to move.
+@Test func movesTheLegacyDefaultRecordingsFolderWhenNoRootWasEverChosen() {
+    let fixture = Fixture()
+    let day = fixture.legacyDefaultLibraryRoot.appendingPathComponent("2026-08-04")
+    fixture.write("an hour-long meeting", to: day.appendingPathComponent("a.mp3"))
+    fixture.write("{}", to: day.appendingPathComponent("a.json"))
+
+    let lines = fixture.migration().run()
+
+    let moved = fixture.defaultLibraryRoot.appendingPathComponent("2026-08-04")
+    #expect(fixture.read(moved.appendingPathComponent("a.mp3")) == "an hour-long meeting")
+    // The sidecar rides along with its recording.
+    #expect(fixture.read(moved.appendingPathComponent("a.json")) == "{}")
+    // Moved, not copied.
+    #expect(!fixture.exists(fixture.legacyDefaultLibraryRoot))
+    // No pointer stored: the recordings are exactly where the new default
+    // computes, so an explicit root would only be one more thing to go stale.
+    #expect(fixture.defaults.string(forKey: "libraryRoot") == nil)
+    #expect(lines.contains { $0.contains("migrate.library") && $0.contains("result=moved") })
+}
+
+/// Both folders present: whatever is at the new default is someone's data. The
+/// old recordings are not merged into it and it is not overwritten -- the app
+/// is pointed back at the folder its recordings are actually in.
+@Test func pointsAtTheLegacyRecordingsFolderRatherThanMergingWhenBothExist() {
+    let fixture = Fixture()
+    fixture.write("old recording",
+                  to: fixture.legacyDefaultLibraryRoot.appendingPathComponent("old.mp3"))
+    fixture.write("new recording",
+                  to: fixture.defaultLibraryRoot.appendingPathComponent("new.mp3"))
+
+    let lines = fixture.migration().run()
+
+    #expect(fixture.defaults.string(forKey: "libraryRoot") == fixture.legacyDefaultLibraryRoot.path)
+    // Neither side moved, neither side merged, nothing deleted.
+    #expect(fixture.read(fixture.legacyDefaultLibraryRoot.appendingPathComponent("old.mp3"))
+            == "old recording")
+    #expect(fixture.read(fixture.defaultLibraryRoot.appendingPathComponent("new.mp3"))
+            == "new recording")
+    #expect(!fixture.exists(fixture.defaultLibraryRoot.appendingPathComponent("old.mp3")))
+    #expect(lines.contains { $0.contains("migrate.library") && $0.contains("result=pointed") })
+}
+
+/// A genuine fresh install has no legacy folder. Nothing is created, and no
+/// pointer at a folder that does not exist is invented -- the new computed
+/// default stands on its own.
+@Test func leavesTheLibraryAloneOnAFreshInstallWithNoLegacyRecordingsFolder() {
+    let fixture = Fixture()
+
+    let lines = fixture.migration().run()
+
+    #expect(fixture.defaults.string(forKey: "libraryRoot") == nil)
+    #expect(!fixture.exists(fixture.defaultLibraryRoot))
+    #expect(!fixture.exists(fixture.legacyDefaultLibraryRoot))
+    #expect(lines.contains { $0.contains("migrate.library") && $0.contains("nothing-to-move") })
+}
+
+/// An explicit root -- here one carried out of the old domain in the same pass
+/// -- names where the recordings actually are, and a leftover default folder is
+/// not it. Also pins the ordering: this only holds if the carry runs first.
+@Test func leavesTheLegacyDefaultFolderAloneWhenAnExplicitRootWasCarried() {
+    let fixture = Fixture()
+    let chosen = fixture.root.appendingPathComponent("Recordings/Elsewhere")
+    fixture.write("the real library", to: chosen.appendingPathComponent("a.mp3"))
+    fixture.write("a leftover",
+                  to: fixture.legacyDefaultLibraryRoot.appendingPathComponent("stale.mp3"))
+    fixture.legacyDefaults.set(chosen.path, forKey: "libraryRoot")
+
+    let lines = fixture.migration().run()
+
+    #expect(fixture.defaults.string(forKey: "libraryRoot") == chosen.path)
+    #expect(fixture.read(fixture.legacyDefaultLibraryRoot.appendingPathComponent("stale.mp3"))
+            == "a leftover")
+    #expect(!fixture.exists(fixture.defaultLibraryRoot))
+    #expect(lines.contains { $0.contains("migrate.library") && $0.contains("explicit root set") })
+}
+
+/// A second pass must not undo the first: the folder has already moved, so the
+/// legacy path is gone and no pointer at it may be invented.
+@Test func aSecondPassLeavesTheMovedRecordingsFolderWhereTheFirstPutIt() {
+    let fixture = Fixture()
+    fixture.write("meeting", to: fixture.legacyDefaultLibraryRoot.appendingPathComponent("a.mp3"))
+
+    _ = fixture.migration().run()
+    _ = fixture.migration().run()
+
+    #expect(fixture.read(fixture.defaultLibraryRoot.appendingPathComponent("a.mp3")) == "meeting")
+    #expect(!fixture.exists(fixture.legacyDefaultLibraryRoot))
+    #expect(fixture.defaults.string(forKey: "libraryRoot") == nil)
 }
 
 // MARK: - Fresh install and idempotency

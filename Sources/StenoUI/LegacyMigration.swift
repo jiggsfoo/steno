@@ -18,8 +18,10 @@ import Foundation
 /// the standing rule for this project: a redundant download is a better
 /// failure than a confident lie.
 ///
-/// The user's recordings folder is never touched. Only the *pointer* to it is
-/// carried across; wherever it is, it stays.
+/// A recordings folder the user chose by hand is never touched. Only the
+/// *pointer* to it is carried across; wherever it is, it stays. The folder the
+/// app picked for a user who never chose one is a different case -- see
+/// `adoptLegacyDefaultLibrary()`.
 struct LegacyMigration {
     /// The former bundle identifier, which is also the name of the former
     /// `UserDefaults.standard` domain.
@@ -33,6 +35,14 @@ struct LegacyMigration {
     /// -- a fresh install has nothing to migrate and should not keep looking.
     static let completedKey = "didMigrateFromHiDockIdentity"
 
+    /// Where the chosen recordings folder is stored, in both domains. The one
+    /// definition both this and `AppModel` read, so the two cannot drift.
+    ///
+    /// Written ONLY when the folder is changed by hand, which is why its
+    /// absence cannot be read as "no library" -- see
+    /// `adoptLegacyDefaultLibrary()`.
+    static let libraryRootKey = "libraryRoot"
+
     /// Settings carried across.
     ///
     /// `libraryRoot` is the load-bearing one: lose it and the app re-syncs the
@@ -40,7 +50,7 @@ struct LegacyMigration {
     /// deliberately absent -- it lives in LaunchServices keyed by bundle
     /// identifier, not in this defaults domain, and there is no supported way
     /// to read (let alone transfer) another bundle's registration.
-    static let carriedKeys = ["libraryRoot"]
+    static let carriedKeys = [libraryRootKey]
 
     /// The former log file names, paired positionally with the new ones
     /// derived from `logURL`: `hidock.log` -> `steno.log`, and the rotation
@@ -59,6 +69,12 @@ struct LegacyMigration {
     let legacyLogDirectory: URL
     let applicationSupport: URL
     let legacyApplicationSupport: URL
+    /// The folder the app falls back to when no `libraryRoot` is stored --
+    /// `~/Recordings/Steno` in production, and the same value `AppModel`
+    /// computes after this has run.
+    let defaultLibraryRoot: URL
+    /// What that fallback was before the rename: `~/Recordings/HiDock`.
+    let legacyDefaultLibraryRoot: URL
     let fileManager: FileManager
 
     /// What one move did. Every case except `.moved` left the filesystem
@@ -91,7 +107,7 @@ struct LegacyMigration {
     /// creates the new log directory on demand, and a directory conjured into
     /// existence early would make the move below see an occupied destination
     /// and skip the very thing it was called to do.
-    static func runIfNeeded(logURL: URL, applicationSupport: URL) {
+    static func runIfNeeded(logURL: URL, applicationSupport: URL, defaultLibraryRoot: URL) {
         let migration = LegacyMigration(
             defaults: .standard,
             legacyDefaults: UserDefaults(suiteName: legacyDomain),
@@ -99,6 +115,8 @@ struct LegacyMigration {
             legacyLogDirectory: sibling(of: logURL.deletingLastPathComponent()),
             applicationSupport: applicationSupport,
             legacyApplicationSupport: sibling(of: applicationSupport),
+            defaultLibraryRoot: defaultLibraryRoot,
+            legacyDefaultLibraryRoot: sibling(of: defaultLibraryRoot),
             fileManager: .default)
 
         for line in migration.run() {
@@ -120,6 +138,7 @@ struct LegacyMigration {
 
         var lines = [DiagnosticLog.format(event: "migrate.begin", pairs: ["from": Self.legacyDomain])]
         lines += carrySettings()
+        lines += adoptLegacyDefaultLibrary()
         lines += moveDirectories()
         lines += renameLogFiles()
 
@@ -155,6 +174,64 @@ struct LegacyMigration {
             return DiagnosticLog.format(
                 event: "migrate.setting", pairs: ["key": key, "result": "carried"])
         }
+    }
+
+    // MARK: - The library folder nobody chose
+
+    /// Carries the recordings across for the user who never picked a folder.
+    ///
+    /// `libraryRoot` is written only when the folder is changed by hand, so its
+    /// absence does not mean "no library" -- it means the app has been using
+    /// the computed default all along, and the rename moved that default from
+    /// `Recordings/HiDock` to `Recordings/Steno`. Carrying the stored key alone
+    /// misses this case entirely, and it is the COMMON case: nothing to carry,
+    /// a new default pointing at a folder that does not exist, an empty index,
+    /// and every recording re-synced off the device.
+    ///
+    /// Deliberately ordered after `carrySettings()`: an explicit root -- stored
+    /// since the rename, or just carried out of the old domain -- names where
+    /// the recordings actually are, and this folder is not it.
+    ///
+    /// Three outcomes, none of which deletes anything:
+    /// - legacy folder, no new folder: MOVE it, exactly as the log and
+    ///   Application Support directories are moved. The computed default then
+    ///   finds it, so no pointer is stored.
+    /// - both folders: the new one is someone's data. Never merge, never
+    ///   overwrite -- store the legacy path as an explicit `libraryRoot` so the
+    ///   app keeps using the folder the recordings are actually in.
+    /// - neither: a genuine fresh install. The new default stands.
+    private func adoptLegacyDefaultLibrary() -> [String] {
+        guard defaults.object(forKey: Self.libraryRootKey) == nil else {
+            return [DiagnosticLog.format(
+                event: "migrate.library",
+                pairs: ["result": "skipped", "why": "explicit root set"])]
+        }
+
+        switch move(legacyDefaultLibraryRoot, to: defaultLibraryRoot) {
+        case .nothingToMove:
+            return [DiagnosticLog.format(
+                event: "migrate.library", pairs: ["result": "nothing-to-move"])]
+        case .moved:
+            return [DiagnosticLog.format(
+                event: "migrate.library",
+                pairs: ["result": "moved", "to": defaultLibraryRoot.path])]
+        case .destinationExists:
+            return [pointAtLegacyLibrary(why: "destination exists")]
+        case .failed(let reason):
+            // The move threw, so the recordings are still at the legacy path.
+            // Pointing at them there is the honest outcome: better a stale
+            // folder name than a default that resolves to nothing.
+            return [pointAtLegacyLibrary(why: reason)]
+        }
+    }
+
+    /// Records the legacy folder as the explicit `libraryRoot`, leaving both
+    /// folders exactly as they were found.
+    private func pointAtLegacyLibrary(why: String) -> String {
+        defaults.set(legacyDefaultLibraryRoot.path, forKey: Self.libraryRootKey)
+        return DiagnosticLog.format(
+            event: "migrate.library",
+            pairs: ["result": "pointed", "why": why, "at": legacyDefaultLibraryRoot.path])
     }
 
     // MARK: - Directories
