@@ -119,10 +119,19 @@ public struct SettingsView: View {
         // Closing the window is the other way this field's content could be
         // lost — SwiftUI's `Settings` scene can also retain and later tear
         // down this view without a focus-loss event ever firing for a field
-        // that was never blurred first. Committing here is idempotent: it
-        // just re-saves whatever the field currently shows, which is a no-op
-        // when nothing changed since the last commit.
-        .onDisappear { commitDeepgramKey() }
+        // that was never blurred first.
+        //
+        // The empty guard is NOT belt-and-braces. `Keychain.set("")`
+        // short-circuits to `remove`, so an unconditional commit here makes
+        // closing this window a destructive act: if `Keychain.string(for:)`
+        // returned nil when the view initialised — a transient read error,
+        // with a key really on disk — then merely opening and closing
+        // Settings would delete a working credential, silently, with the
+        // only symptom being Deepgram quietly vanishing from the context
+        // menu. Deliberate clearing still works; it goes through the
+        // focus-loss path below, where an empty field is something the user
+        // actually typed rather than something the view failed to load.
+        .onDisappear { commitDeepgramKeyIfPresent() }
     }
 
     /// Pure predicate behind the focus-loss commit above. `SettingsView` has
@@ -143,6 +152,16 @@ public struct SettingsView: View {
         wasFocused && !isFocused
     }
 
+    /// Whether tearing the window down should write the field to the Keychain.
+    ///
+    /// Extracted for the same reason as the predicate above, and false on an
+    /// empty field because `Keychain.set("")` deletes rather than stores. See
+    /// the `.onDisappear` comment for why that turns a routine window close
+    /// into credential loss.
+    nonisolated static func shouldCommitOnDisappear(key: String) -> Bool {
+        !key.isEmpty
+    }
+
     /// Writes `deepgramKey` to the Keychain and refreshes `AppModel`'s cached
     /// availability so the menu's context menu (which cannot check
     /// `isAvailable()` live, it's `async` and the menu body is not) notices a
@@ -150,6 +169,11 @@ public struct SettingsView: View {
     /// unrelated refresh. The brief this task started from swallowed
     /// `Keychain.set`'s throw with `try?` — a failed write must be surfaced
     /// instead, exactly the failure mode Task 12 fixed `set` itself to avoid.
+    private func commitDeepgramKeyIfPresent() {
+        guard Self.shouldCommitOnDisappear(key: deepgramKey) else { return }
+        commitDeepgramKey()
+    }
+
     private func commitDeepgramKey() {
         do {
             try Keychain.set(deepgramKey, for: DeepgramTranscriber.keychainAccount)

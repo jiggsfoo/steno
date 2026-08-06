@@ -43,10 +43,11 @@ import Testing
     #expect(DeepgramTranscriber.keychainAccount == "deepgram-api-key")
 }
 
-/// The picker in Settings only ever offers what `TranscriberRegistry.all()`
+/// The recent-row context menu only ever offers what `TranscriberRegistry.all()`
 /// returns -- pinned here so a future backend added to `all()` without a
-/// matching registry entry doesn't silently vanish from the picker instead of
-/// failing loudly.
+/// display name doesn't silently render as a blank menu item instead of
+/// failing loudly. (There is no Settings picker; re-transcription picks its
+/// backend at the point of action.)
 @Test func everyRegisteredBackendHasADisplayName() {
     for backend in TranscriberRegistry.all() {
         #expect(!backend.displayName.isEmpty)
@@ -74,4 +75,24 @@ import Testing
 @Test func steadyFocusStatesDoNotCommit() {
     #expect(!SettingsView.shouldCommitOnFocusChange(wasFocused: true, isFocused: true))
     #expect(!SettingsView.shouldCommitOnFocusChange(wasFocused: false, isFocused: false))
+}
+
+/// Closing the window must NOT delete a stored key.
+///
+/// `Keychain.set("")` short-circuits to `remove`, so an unconditional commit
+/// on `.onDisappear` makes closing Settings destructive: if
+/// `Keychain.string(for:)` returned nil when the view initialised -- a
+/// transient read error, with a key really on disk -- then merely opening and
+/// closing Settings would delete a working credential, silently, the only
+/// symptom being Deepgram quietly vanishing from the context menu.
+///
+/// Deliberate clearing is unaffected: it goes through the focus-loss path,
+/// where an empty field is something the user typed rather than something the
+/// view failed to load.
+@Test func closingSettingsWithAnEmptyFieldDoesNotDeleteTheStoredKey() {
+    #expect(!SettingsView.shouldCommitOnDisappear(key: ""))
+}
+
+@Test func closingSettingsWithAKeyPresentStillSavesIt() {
+    #expect(SettingsView.shouldCommitOnDisappear(key: "a-real-key"))
 }
