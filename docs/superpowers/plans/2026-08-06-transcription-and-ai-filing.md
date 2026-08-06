@@ -1402,6 +1402,7 @@ import Testing
     ".",
     "Grocery/List",
     "Grocery\\List",
+    "Old:Name",
     "/absolute",
     ".hidden",
     ".incoming",
@@ -1503,7 +1504,11 @@ Expected: all PASS.
 
 - [ ] **Step 5: MUTATION-CHECK the traversal guard**
 
-Delete `!trimmed.contains("/")` from the guard. Run `swift test --filter hostileOrCollidingNamesAreRejected`. It must FAIL on `Grocery/List` and `../../etc`. Restore. Confirm PASS.
+Delete `!trimmed.contains("/")` from the guard. Run `swift test --filter hostileOrCollidingNamesAreRejected`. It must FAIL on `Grocery/List` and `/absolute` — and **not** on `../../etc`, which `hasPrefix(".")` rejects independently, so the slash guard is not what defends it. That two-guard overlap is deliberate: a defect in either one alone still leaves traversal blocked.
+
+Then restore and confirm PASS.
+
+Repeat for the colon guard, which has no second line of defence: delete `!trimmed.contains(":")`, confirm the failure is `Old:Name` and only `Old:Name`, restore, confirm PASS. On macOS a colon is the legacy HFS path separator and Finder still renders it as `/`, so it is a real separator-smuggling route rather than cosmetic validation.
 
 - [ ] **Step 6: Commit**
 
