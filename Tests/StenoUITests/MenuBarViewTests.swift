@@ -103,3 +103,28 @@ private let everyStatus: [DeviceStatus] = [
 @Test func transcriptionLabelHandlesAnEmptyQueueWithoutDividingByZero() {
     #expect(MenuBarView.transcriptionLabel(for: QueueProgress(done: 0, total: 0)) == nil)
 }
+
+/// IMPORTANT: the spec says "Empty means the cloud backend is not offered at
+/// all." Before this fix, the context menu built from `TranscriberRegistry
+/// .all()` UNCONDITIONALLY -- Deepgram was always in the list, even with no
+/// Keychain key configured, so the first click any user made was guaranteed
+/// to fail. `availableTranscribers` is the filter that closes that gap.
+@Test func availableTranscribersFiltersToOnlyThoseMarkedAvailable() {
+    let all = TranscriberRegistry.all()
+    let onlyOnDevice = MenuBarView.availableTranscribers(from: all, availableIDs: ["speechanalyzer"])
+    #expect(onlyOnDevice.map(\.id) == ["speechanalyzer"])
+}
+
+/// The empty-Keychain case the spec calls out by name: no key configured
+/// means Deepgram (and everything else not yet confirmed available) is not
+/// offered at all, not offered-but-guaranteed-to-fail.
+@Test func availableTranscribersIsEmptyWhenNothingIsAvailable() {
+    let all = TranscriberRegistry.all()
+    #expect(MenuBarView.availableTranscribers(from: all, availableIDs: []).isEmpty)
+}
+
+@Test func availableTranscribersKeepsEveryoneWhenAllAreAvailable() {
+    let all = TranscriberRegistry.all()
+    let ids = Set(all.map(\.id))
+    #expect(MenuBarView.availableTranscribers(from: all, availableIDs: ids).count == all.count)
+}

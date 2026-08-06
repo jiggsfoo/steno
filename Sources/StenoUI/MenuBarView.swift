@@ -183,11 +183,14 @@ public struct MenuBarView: View {
                 }
                 // The ONLY path by which a recording's audio can leave this
                 // machine: one deliberate right-click, on one recording, ever.
-                // `TranscriberRegistry.all()` -- not `.automatic()` -- so both
-                // the free on-device model and the cloud one are offered here,
-                // matching Settings' "Model for re-transcribing" picker.
+                // `TranscriberRegistry.all()`, filtered to what's actually
+                // USABLE right now -- the spec: "Empty means the cloud backend
+                // is not offered at all." Offering Deepgram with no API key
+                // configured invites a click that can only fail.
                 .contextMenu {
-                    ForEach(TranscriberRegistry.all(), id: \.id) { backend in
+                    ForEach(Self.availableTranscribers(
+                        from: TranscriberRegistry.all(), availableIDs: model.availableTranscriberIDs),
+                            id: \.id) { backend in
                         Button("Transcribe again with \(backend.displayName)") {
                             model.retranscribe(item, using: backend)
                         }
@@ -204,6 +207,21 @@ public struct MenuBarView: View {
     nonisolated static func transcriptionLabel(for progress: QueueProgress?) -> String? {
         guard let progress, progress.total > 0, progress.done < progress.total else { return nil }
         return "Transcribing \(progress.done + 1) of \(progress.total)"
+    }
+
+    /// What the per-recording context menu actually offers: `all`, filtered
+    /// down to the IDs `AppModel.availableTranscriberIDs` has already
+    /// confirmed are usable. The spec: "Empty means the cloud backend is not
+    /// offered at all." Extracted as a pure function -- same rationale as
+    /// `transcriptionLabel(for:)` above -- so the filtering logic is testable
+    /// independent of `Transcriber.isAvailable()`'s own `async` Keychain/
+    /// Apple-Intelligence check.
+    ///
+    /// `nonisolated`: see `statusTitle(for:)` above.
+    nonisolated static func availableTranscribers(
+        from all: [any Transcriber], availableIDs: Set<String>
+    ) -> [any Transcriber] {
+        all.filter { availableIDs.contains($0.id) }
     }
 
     // MARK: - Actions

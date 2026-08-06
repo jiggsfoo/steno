@@ -30,6 +30,13 @@ public final class AppModel: @unchecked Sendable {
     public private(set) var recordingInProgress: String?
     /// nil when nothing is queued. Drives the menu's progress line.
     public var transcriptionProgress: QueueProgress?
+    /// IDs of `TranscriberRegistry.all()` backends currently usable -- e.g.
+    /// Deepgram only once a Keychain key exists. The spec: "Empty means the
+    /// cloud backend is not offered at all." `Transcriber.isAvailable()` is
+    /// `async` and the menu body it gates is synchronous, so this is a CACHE,
+    /// refreshed by `refreshAvailableTranscribers()` rather than queried live
+    /// from `MenuBarView`'s context menu.
+    public private(set) var availableTranscriberIDs: Set<String> = []
 
     public var libraryRoot: URL {
         didSet {
@@ -153,6 +160,7 @@ public final class AppModel: @unchecked Sendable {
         } else {
             reloadRecent()
         }
+        Task { await refreshAvailableTranscribers() }
 
         let monitor = DeviceMonitor { [weak self] event in
             Task { @MainActor in self?.handle(event) }
@@ -816,6 +824,21 @@ public final class AppModel: @unchecked Sendable {
             let sidecars = (try? library.scanSidecars()) ?? []
             try? Filer(root: root).rebuild(from: sidecars, store: TranscriptStore(root: root))
         }
+    }
+
+    /// Refreshes `availableTranscriberIDs` by asking every registered backend
+    /// whether it can actually run right now. Called at `start()`, and again
+    /// by `SettingsView` whenever the Deepgram key may have just changed --
+    /// closing the Settings window, or committing the key field -- since
+    /// nothing else would ever notice a key that was just typed in or removed.
+    public func refreshAvailableTranscribers() async {
+        var ids: Set<String> = []
+        for backend in TranscriberRegistry.all() {
+            if await backend.isAvailable() {
+                ids.insert(backend.id)
+            }
+        }
+        availableTranscriberIDs = ids
     }
 
     public var reclaimCandidates: [FileInfo] = []

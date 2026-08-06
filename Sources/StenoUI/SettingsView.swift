@@ -56,14 +56,7 @@ public struct SettingsView: View {
                 // here would undo that. Same red-caption pattern as
                 // `loginItemError` below.
                 SecureField("Deepgram API key", text: $deepgramKey)
-                    .onSubmit {
-                        do {
-                            try Keychain.set(deepgramKey, for: DeepgramTranscriber.keychainAccount)
-                            deepgramKeyError = nil
-                        } catch {
-                            deepgramKeyError = error.localizedDescription
-                        }
-                    }
+                    .onSubmit { commitDeepgramKey() }
                     .accessibilityLabel("Deepgram API key")
                 if let deepgramKeyError {
                     Text(deepgramKeyError).font(.caption).foregroundStyle(.red)
@@ -108,6 +101,23 @@ public struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 460)
         .padding()
+    }
+
+    /// Writes `deepgramKey` to the Keychain and refreshes `AppModel`'s cached
+    /// availability so the menu's context menu (which cannot check
+    /// `isAvailable()` live, it's `async` and the menu body is not) notices a
+    /// key that was just added or changed without waiting for the next
+    /// unrelated refresh. The brief this task started from swallowed
+    /// `Keychain.set`'s throw with `try?` — a failed write must be surfaced
+    /// instead, exactly the failure mode Task 12 fixed `set` itself to avoid.
+    private func commitDeepgramKey() {
+        do {
+            try Keychain.set(deepgramKey, for: DeepgramTranscriber.keychainAccount)
+            deepgramKeyError = nil
+        } catch {
+            deepgramKeyError = error.localizedDescription
+        }
+        Task { await model.refreshAvailableTranscribers() }
     }
 
     /// The log may not exist yet -- nothing has synced since the folder was
