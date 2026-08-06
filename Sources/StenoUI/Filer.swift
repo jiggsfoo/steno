@@ -51,6 +51,12 @@ public struct Filer: Sendable {
     /// tell "mine" from "someone else's" — finds it either way, instead of
     /// silently no-op'ing on a suffixed note and orphaning it.
     public func removeNote(for sidecar: Sidecar, topic: String) {
+        // Every WRITE path re-sanitises an untrusted topic string before it
+        // becomes part of a filesystem path (see `write(for:transcript:)`
+        // above and `TopicName`'s own doc comment on why this is the one real
+        // security surface here); this delete path took `topic` on faith.
+        // Re-sanitising and refusing to act on a rejected topic closes that.
+        guard let topic = TopicName.sanitised(topic) else { return }
         let folder = root.appendingPathComponent(topic)
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path)
         else { return }

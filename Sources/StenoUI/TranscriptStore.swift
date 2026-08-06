@@ -66,8 +66,4 @@ public struct TranscriptStore: Sendable {
         }
         return transcript
     }
-
-    public func remove(for sidecar: Sidecar) {
-        try? FileManager.default.removeItem(at: url(for: sidecar))
-    }
 }

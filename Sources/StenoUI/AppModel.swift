@@ -50,8 +50,12 @@ public final class AppModel: @unchecked Sendable {
             // row into the just-rebuilt NEW-root index, exactly the failure
             // `rebuildIndex` exists to prevent (see its own comment). Cancel
             // first: `startTranscription`'s loop checks `Task.isCancelled`
-            // between recordings, so this stops it from starting the NEXT one
-            // under the old root. This is `transcriptionTask`'s first real
+            // BETWEEN recordings, so this stops it from starting the NEXT one
+            // under the old root. It does NOT abort a recording already
+            // mid-transcription -- that one still runs `await queue.process`
+            // to completion and still upserts, so at most one stale OLD-root
+            // row can still land in the just-rebuilt NEW-root index despite
+            // this cancellation. This is `transcriptionTask`'s first real
             // cancellation call site.
             transcriptionTask?.cancel()
             transcriptionTask = nil

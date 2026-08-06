@@ -116,6 +116,34 @@ private func sampleTranscript(_ signature: String = "c8357e00d535682319c8e19d506
         atPath: root.appendingPathComponent("Receipts").path))
 }
 
+/// `removeNote`'s `topic` parameter is untrusted the same way `write`'s is —
+/// EVERY other path into a filesystem write re-sanitises through
+/// `TopicName.sanitised` before use; this delete path took `topic` on faith.
+/// Proven with an actual escape attempt: a topic that walks up and out of the
+/// library root at a file this type does not own must be refused outright,
+/// not resolved and acted on.
+@Test func removeNoteRefusesATopicThatWouldEscapeTheLibraryRoot() throws {
+    let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let root = base.appendingPathComponent("library")
+    let outside = base.appendingPathComponent("outside")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+
+    let sidecar = filed()
+    let decoy = outside.appendingPathComponent("decoy.md")
+    try """
+        ---
+        signature: \(sidecar.signature)
+        ---
+
+        Not actually owned by this library.
+        """.write(to: decoy, atomically: true, encoding: .utf8)
+
+    Filer(root: root).removeNote(for: sidecar, topic: "../outside")
+
+    #expect(FileManager.default.fileExists(atPath: decoy.path))
+}
+
 /// `noteURL(for:topic:)` — and so the unsuffixed path `removeNote` used to
 /// assume — only ever names the BASE stem. A note that collided and took a
 /// signature suffix lives somewhere else, so `removeNote` must locate it by
