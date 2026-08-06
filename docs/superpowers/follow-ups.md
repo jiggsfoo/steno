@@ -188,3 +188,98 @@ remain. All four real sentences are now negative test cases.
 The lesson generalises: the prefilter's value is entirely in what it refuses,
 so its patterns must be validated against real speech rather than imagined
 speech. Any new pattern added later gets the same treatment.
+
+### Deferred human checks (Task 15, 2026-08-06)
+
+No agent in this project has a display, a Deepgram account, or a mouth to
+speak a directive into a real microphone. Everything below needs a person
+with the app open and real audio behind it — recorded here so it isn't
+quietly assumed working just because the mutation checks and the Task 4
+quality pass came back clean.
+
+1. **The menu's second line at real title lengths.** Recent rows now render a
+   model-generated (or fallback opening-words) title beneath the timestamp —
+   built and pixel-tested against synthetic strings, never against a title
+   `FoundationModels` or the fallback actually produced. Check: open the menu
+   with real synced, transcribed recordings present. A problem looks like
+   truncation with no ellipsis, a row tall enough to push others off-screen,
+   or the title clipping into the timestamp above it.
+
+2. **`Transcribing k of n` in the live menu.** `AppModel.transcriptionProgress`
+   drives this line from `startTranscription`'s sweep loop, but nobody has
+   watched it update against a real backlog, and nobody has confirmed it
+   clears rather than freezing at its last value once the sweep finishes.
+   Check: sync a device with several untranscribed recordings, watch the menu
+   bar during the sweep, and confirm the line is gone — not stuck reading
+   "3 of 3" — once the sweep has actually finished.
+
+3. **Topic folders appearing in Finder.** Sync a recording that carries a
+   spoken filing directive, then open the library root in Finder and confirm
+   the topic folder and its note exist where `Filer.write` computes them.
+   Then delete that folder by hand and press **Rebuild Topic Folders** in
+   Settings — confirm the folder and note come back with the same content.
+   `Filer.rebuild` only has coverage against an in-memory temp root; it has
+   never written into a real, Finder-visible directory tree.
+
+4. **Deepgram against the live API.** Only a 3-second clip has been sent
+   through `DeepgramTranscriber` for real (see `DeepgramTranscriberTests`),
+   which proves the request/response mapping but says nothing about
+   diarization quality on a genuine multi-speaker call. Check: retranscribe a
+   real two-person recording with the Deepgram backend and read the output —
+   a problem looks like every segment attributed to one speaker, speaker
+   labels swapping mid-sentence, or segment boundaries that don't line up
+   with actual turn-taking.
+
+5. **Whether `FoundationModels` extracts a topic from a directive spoken
+   naturally mid-recording.** `OnDeviceSuggester.prompt` now appends the
+   matched instruction explicitly (see `theSuggesterIsGivenTheDirectiveItself`
+   and `aMidTranscriptDirectiveStillReachesTheModel` in
+   `TopicResolverTests`), which proves the model is SHOWN the instruction —
+   it does not prove the model interprets it correctly. No real
+   `LanguageModelSession.respond` call has ever run against a naturally
+   phrased mid-call directive, only synthetic prompts in tests. Check: record
+   something that says, in passing, "let's file this under [topic]" partway
+   through a longer recording, sync it, and read the resulting `topic` on the
+   sidecar — a problem looks like a topic that plainly isn't what was asked
+   for, or no topic at all when a directive was clearly spoken.
+
+6. **The Settings "Transcription" section, rendered.** `SettingsViewTests`
+   cover the view's structure, not its appearance. Check: open Settings →
+   Transcription and look at the layout, then specifically trigger a failed
+   Keychain write on the Deepgram key field (an empty or malformed key) and
+   confirm the error caption actually appears next to the field, rather than
+   only surfacing in `lastError` elsewhere in the window.
+
+### Known limitations (Task 15, 2026-08-06)
+
+Not deferred checks — things that are true by construction. Recorded so
+nobody "fixes" them later without first reading why they're this way.
+
+- **Taglish is still unmeasured, not disproven.** The Task 4 quality pass
+  above covers 11 real recordings, all English. No session between then and
+  this whole-branch review added a code-switched or Tagalog-only sample. The
+  spec's largest named risk stays open, not closed.
+- **A hung transcription wedges the automatic sweep for the process's whole
+  lifetime.** `TranscriptionQueue.run` calls `transcriber.transcribe` with no
+  timeout, and `startTranscription`'s loop `await`s each recording before
+  starting the next. A transcriber call that never returns — a wedged
+  `SpeechAnalyzer` session, a Deepgram request stuck on a dead connection —
+  stops every recording behind it in that sweep from ever being tried.
+  Nothing times out and nothing surfaces an error; the sweep just goes quiet
+  until the app restarts.
+- **Work requested while a sweep is running is dropped, not queued.**
+  `startTranscription` guards on `transcriptionTask == nil` and returns
+  immediately if a sweep is already in flight — a sync or a manual retry
+  landing mid-sweep does not get queued behind it. It self-heals:
+  `pending(from:)` recomputes the backlog from disk on the next call, so
+  nothing requested is permanently lost, but it also isn't acted on until the
+  next trigger (the next sync, or the next launch).
+- **The transcription locale is pinned to `en_US`, permanently, not as a
+  placeholder.** `en_PH` isn't a supported `SpeechTranscriber` locale, and
+  letting the system resolve it produced a different English variant —
+  `en_AU`, `en_US`, `en_SG` — on different runs of the *same* audio during
+  the Task 4 gate, which would have made both the acoustic model and the
+  persisted `locale` field non-deterministic. `TranscriptionQueue.locale`
+  pins to `en_US` on purpose. This is a permanent decision, not a TODO —
+  revisiting it means re-solving the non-determinism, not swapping in a
+  different constant.
