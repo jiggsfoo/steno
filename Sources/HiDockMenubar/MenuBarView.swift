@@ -7,8 +7,12 @@ public struct MenuBarView: View {
     /// duplicating the id string.
     public static let settingsWindowID = "settings"
 
+    /// The other `Window(_:id:)` scene `HiDockApp` declares, for the same
+    /// reason. Reclaim used to be a `.sheet` presented from this view; see
+    /// `open(_:)`.
+    public static let reclaimWindowID = "reclaim"
+
     @Bindable var model: AppModel
-    @State private var showReclaim = false
     @Environment(\.openWindow) private var openWindow
 
     public init(model: AppModel) { self.model = model }
@@ -27,14 +31,6 @@ public struct MenuBarView: View {
         }
         .padding(.vertical, MenuMetrics.contentInset)
         .frame(width: 272)
-        // `ReclaimView` is handed the same binding that presents it, and closes
-        // itself by writing `false` to it. See its `isPresented` doc comment:
-        // `@Environment(\.dismiss)` did not reliably clear this state when the
-        // popover tore down, which left the sheet to re-present on the next
-        // open.
-        .sheet(isPresented: $showReclaim) {
-            ReclaimView(model: model, isPresented: $showReclaim)
-        }
     }
 
     /// One separator, built once so all three sites cannot drift apart. A bare
@@ -186,17 +182,32 @@ public struct MenuBarView: View {
         MenuRow("Sync Now", isEnabled: model.status != .disconnected) { model.syncNow() }
         MenuRow("Show in Finder") { NSWorkspace.shared.open(model.libraryRoot) }
         MenuRow("Free Up Space on P1…", isEnabled: model.status != .disconnected) {
-            showReclaim = true
+            open(Self.reclaimWindowID)
         }
         separator
-        // `SettingsLink` has no hook to activate the app first, and this is an
-        // LSUIElement (.accessory) app that never activates on its own — the
-        // window would open behind everything. Activate, then open.
-        MenuRow("Settings…") {
-            NSApp.activate(ignoringOtherApps: true)
-            openWindow(id: Self.settingsWindowID)
-        }
+        MenuRow("Settings…") { open(Self.settingsWindowID) }
         MenuRow("Quit HiDock") { NSApplication.shared.terminate(nil) }
+    }
+
+    /// Opens one of `HiDockApp`'s `Window(_:id:)` scenes.
+    ///
+    /// The activation is not optional. This is an LSUIElement (`.accessory`)
+    /// app that never activates on its own, so a window opened without it lands
+    /// behind every other app and is effectively invisible -- a bug this project
+    /// already shipped once, on Settings. `SettingsLink` has no hook to do it,
+    /// which is why neither window is a `Settings` scene.
+    ///
+    /// Reclaim is a window and not a `.sheet` because a sheet presented from
+    /// inside a `MenuBarExtra(.window)` popover cannot be dismissed reliably:
+    /// AppKit tears the popover down the moment it loses focus -- which is
+    /// exactly when the sheet takes it -- and the presentation state that
+    /// survives that teardown is not reconciled with what is on screen. The
+    /// sheet came back on the next click of the menu bar icon. A `Window` scene
+    /// is owned by the app, not by the popover, so there is no teardown to
+    /// survive and nothing left holding it presented.
+    private func open(_ windowID: String) {
+        NSApp.activate(ignoringOtherApps: true)
+        openWindow(id: windowID)
     }
 
     private func reveal(_ item: Sidecar) {

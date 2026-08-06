@@ -75,3 +75,17 @@ private let everyStatus: [DeviceStatus] = [
     let withControlByte = "take1\u{0007}.hda"
     #expect(MenuBarView.recordingLabel(for: withControlByte) == "Recording…")
 }
+
+/// Both windows this menu opens are `Window(_:id:)` scenes in `HiDockApp`, and
+/// SwiftUI tells them apart by id alone. Sharing one id would silently point
+/// "Free Up Space on P1…" at the Settings window -- there is no diagnostic for
+/// it, at compile time or at run time.
+///
+/// This is the only part of Bug 1's fix a test can reach: whether the window
+/// visibly stops re-presenting needs a human, and is recorded as such.
+@MainActor
+@Test func theTwoWindowScenesHaveDistinctIDs() {
+    #expect(!MenuBarView.settingsWindowID.isEmpty)
+    #expect(!MenuBarView.reclaimWindowID.isEmpty)
+    #expect(MenuBarView.settingsWindowID != MenuBarView.reclaimWindowID)
+}

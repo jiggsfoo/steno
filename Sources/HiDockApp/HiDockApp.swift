@@ -41,5 +41,16 @@ struct HiDockApp: App {
             SettingsView(model: appDelegate.model)
         }
         .windowResizability(.contentSize)
+
+        // Reclaim is a window for a second reason on top of that one: a
+        // `.sheet` presented from inside the `MenuBarExtra(.window)` popover
+        // above cannot be dismissed reliably, because AppKit tears that popover
+        // down as it loses focus to the sheet. See `MenuBarView.open(_:)`.
+        // `Window` is single-instance, so opening it twice orders the existing
+        // one front instead of stacking a second device read behind the first.
+        Window("Free Up Space on P1", id: MenuBarView.reclaimWindowID) {
+            ReclaimView(model: appDelegate.model)
+        }
+        .windowResizability(.contentSize)
     }
 }

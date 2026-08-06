@@ -1,29 +1,25 @@
 import HiDockKit
 import SwiftUI
 
-struct ReclaimView: View {
+/// Content of the `Window(_:id: MenuBarView.reclaimWindowID)` scene declared by
+/// `HiDockApp`, opened from the menu's "Free Up Space on P1…" row.
+///
+/// A window, not a `.sheet`. See `MenuBarView.open(_:)` for why a sheet
+/// presented out of a `MenuBarExtra(.window)` popover could not be dismissed.
+/// Because the scene is the app's and not the popover's, `\.dismiss` is again
+/// the right way to close it -- it acts on a presentation the popover's teardown
+/// cannot take out from under it.
+public struct ReclaimView: View {
     @Bindable var model: AppModel
 
-    /// The presenting view's own `@State`, written directly.
-    ///
-    /// This was `@Environment(\.dismiss)`. That dismisses through the
-    /// presentation environment, which does not reliably write `false` back to
-    /// the `@State` driving `.sheet(isPresented:)` when the hosting
-    /// `MenuBarExtra` popover tears down on focus loss at the same moment. The
-    /// state stayed `true`, so re-opening the popover re-evaluated
-    /// `MenuBarView` and re-presented this sheet -- a phantom that needed a
-    /// second Cancel, and whose `.onAppear` re-ran `loadReclaimable()` and
-    /// posted a stuck "Can't check the device..." warning.
-    ///
-    /// Writing the binding is synchronous and lands on the source of truth
-    /// itself, so it survives that teardown: there is no environment action to
-    /// propagate and nothing left holding `showReclaim` true.
-    @Binding var isPresented: Bool
+    @Environment(\.dismiss) private var dismiss
 
     @State private var selected: Set<String> = []
     @State private var showConfirm = false
 
-    var body: some View {
+    public init(model: AppModel) { self.model = model }
+
+    public var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             // Title Case, matching the "Free Up Space on P1…" row that opens
             // this sheet. `.headline` is a visual weight, not a semantic
@@ -62,7 +58,9 @@ struct ReclaimView: View {
                     selected = Set(model.reclaimCandidates.map(\.signature))
                 }
                 Spacer()
-                Button("Cancel") { cancel() }
+                // `.cancelAction` also stops Return from reaching the delete
+                // button below, which is the point: see its comment.
+                Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
 
                 // Deliberately NOT .defaultAction. Deleting from the device is
@@ -79,7 +77,10 @@ struct ReclaimView: View {
                 isPresented: $showConfirm, titleVisibility: .visible
             ) {
                 Button("Delete from Device", role: .destructive) {
-                    confirmDelete()
+                    model.reclaim(model.reclaimCandidates.filter {
+                        selected.contains($0.signature)
+                    })
+                    dismiss()
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
@@ -89,21 +90,13 @@ struct ReclaimView: View {
         }
         .padding()
         .frame(width: 460)
+        // Once per appearance of the window, which is once per open: `Window`
+        // is a single-instance scene, so opening it while it is already up
+        // orders the existing one front rather than building a second copy --
+        // no second `.onAppear`, and no second device session stacked behind
+        // the first. `loadReclaimable()` also refuses to start while one is
+        // already running, so the two guards agree.
         .onAppear { model.loadReclaimable() }
-    }
-
-    /// Both exits from this sheet, factored out of their `Button` closures so
-    /// a test can call the same code the buttons call. A test cannot press a
-    /// SwiftUI button without a UI-testing dependency, and this package has
-    /// none -- so the alternative was no coverage at all on the one line whose
-    /// absence caused the phantom sheet.
-    func cancel() {
-        isPresented = false
-    }
-
-    func confirmDelete() {
-        model.reclaim(model.reclaimCandidates.filter { selected.contains($0.signature) })
-        isPresented = false
     }
 
     private func binding(for file: FileInfo) -> Binding<Bool> {
