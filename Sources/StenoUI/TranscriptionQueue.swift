@@ -42,22 +42,49 @@ public actor TranscriptionQueue {
         self.maxAttempts = maxAttempts
     }
 
-    /// Everything still owed work, cheapest check first.
+    /// Everything still owed work, cheapest check first: the in-memory attempt
+    /// count before the disk read+decode `store.has(sidecar)` performs. A
+    /// capped sidecar is excluded without ever touching disk.
     public func pending(from sidecars: [Sidecar]) -> [Sidecar] {
         sidecars.filter { sidecar in
-            guard !store.has(sidecar) else { return false }
-            return (sidecar.transcriptionAttempts ?? 0) < maxAttempts
+            guard (sidecar.transcriptionAttempts ?? 0) < maxAttempts else { return false }
+            return !store.has(sidecar)
         }
     }
 
-    /// Transcribes, files, and returns the updated sidecar. The CALLER persists
-    /// it and updates the index — this actor owns no `Library`.
+    /// Automatic-sweep entry point — launch and post-sync. Respects
+    /// `transcriptionAttempts`'s cap, so a permanently undecodable recording
+    /// stops being retried forever. The CALLER persists the returned sidecar
+    /// and updates the index — this actor owns no `Library`.
+    public func process(_ sidecar: Sidecar) async -> Sidecar {
+        await run(sidecar, respectingCap: true)
+    }
+
+    /// User-initiated "Transcribe Again". Per `Sidecar.transcriptionAttempts`'s
+    /// own documented contract — "Bounds automatic retry... Manual retry
+    /// ignores it" — this deliberately crosses the cap `process` enforces.
+    ///
+    /// Attempts are reset before the shared work starts, so a retry that
+    /// fails again counts from zero instead of inheriting an already-spent
+    /// budget; a retry that succeeds is already left clean by the normal
+    /// success path in `run`, which clears the field outright.
+    public func retry(_ sidecar: Sidecar) async -> Sidecar {
+        var reset = sidecar
+        reset.transcriptionAttempts = nil
+        return await run(reset, respectingCap: false)
+    }
+
+    /// Transcribes, files, and returns the updated sidecar. Shared by
+    /// `process` and `retry` so the money-protection logic exists in exactly
+    /// one place; the two entry points differ only in whether the attempt cap
+    /// applies.
     ///
     /// Write order is the inverse of `Library.commit`'s. There the expensive
     /// thing is the download, so audio goes first. Here it is transcription, and
     /// the already-done check is the transcript FILE, so a crash between steps
-    /// only ever repeats free work.
-    public func process(_ sidecar: Sidecar) async -> Sidecar {
+    /// only ever repeats free work. That check is unconditional — neither
+    /// entry point may skip it, only the attempt cap is negotiable.
+    private func run(_ sidecar: Sidecar, respectingCap: Bool) async -> Sidecar {
         var updated = sidecar
 
         // 1. Transcript — skipped entirely when one already exists.
@@ -65,16 +92,15 @@ public actor TranscriptionQueue {
         if let existing = store.transcript(for: sidecar) {
             transcript = existing
         } else {
-            // The cap must be enforced HERE, not only in `pending`. `pending`
-            // is a convenience for callers building a work list; `process` is
-            // the actual spending gate, and it is called directly by the
-            // caller as well (e.g. a crash-recovery pass, or a manual retry
-            // loop). Without this guard a sidecar that already exhausted its
-            // attempts would keep paying for the transcriber on every direct
-            // `process` call — exactly the unbounded re-spend the cap exists
-            // to prevent.
-            guard (sidecar.transcriptionAttempts ?? 0) < maxAttempts else {
-                return sidecar
+            // The cap protects the AUTOMATIC sweeps from re-spending on a
+            // recording that keeps failing — it is not meant to block a
+            // deliberate, human-initiated retry. `retry` passes
+            // `respectingCap: false` to cross it on purpose, matching
+            // `Sidecar.transcriptionAttempts`'s own contract.
+            if respectingCap {
+                guard (sidecar.transcriptionAttempts ?? 0) < maxAttempts else {
+                    return sidecar
+                }
             }
 
             let audio = root.appendingPathComponent(sidecar.relativePath)

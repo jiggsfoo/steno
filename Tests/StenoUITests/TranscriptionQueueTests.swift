@@ -113,10 +113,42 @@ private func makeQueue(root: URL, transcriber: Transcriber) -> TranscriptionQueu
     let queue = makeQueue(root: root,
                           transcriber: CountingTranscriber(counter: CallCounter(), failing: true))
     let original = queueSidecar()
+    let audioURL = root.appendingPathComponent(original.relativePath)
+    try FileManager.default.createDirectory(
+        at: audioURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let audioBytes = Data("fake audio bytes".utf8)
+    try audioBytes.write(to: audioURL)
 
     let after = await queue.process(original)
 
     #expect(after.signature == original.signature)
     #expect(after.relativePath == original.relativePath)
     #expect(after.transcribedAt == nil)
+    #expect(FileManager.default.fileExists(atPath: audioURL.path))
+    #expect(try Data(contentsOf: audioURL) == audioBytes)
+}
+
+/// The cap in `Sidecar.transcriptionAttempts`'s own contract is scoped to
+/// "automatic retry" — manual retry is documented to ignore it. `retry` is
+/// the deliberate path through a cap `process` refuses to cross.
+@Test func retryTranscribesARecordingThatProcessRefuses() async throws {
+    let root = tempRoot()
+    let counter = CallCounter()
+    let queue = makeQueue(root: root,
+                          transcriber: CountingTranscriber(counter: counter, failing: true))
+    var sidecar = queueSidecar()
+
+    for _ in 0..<3 { sidecar = await queue.process(sidecar) }
+    #expect(sidecar.transcriptionAttempts == 3)
+    #expect(await counter.count == 3)
+
+    // `process` refuses: capped, no further backend call.
+    sidecar = await queue.process(sidecar)
+    #expect(await counter.count == 3)
+
+    // `retry` ignores the cap: the backend is invoked again, and the
+    // attempt count starts fresh rather than climbing from the spent budget.
+    sidecar = await queue.retry(sidecar)
+    #expect(await counter.count == 4)
+    #expect(sidecar.transcriptionAttempts == 1)
 }
