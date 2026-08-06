@@ -181,6 +181,18 @@ public struct MenuBarView: View {
                         detailLineLimit: 1) {
                     reveal(item)
                 }
+                // The ONLY path by which a recording's audio can leave this
+                // machine: one deliberate right-click, on one recording, ever.
+                // `TranscriberRegistry.all()` -- not `.automatic()` -- so both
+                // the free on-device model and the cloud one are offered here,
+                // matching Settings' "Model for re-transcribing" picker.
+                .contextMenu {
+                    ForEach(TranscriberRegistry.all(), id: \.id) { backend in
+                        Button("Transcribe again with \(backend.displayName)") {
+                            model.retranscribe(item, using: backend)
+                        }
+                    }
+                }
             }
         }
     }

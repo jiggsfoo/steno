@@ -60,3 +60,13 @@ public enum Keychain {
 public enum KeychainError: Error, Equatable {
     case writeFailed(OSStatus)
 }
+
+extension KeychainError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .writeFailed(let status):
+            let detail = SecCopyErrorMessageString(status, nil) as String? ?? "status \(status)"
+            return "Couldn't save the Deepgram API key: \(detail)."
+        }
+    }
+}

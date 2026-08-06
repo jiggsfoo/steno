@@ -8,6 +8,15 @@ public struct SettingsView: View {
     /// Suppresses the onChange that the revert below would otherwise re-trigger,
     /// issuing a spurious opposite-direction register/unregister.
     @State private var isSyncingToggle = false
+    /// What "Transcribe again" uses -- NEVER what runs automatically after a
+    /// sync. `TranscriberRegistry.automatic()` is not user-overridable: see
+    /// its own doc comment for why.
+    @State private var selectedTranscriberID =
+        UserDefaults.standard.string(forKey: TranscriberRegistry.selectionKey)
+        ?? SpeechAnalyzerTranscriber().id
+    @State private var deepgramKey =
+        Keychain.string(for: DeepgramTranscriber.keychainAccount) ?? ""
+    @State private var deepgramKeyError: String?
 
     public init(model: AppModel) {
         self.model = model
@@ -30,6 +39,50 @@ public struct SettingsView: View {
                         .accessibilityLabel("Change library folder")
                 }
                 Button("Rebuild Index") { model.rebuildIndex() }
+            }
+
+            Section("Transcription") {
+                // On-device always runs automatically; this picker chooses
+                // what "Transcribe again" uses, never what runs unattended.
+                // Automatic transcription only stays honest while it is free
+                // -- a cloud backend running unattended would bill on every
+                // 66-minute meeting -- so the scope of this picker is stated
+                // plainly below rather than left to look broader than it is.
+                Picker("Model for re-transcribing", selection: $selectedTranscriberID) {
+                    ForEach(TranscriberRegistry.all(), id: \.id) { backend in
+                        Text(backend.displayName).tag(backend.id)
+                    }
+                }
+                .onChange(of: selectedTranscriberID) { _, id in
+                    UserDefaults.standard.set(id, forKey: TranscriberRegistry.selectionKey)
+                }
+
+                Text("New recordings are always transcribed on this Mac, for free. "
+                     + "Cloud models run only when you ask, one recording at a time, "
+                     + "from that recording's own menu.")
+                    .font(.caption).foregroundStyle(.secondary)
+
+                // The brief this task started from swallowed `Keychain.set`'s
+                // throw with `try?`. A failed write must be surfaced instead
+                // -- losing a key silently is exactly the failure mode Task 12
+                // fixed `set` itself to avoid, and swallowing it one layer up
+                // here would undo that. Same red-caption pattern as
+                // `loginItemError` below.
+                SecureField("Deepgram API key", text: $deepgramKey)
+                    .onSubmit {
+                        do {
+                            try Keychain.set(deepgramKey, for: DeepgramTranscriber.keychainAccount)
+                            deepgramKeyError = nil
+                        } catch {
+                            deepgramKeyError = error.localizedDescription
+                        }
+                    }
+                    .accessibilityLabel("Deepgram API key")
+                if let deepgramKeyError {
+                    Text(deepgramKeyError).font(.caption).foregroundStyle(.red)
+                }
+
+                Button("Rebuild Topic Folders") { model.rebuildTopicFolders() }
             }
 
             // Its own section: the diagnostic log lives in ~/Library/Logs and

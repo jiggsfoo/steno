@@ -1,0 +1,55 @@
+import Foundation
+import Testing
+@testable import StenoUI
+
+/// **Deviation from the task brief.** The brief's version of this file called
+/// `Keychain.set`/`.remove` directly against `DeepgramTranscriber.keychainAccount`
+/// -- which is the SAME account Angelo's real Deepgram key lives under on this
+/// machine (`com.jiggsfoo.steno` / `deepgram-api-key`). Run literally, its first
+/// test would have overwritten that real key with `"secret-key"` and then
+/// deleted it in the `defer`; its second test deletes it outright to prove
+/// `isAvailable()` goes false. The project's own constraints are explicit: a
+/// test must never read, write, or delete the real `deepgram-api-key` item, and
+/// must use a UUID-suffixed account instead, exactly as `KeychainTests` already
+/// does. This file follows that pattern.
+///
+/// The brief's second test (`removingTheKeyMakesTheCloudBackendUnavailable`) is
+/// dropped outright rather than adapted: `DeepgramTranscriber.isAvailable()`
+/// always reads `Self.keychainAccount` internally -- that account is not
+/// injectable -- so there is no way to exercise it without touching the real
+/// item. `DeepgramTranscriberTests.swift` (Task 12) already avoids this same
+/// trap for the same reason; this file stays consistent with it.
+
+/// The key must never land in UserDefaults, where anything running as the user
+/// can read it and where it ends up in backups as plain text. A UUID-suffixed
+/// stand-in account proves the invariant Settings' Keychain field relies on,
+/// without ever touching `DeepgramTranscriber.keychainAccount` -- see the file
+/// comment above.
+@Test func theApiKeyIsNotStoredInUserDefaults() throws {
+    let account = "steno-test-settings-\(UUID().uuidString)"
+    defer { Keychain.remove(account) }
+
+    try Keychain.set("secret-key", for: account)
+
+    #expect(Keychain.string(for: account) == "secret-key")
+    #expect(UserDefaults.standard.string(forKey: account) == nil)
+    #expect(UserDefaults.standard.string(forKey: "deepgram") == nil)
+}
+
+/// The account NAME is a public constant, not a credential -- reading it does
+/// not touch the Keychain at all. Pins that Settings' `SecureField` and
+/// `DeepgramTranscriber` still agree on exactly which item the field edits.
+@Test func deepgramKeychainAccountIsTheOneSettingsEdits() {
+    #expect(DeepgramTranscriber.keychainAccount == "deepgram-api-key")
+}
+
+/// The picker in Settings only ever offers what `TranscriberRegistry.all()`
+/// returns -- pinned here so a future backend added to `all()` without a
+/// matching registry entry doesn't silently vanish from the picker instead of
+/// failing loudly.
+@Test func everyRegisteredBackendHasADisplayName() {
+    for backend in TranscriberRegistry.all() {
+        #expect(!backend.displayName.isEmpty)
+        #expect(!backend.id.isEmpty)
+    }
+}

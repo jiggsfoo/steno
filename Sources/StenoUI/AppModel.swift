@@ -75,6 +75,22 @@ public final class AppModel: @unchecked Sendable {
     private var syncGeneration = 0
     private var transcriptionTask: Task<Void, Never>?
     private var transcriptionGeneration = 0
+    /// Signatures the automatic sweep or a manual `retranscribe` is currently
+    /// writing. `startTranscription`'s sweep and `retranscribe` each build
+    /// their OWN `TranscriptionQueue` -- actor isolation protects state
+    /// WITHIN one instance, not across two -- so nothing else stops them
+    /// from both writing the SAME sidecar/transcript at once. Task 13 made
+    /// every such write UUID-staged and atomic, so two writers can no
+    /// longer tear a file, but they can still race last-writer-wins on the
+    /// same sidecar: whichever install finishes last silently decides the
+    /// recording's title, topic, and transcriptBackend -- e.g. an automatic
+    /// sweep finishing after a deliberate Deepgram re-transcription would
+    /// revert it back to on-device values with no sign anything happened.
+    /// This set is the guard that keeps the sweep and a manual retry off
+    /// the same recording at the same time; see
+    /// `mayStartTranscribing(signature:inFlight:)` for the pure predicate,
+    /// and `startTranscription`/`retranscribe` for where it's held.
+    private var sidecarsInFlight: Set<String> = []
     private var retryDelay: Duration = .seconds(2)
     /// The one real diagnostic logger for this process's lifetime, handed to
     /// every `SyncEngine` this class constructs. Tests never construct
@@ -607,6 +623,17 @@ public final class AppModel: @unchecked Sendable {
         capturedGeneration == currentGeneration
     }
 
+    /// Pure predicate behind `sidecarsInFlight` -- same rationale as
+    /// `shouldSyncAfterPoll`/`shouldClearTranscriptionState` above: `AppModel`
+    /// itself has no test seam, so the decision is extracted here to stay
+    /// testable. See `sidecarsInFlight`'s own doc comment for the two-queue
+    /// hazard this closes.
+    ///
+    /// `nonisolated`: see `shouldSyncAfterPoll` above -- same rationale.
+    nonisolated static func mayStartTranscribing(signature: String, inFlight: Set<String>) -> Bool {
+        !inFlight.contains(signature)
+    }
+
     /// Manual escape hatch for the menu's "Sync now" button -- the same
     /// guard `startSync` already relies on via `.attached` and the poll loop,
     /// just reachable on demand instead of waiting for the next attach or tick.
@@ -681,6 +708,19 @@ public final class AppModel: @unchecked Sendable {
                 if Task.isCancelled { return }
                 self.transcriptionProgress = QueueProgress(done: offset, total: todo.count)
 
+                // A manual "Transcribe again" (`retranscribe`) may already be
+                // running against this exact recording -- see
+                // `sidecarsInFlight`'s doc comment for why two independent
+                // `TranscriptionQueue`s writing the same sidecar is unsafe.
+                // Skip it this pass rather than race a second writer onto it;
+                // `todo` is only a snapshot for this run, so the NEXT sweep
+                // re-reads from disk and picks it up again if it still needs
+                // work.
+                guard Self.mayStartTranscribing(signature: sidecar.signature, inFlight: sidecarsInFlight)
+                else { continue }
+                sidecarsInFlight.insert(sidecar.signature)
+                defer { sidecarsInFlight.remove(sidecar.signature) }
+
                 let updated = await queue.process(sidecar)
                 await Task.detached { try? library.updateSidecar(updated) }.value
 
@@ -701,11 +741,24 @@ public final class AppModel: @unchecked Sendable {
     /// NEITHER transcript, while the sidecar still advertises the old,
     /// now-deleted one's `transcribedAt`/`transcriptBackend`.
     public func retranscribe(_ sidecar: Sidecar, using transcriber: any Transcriber) {
+        // See `sidecarsInFlight`'s doc comment for the hazard this guards
+        // against: this method and the automatic sweep each build their own
+        // `TranscriptionQueue`, so nothing else stops them from both writing
+        // this exact sidecar at once. Refusing here (rather than queuing or
+        // cancelling the sweep) is the smallest thing that closes it without
+        // touching `TranscriptionQueue` itself.
+        guard Self.mayStartTranscribing(signature: sidecar.signature, inFlight: sidecarsInFlight) else {
+            lastError = "Already transcribing this recording. Try again in a moment."
+            return
+        }
+        sidecarsInFlight.insert(sidecar.signature)
+
         let root = libraryRoot
         let store = TranscriptStore(root: root)
         let library = Library(root: root)
 
         Task {
+            defer { self.sidecarsInFlight.remove(sidecar.signature) }
             let queue = TranscriptionQueue(
                 root: root, store: store, filer: Filer(root: root),
                 resolver: TopicResolver(suggester: OnDeviceSuggester()),
@@ -717,6 +770,17 @@ public final class AppModel: @unchecked Sendable {
 
             try? self.index?.upsert(updated)
             self.reloadRecent()
+        }
+    }
+
+    /// Topic folders are derived, exactly like `index.sqlite`. This is a button,
+    /// not a recovery operation.
+    public func rebuildTopicFolders() {
+        let root = libraryRoot
+        Task.detached {
+            let library = Library(root: root)
+            let sidecars = (try? library.scanSidecars()) ?? []
+            try? Filer(root: root).rebuild(from: sidecars, store: TranscriptStore(root: root))
         }
     }
 

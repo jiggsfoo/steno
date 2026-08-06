@@ -85,3 +85,25 @@ import Testing
     #expect(AppModel.shouldClearTranscriptionState(
         capturedGeneration: 1, currentGeneration: 2) == false)
 }
+
+/// `mayStartTranscribing` is the pure predicate behind `sidecarsInFlight` --
+/// the guard that keeps the automatic sweep and a manual `retranscribe` off
+/// the SAME recording at the same time. `startTranscription`'s sweep and
+/// `retranscribe` each build their own `TranscriptionQueue`, so actor
+/// isolation protects state within one instance, not across two -- nothing
+/// else stops both from writing the same sidecar/transcript concurrently.
+/// Task 13 made those writes UUID-staged and atomic, so they can no longer
+/// tear a file, but two writers can still race last-writer-wins on the same
+/// sidecar, silently reverting a deliberate re-transcription. See
+/// `sidecarsInFlight`'s own doc comment for the full reasoning.
+@Test func aRecordingAlreadyInFlightMayNotBeStartedAgain() {
+    #expect(AppModel.mayStartTranscribing(signature: "sig-1", inFlight: ["sig-1"]) == false)
+}
+
+@Test func aDifferentRecordingInFlightDoesNotBlockThisOne() {
+    #expect(AppModel.mayStartTranscribing(signature: "sig-1", inFlight: ["sig-2"]) == true)
+}
+
+@Test func nothingInFlightBlocksNothing() {
+    #expect(AppModel.mayStartTranscribing(signature: "sig-1", inFlight: []) == true)
+}
