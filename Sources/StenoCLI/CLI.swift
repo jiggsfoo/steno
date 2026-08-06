@@ -144,8 +144,45 @@ struct CLI {
                 parkForever()
             }
 
+        case "transcribe":
+            guard args.count >= 2 else {
+                print("usage: steno transcribe <path-to-audio> [locale]")
+                exit(2)
+            }
+            let audio = URL(fileURLWithPath: args[1])
+            let requested = Locale(identifier: args.count >= 3 ? args[2] : "en_US")
+            let backend = SpeechAnalyzerTranscriber()
+
+            guard await backend.isAvailable() else {
+                print("on-device transcription is unavailable on this Mac")
+                exit(1)
+            }
+
+            let started = Date()
+            let body: TranscriptBody
+            do {
+                body = try await backend.transcribe(audio: audio, locale: requested)
+            } catch let error as TranscriberError {
+                // Without this the human running the quality gate gets a Swift
+                // top-level trap instead of the sentence the error already carries.
+                print(error.localizedDescription)
+                exit(1)
+            }
+            let elapsed = Date().timeIntervalSince(started)
+
+            // The requested locale is echoed only when the model substituted a
+            // different one, so the reader knows which model actually spoke.
+            let substitution = body.locale == requested.identifier
+                ? "" : "  (requested \(requested.identifier))"
+            print("backend:  \(body.backend) (\(body.modelID))")
+            print("locale:   \(body.locale)\(substitution)")
+            print("segments: \(body.segments.count)")
+            print("elapsed:  \(String(format: "%.1f", elapsed))s")
+            print("")
+            print(body.text)
+
         default:
-            print("usage: steno [probe|info|list|pull <name>|watch]")
+            print("usage: steno [probe|info|list|pull <name>|watch|transcribe <path> [locale]]")
             exit(2)
         }
     }
