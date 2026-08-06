@@ -115,5 +115,19 @@ private let library = [
     let untitled = [loaded("eee", title: nil, [segment("consignment terms", at: 4)])]
     let moment = try #require(TranscriptSearch.moments(matching: "consignment", in: untitled).moments.first)
 
-    #expect(!moment.recordingTitle.isEmpty)
+    #expect(moment.recordingTitle == "eee.hda")
+}
+
+/// Exactly `limit` matches is NOT a truncation — which is the entire reason
+/// `capped` is returned rather than inferred from `count == limit`.
+@Test func exactlyTheLimitIsNotReportedAsCapped() {
+    let exact = (0..<5).map { i in
+        loaded("sig\(i)", title: "R\(i)",
+               (0..<5).map { j in segment("consignment line", at: Double(j)) })
+    }
+
+    let (moments, capped) = TranscriptSearch.moments(matching: "consignment", in: exact, limit: 25)
+
+    #expect(moments.count == 25)
+    #expect(capped == false)
 }
