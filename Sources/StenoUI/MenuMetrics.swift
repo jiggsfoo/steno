@@ -95,26 +95,4 @@ enum MenuMetrics {
     /// this is what makes `rowHeight` come out of the layout rather than being
     /// imposed on it.
     static let rowVerticalPadding: CGFloat = 4
-
-    /// Gap between a row's title and its detail line.
-    ///
-    /// **Matched by eye, like `highlightInset` and `popoverInset`'s extra 3pt.**
-    /// AppKit has no constant to copy here: a real `NSMenu` renders a two-line
-    /// item from an attributed string, so its line spacing is whatever that
-    /// string's paragraph style says rather than a system metric.
-    ///
-    /// This is NOT the gap you see. The fonts add about 3pt of their own
-    /// leading, so 4 here renders as 7.0pt of clear space between the title's
-    /// descenders and the detail's ascenders — measured, and pinned by
-    /// `aTwoLineRowGivesItsSecondLineRoomToBreathe`.
-    ///
-    /// It was 1, which rendered as 4.0pt, and on a run of recent rows —
-    /// "Aug 5 13:00" over "Distribution Networking Explained", both carrying a
-    /// `g` — the two lines read as touching and the detail looked like a
-    /// heading for the row below it. The constraint from the other side is
-    /// `rowVerticalPadding`, which leaves 12.5pt between rows and cannot move:
-    /// it is a measured native value that makes a one-line row come out at
-    /// exactly 24pt. So this has to stay comfortably under that, or the pair
-    /// stops reading as one row.
-    static let detailSpacing: CGFloat = 4
 }

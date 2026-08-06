@@ -162,7 +162,7 @@ public struct MenuRow: View {
                     .font(title.isEmpty ? .caption : nil)
                     .foregroundStyle(symbolColor(accent))
             }
-            VStack(alignment: .leading, spacing: MenuMetrics.detailSpacing) {
+            VStack(alignment: .leading, spacing: 1) {
                 // An empty title (e.g. an error/notice row that is all detail)
                 // must not render at all -- an empty `Text` still reserves a
                 // full line above the caption.
