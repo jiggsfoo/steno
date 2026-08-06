@@ -257,6 +257,16 @@ public final class AppModel: @unchecked Sendable {
         reloadRecent()
     }
 
+    /// Every recording the index knows about, for the library window.
+    ///
+    /// Ordered by `recorded_at DESC` by `LibraryIndex.all()`, which is the
+    /// order the window wants anyway. Returns empty rather than throwing: an
+    /// unreadable index is already surfaced through `lastError` by `openIndex`,
+    /// and a window that shows nothing is better than one that cannot open.
+    public func librarySidecars() -> [Sidecar] {
+        (try? index?.all()) ?? []
+    }
+
     private func reloadRecent() {
         recent = (try? index?.recent(limit: 5)) ?? []
     }
