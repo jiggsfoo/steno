@@ -1184,21 +1184,32 @@ import Testing
     "File this under Grocery List.",
     "file this under grocery list",
     "Okay, so, file this under Grocery List. Anyway,",
+    "File this in Grocery List.",
     "Save this to Grocery List.",
     "Save this in Grocery List.",
-    "Put this in Grocery List.",
-    "Put this under Grocery List!",
+    "Save this under Grocery List!",
 ])
 func recognisedPhrasingsYieldADirective(_ text: String) {
     #expect(DirectiveParser.parse(text) != nil, "no directive found in: \(text)")
 }
 
+/// The last four are VERBATIM from Angelo's real recordings, captured during
+/// the Task 4 quality gate. Scanning 3 hours of real speech produced 12
+/// directive-shaped phrases and zero genuine directives — and the plan's
+/// original `put (this|that|it) (under|into)` pattern matched two of them,
+/// deep inside client calls. Filing a client call under an invented topic is
+/// the exact failure the prefilter exists to prevent, so `put` and `stick`
+/// were dropped entirely. Do not re-add them to make a phrasing work.
 @Test(arguments: [
     "",
     "I need to buy groceries later.",
     "The grocery list is on the fridge.",
     "We filed the paperwork under the wrong client.",
     "Put this in the car when you get home.",
+    "take that credit card string, put it into the payment method",
+    "I reconstitute it and I put it into a sprayer",
+    "we could have it testable by next week and then put it live August 14th",
+    "the doctor just sent me a PDF, so I'm going to save this one",
 ])
 func ordinarySpeechYieldsNoDirective(_ text: String) {
     #expect(DirectiveParser.parse(text) == nil, "false positive on: \(text)")
@@ -1259,15 +1270,25 @@ public struct Directive: Sendable, Equatable {
 /// from being filed under Grocery List. The model downstream is free to
 /// interpret; it is not free to invent an instruction that was never given.
 public enum DirectiveParser {
-    /// Ordered by specificity. `under` and `to` are near-unambiguous; `put this
-    /// in` is the loosest and is why the tail must be non-empty to count.
+    /// EXPLICIT FILING VERBS ONLY. `put` and `stick` are deliberately absent.
+    ///
+    /// They were in this list until the Task 4 quality gate ran it against 3
+    /// hours of real recordings, where `put (this|that|it) into` matched
+    /// "put it into the payment method" and "put it into a sprayer" — both
+    /// buried in real client calls, both of which would have filed that call
+    /// under a topic nobody asked for. Twelve directive-shaped phrases turned
+    /// up in that corpus and not one was a real directive.
+    ///
+    /// The prefilter's entire value is in what it REFUSES. Recall is the
+    /// cheap side of this trade: an unfiled recording is visible and fixed by
+    /// editing one sidecar field, while a misfiled client call is the failure
+    /// the whole design was built to avoid. If a phrasing you use is missed,
+    /// change the phrasing before widening the grammar.
     private static let patterns = [
         #"\bfile\s+(?:this|that|it)\s+under\s+(.+)"#,
         #"\bfile\s+(?:this|that|it)\s+(?:in|to|into)\s+(.+)"#,
-        #"\bsave\s+(?:this|that|it)\s+(?:under|in|to|into)\s+(.+)"#,
-        #"\bput\s+(?:this|that|it)\s+(?:under|into)\s+(.+)"#,
-        #"\bstick\s+(?:this|that|it)\s+(?:under|in|into)\s+(.+)"#,
         #"\bfiling\s+(?:this|that|it)\s+under\s+(.+)"#,
+        #"\bsave\s+(?:this|that|it)\s+(?:under|in|to|into)\s+(.+)"#,
     ]
 
     public static func parse(_ text: String) -> Directive? {
@@ -1307,7 +1328,9 @@ public enum DirectiveParser {
 - [ ] **Step 4: Run the tests**
 
 Run: `swift test --filter DirectiveParser`
-Expected: all PASS. If `"Put this in the car when you get home."` produces a false positive, that is the intended failure of the loose pattern — `put this in` is absent from the list on purpose. Do not add it.
+Expected: all PASS.
+
+If a negative case fails, **do not widen or loosen a pattern to make it go away** — the negative set is the point of this type, and four of its entries are verbatim sentences from real recordings that a looser grammar already misfiled once. Fix the pattern that over-matched instead.
 
 - [ ] **Step 5: Commit**
 
@@ -2190,6 +2213,18 @@ public struct QueueProgress: Sendable, Equatable {
 /// is no job file to go stale or corrupt — the same reasoning that makes
 /// `index.sqlite` disposable.
 public actor TranscriptionQueue {
+    /// PINNED, not `Locale.current`.
+    ///
+    /// `en_PH` is not a supported `SpeechTranscriber` locale, and
+    /// `supportedLocale(equivalentTo:)` resolved it to a DIFFERENT English
+    /// variant on each run during the Task 4 gate — `en_AU`, `en_US`, and
+    /// `en_SG` were all observed. That makes both the acoustic model and the
+    /// `locale` recorded in every transcript vary run to run, which is not
+    /// something a provenance field is allowed to do. Explicit locales resolve
+    /// to themselves, so pinning removes the non-determinism outright.
+    /// Variants agreed 94–99.7% on real audio, so the pin costs almost nothing.
+    public static let locale = Locale(identifier: "en_US")
+
     private let root: URL
     private let store: TranscriptStore
     private let filer: Filer
@@ -2234,7 +2269,7 @@ public actor TranscriptionQueue {
             let audio = root.appendingPathComponent(sidecar.relativePath)
             do {
                 let body = try await transcriber.transcribe(
-                    audio: audio, locale: Locale.current)
+                    audio: audio, locale: Self.locale)
                 transcript = try store.write(body, for: sidecar, at: Date())
             } catch {
                 updated.transcriptionAttempts = (sidecar.transcriptionAttempts ?? 0) + 1

@@ -143,3 +143,48 @@ Recorded so they are not "fixed" later by mistake.
 - **`SyncEngine.isSyncing` is unreachable from the app**, because `startSync`
   builds a fresh engine per call. `AppModel.syncTask` is the real mutex. The
   engine guard remains for direct API users and is exercised by tests.
+
+## Spec 2 hardware and quality checks
+
+### On-device transcription quality (2026-08-06) — measured, PASS with caveats
+
+All 11 recordings in the live library transcribed through `steno transcribe`
+with `SpeechAnalyzer`. 10 produced text; the 11th is a 3-second clip that is
+silence. A 66-minute meeting took 47 s — roughly 85x realtime, on the Neural
+Engine — so long-form needs no chunking and the automatic path is effectively
+free. English output is clean and coherent.
+
+**Taglish was NOT measured.** The sample is 26,118 words of English business
+meetings with essentially no Tagalog in it. The spec's largest flagged risk is
+therefore *unmeasured*, not disproven. Recorded here so nobody later reads
+"quality check passed" as "Taglish works".
+
+**Tagalog has no on-device model at all.** `fil_PH` and `tl_PH` both resolve to
+`nil` through `supportedLocale(equivalentTo:)`. On a code-switched recording
+only the English side has a model behind it. Hard limit, not a tuning problem.
+
+**`en_PH` is not a supported locale and its fallback is non-deterministic.**
+The same call returned `en_AU`, `en_US`, and `en_SG` across runs, which makes
+both the acoustic model and the persisted `locale` field vary run to run.
+Explicit locales resolve to themselves, so **the transcription locale is pinned
+to `en_US`**. Variants agree 94–99.7% on this audio, differing mostly on
+spelling (`realise`/`realize`), so the pin costs little.
+
+### A filing pattern was disproved by real speech, before it was built
+
+Scanning 3 hours of real recordings for directive-shaped phrases returned 12
+hits and **zero genuine filing directives**. Two of them matched the plan's
+own `put (this|that|it) (under|into)` pattern:
+
+- "take that credit card string, **put it into** the payment method"
+- "I reconstitute it and I **put it into** a sprayer"
+
+Both sit deep inside long client calls, and both would have filed a real
+recording under an invented topic — the exact failure the regex prefilter
+exists to prevent. `put` and `stick` were dropped from `DirectiveParser`;
+only explicit filing verbs (`file`, `filing`, `save … under/in/to/into`)
+remain. All four real sentences are now negative test cases.
+
+The lesson generalises: the prefilter's value is entirely in what it refuses,
+so its patterns must be validated against real speech rather than imagined
+speech. Any new pattern added later gets the same treatment.
