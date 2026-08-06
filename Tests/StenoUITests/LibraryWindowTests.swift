@@ -57,6 +57,6 @@ private func idViewID(in value: Any, depth: Int = 0) -> String? {
     let content = LibraryWindow.detailContent(
         for: recording("abc123"), player: player,
         query: "", moments: [], capped: false,
-        knownTopics: [], model: model, onPlay: { _ in })
+        knownTopics: [], model: model, onSaved: {}, onPlay: { _ in })
     #expect(idViewID(in: content) == "abc123")
 }

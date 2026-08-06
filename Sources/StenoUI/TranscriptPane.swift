@@ -9,16 +9,20 @@ public struct TranscriptPane: View {
     let player: AudioPlayer
     let knownTopics: [String]
     @Bindable var model: AppModel
+    /// Forwarded to `RecordingEditor` unchanged — see its own doc comment.
+    let onSaved: () async -> Void
 
     @State private var isFollowing = true
     @State private var isEditing = false
 
     public init(recording: LoadedRecording, player: AudioPlayer,
-                knownTopics: [String], model: AppModel) {
+                knownTopics: [String], model: AppModel,
+                onSaved: @escaping () async -> Void) {
         self.recording = recording
         self.player = player
         self.knownTopics = knownTopics
         self.model = model
+        self.onSaved = onSaved
     }
 
     public var body: some View {
@@ -50,7 +54,8 @@ public struct TranscriptPane: View {
                 }
                 .padding(.horizontal, 12).padding(.top, 10)
                 .sheet(isPresented: $isEditing) {
-                    RecordingEditor(recording: recording, knownTopics: knownTopics, model: model)
+                    RecordingEditor(recording: recording, knownTopics: knownTopics,
+                                     model: model, onSaved: onSaved)
                 }
 
                 if !isFollowing {

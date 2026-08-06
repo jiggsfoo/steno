@@ -9,6 +9,10 @@ public struct LibraryWindow: View {
     @Bindable var model: AppModel
     @State private var store = LibraryStore()
     @State private var player = AudioPlayer()
+    /// Set when `reload()` is asked to run again while a load is already in
+    /// flight. See `reload()`'s own doc comment for why this caller, unlike
+    /// the other two, cannot just let that request be dropped.
+    @State private var reloadQueued = false
 
     public init(model: AppModel) { self.model = model }
 
@@ -26,7 +30,8 @@ public struct LibraryWindow: View {
                 moments: search.moments,
                 capped: search.capped,
                 knownTopics: RecordingEditor.topicChoices(from: store.recordings),
-                model: model
+                model: model,
+                onSaved: { await reload() }
             ) { moment in
                 // A moment lands you somewhere: seek and play its recording,
                 // then select it so clearing the query leaves you in that
@@ -85,7 +90,10 @@ public struct LibraryWindow: View {
     /// keeps this a pure composition of already-known values, which is what
     /// makes it something a test can call directly. `model` is passed through
     /// unchanged so `TranscriptPane` can hand it to `RecordingEditor`, which
-    /// needs it to save an edit.
+    /// needs it to save an edit. `onSaved` is `body`'s own `reload()`,
+    /// forwarded the same way — `RecordingEditor` writes through `model` but
+    /// has no way back into `store.recordings` on its own; see
+    /// `RecordingEditor.onSaved`'s doc comment.
     @ViewBuilder
     static func detailContent(
         for recording: LoadedRecording?,
@@ -95,6 +103,7 @@ public struct LibraryWindow: View {
         capped: Bool,
         knownTopics: [String],
         model: AppModel,
+        onSaved: @escaping () async -> Void,
         onPlay: @escaping (Moment) -> Void
     ) -> some View {
         // Trimmed to match `TranscriptSearch.moments`, which trims before
@@ -109,7 +118,7 @@ public struct LibraryWindow: View {
             MomentsPane(moments: moments, capped: capped, onPlay: onPlay)
         } else if let recording {
             TranscriptPane(recording: recording, player: player,
-                            knownTopics: knownTopics, model: model)
+                            knownTopics: knownTopics, model: model, onSaved: onSaved)
                 .id(recording.id)
         } else {
             ContentUnavailableView("No recording selected", systemImage: "waveform")
@@ -130,8 +139,28 @@ public struct LibraryWindow: View {
     /// is no suspension point at which a second caller could observe
     /// `isLoading == false` and slip through: the whole "check, then start" step
     /// runs as one uninterrupted turn on the actor.
+    ///
+    /// A dropped call used to be harmless for the original two callers
+    /// (`.task`, and the sweep's `transcriptionProgress` going nil) — either
+    /// one landing on top of an in-flight load is redundant with what that
+    /// load is already about to produce. `RecordingEditor`'s `onSaved` is
+    /// different: it exists to make ONE specific edit visible, and scanning
+    /// every sidecar (`store.load`) is not instant, so a save landing while a
+    /// sweep-driven reload is already mid-scan is a real, reachable case on a
+    /// library of any size — not hypothetical. Dropping that call silently
+    /// would leave the corrected title showing stale until whatever
+    /// incidental trigger comes next. `reloadQueued` closes that: a call that
+    /// arrives mid-load is remembered rather than lost, and runs exactly once
+    /// more right after, still without a second concurrent `store.load`.
     private func reload() async {
-        guard !store.isLoading else { return }
+        guard !store.isLoading else {
+            reloadQueued = true
+            return
+        }
         await store.load(root: model.libraryRoot, sidecars: model.librarySidecars())
+        if reloadQueued {
+            reloadQueued = false
+            await reload()
+        }
     }
 }
