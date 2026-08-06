@@ -18,9 +18,13 @@ public struct LibraryWindow: View {
                 .searchable(text: $store.query, prompt: "Search transcripts")
                 .navigationSplitViewColumnWidth(min: 200, ideal: 240)
         } detail: {
-            // The real empty state, not scaffolding: Tasks 6 and 7 add branches
-            // above this one, and this stays as the nothing-selected case.
-            ContentUnavailableView("No recording selected", systemImage: "waveform")
+            if let selected = store.recordings.first(where: { $0.id == store.selection }) {
+                TranscriptPane(recording: selected, player: player)
+            } else {
+                // The real empty state, not scaffolding: Task 7 adds a branch
+                // above this one, and this stays as the nothing-selected case.
+                ContentUnavailableView("No recording selected", systemImage: "waveform")
+            }
         }
         .task { await reload() }
         // Loading audio belongs here rather than inside a detail branch: a
