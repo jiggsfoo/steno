@@ -23,10 +23,34 @@ import Testing
 /// warns about, one level upstream of band-counting. `hostedInkBands` below
 /// rasterizes through a real (offscreen, unshown) `NSHostingView` backing an
 /// actual `NSWindow` instead, which does draw `ScrollView` content.
-/// Cross-checked against `inkBands` on the real menu bar popover (not
-/// `ScrollView`-backed, so both can measure it): band edges agree to within a
-/// point at both its relaxed and squeezed heights. Substitute rasterizer, not
-/// a different measurement.
+///
+/// NOT a drop-in replacement for `inkBands` — only a usable substitute here.
+/// Cross-checked against `inkBands` on the real menu popover (its one
+/// `ScrollView`-free view, so the only content both can measure): band
+/// BOTTOMS agree exactly across all 22 bands measured, at both its relaxed
+/// and squeezed heights. TOPS do not — `hostedInkBands` reports a top either
+/// identical to `inkBands`' or exactly one 2x-scale pixel row (0.5pt)
+/// earlier, never later, in roughly half of them. Not the `scale` this file
+/// derives (`rep.pixelsWide / size.width` measured 2.0 every time, same as
+/// `inkBands`' hardcoded constant) and not `alphaFloor` (0.05, identical) —
+/// most likely `cacheDisplay`'s antialiasing painting a fractional-alpha
+/// pixel row above certain glyphs that `ImageRenderer`'s rasterizer does not
+/// quite reach. This shrinks a measured GAP (next band's top minus this
+/// band's bottom) by up to 0.5pt, one-sided, never widening one.
+///
+/// Confirmed load-bearing, not theoretical: reproducing the real spec-2
+/// collapse (`MenuRow`'s `.fixedSize(horizontal:vertical:)` disabled, then
+/// restored) makes `inkBands` fail cleanly — relaxed 4.0pt, squeezed 3.0pt,
+/// needs ≥3.5pt. The identical collapse measured through `hostedInkBands`
+/// reads relaxed 3.5pt, squeezed 3.0pt: PASSES, exactly on the -0.5pt
+/// tolerance floor below. `TranscriptPane`'s own margins (12–15.5pt, 24-31x
+/// that 0.5pt bias) are nowhere near that edge, so the assertion below is
+/// sound — but do not reuse `hostedInkBands` for an assertion whose margin
+/// is within a couple of points of its tolerance without accounting for
+/// this. (`List`, the container behind `LibrarySidebar`/`ReclaimView`, has
+/// the same `ImageRenderer` blindness and is worse: it returns one band
+/// spanning the whole frame instead of zero, which reads as a successful
+/// measurement. No test uses `inkBands` against a `List` today.)
 @MainActor
 private func hostedInkBands(of view: some View, alphaFloor: CGFloat = 0.05) -> [InkBand] {
     let hosting = NSHostingView(rootView: view)
