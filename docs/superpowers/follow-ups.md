@@ -322,3 +322,43 @@ relaunch. Deepgram's own staleness is handled correctly in both directions.
   …")` while `rebuild` uses an exact-line match. Harmless while signatures are
   fixed width, but the same file now answers the same identity question two
   ways.
+
+## Spec 4 deferred human checks
+
+No agent in this project has a display, so the library window itself has
+never been seen open. Everything below needs a person with the window in
+front of them — recorded here so it isn't quietly assumed working just
+because the layout test and the release build came back clean.
+
+1. **The window opening at a sensible size, and the split being draggable.**
+   Check: open the library window and confirm it starts at a reasonable size
+   on screen, and that the sidebar/reader split can actually be dragged wider
+   and narrower.
+2. **Search returning moments, and clicking one seeking correctly.** Check:
+   type a search term that should match something in a real transcript,
+   confirm moments come back, click one, and confirm playback seeks to that
+   point rather than somewhere nearby or not at all.
+3. **Following highlighting the right line and detaching on a hand scroll.**
+   Check: play a recording and watch the transcript auto-scroll and highlight
+   the current line, then scroll by hand and confirm following stops rather
+   than fighting the manual scroll.
+4. **The Resume banner appearing and working.** Check: after detaching by
+   hand-scrolling, confirm the "Following paused" banner appears, and that
+   its Resume button jumps back to the current line and re-attaches.
+5. **Editing a title and a topic, and seeing the note move in Finder.**
+   Check: use the editor to change a recording's title and topic, then
+   confirm in Finder that the note file actually moved to the new topic
+   folder rather than leaving a stale copy behind.
+6. **Speaker labels appearing only on a Deepgram transcript, never on an
+   on-device one.** Check: open a recording transcribed with Deepgram and
+   confirm speaker labels are present, then open one transcribed on-device
+   and confirm no speaker label is shown, invented or otherwise.
+7. **A recording with no transcript showing the not-yet state.** Check: open
+   a recording that hasn't been transcribed yet and confirm the pane reads as
+   "not transcribed yet" rather than blank or broken.
+
+**Filing has still never run on the real library.** Zero topic folders exist
+under the real library root — the sidebar's topic grouping has only ever been
+exercised against fixtures, never against a real directory tree, until either
+a filing directive is actually spoken during a recording or a topic is set by
+hand in this window.
