@@ -11,6 +11,17 @@ public enum DeviceStatus: Equatable, Sendable {
     case unavailable(String)
 }
 
+/// What happened when the library window tried to save an edit.
+public enum RecordingEditOutcome: Sendable, Equatable {
+    case updated(Sidecar)
+    /// Something else — the sweep, or a manual re-transcription — is writing
+    /// this recording right now. The editor says so and leaves the field alone.
+    case busy
+    /// `TopicName` refused the folder name. Carries the name that was refused.
+    case rejectedTopic(String)
+    case failed(String)
+}
+
 /// `@unchecked Sendable`: every mutable property is only ever written from
 /// MainActor-isolated code (this class's own `@MainActor` methods, or an
 /// explicit `MainActor.run` / `Task { @MainActor in ... }` hop from a
@@ -668,6 +679,31 @@ public final class AppModel: @unchecked Sendable {
         !inFlight.contains(signature)
     }
 
+    /// The edited sidecar, as a pure function of the old one.
+    ///
+    /// Extracted so the part that decides WHAT changes is testable without a
+    /// live `AppModel` — the same split as `mayStartTranscribing` and
+    /// `shouldClearTranscriptionState`. Only `title` and `topic` may move;
+    /// everything identifying or provenance-bearing is copied through.
+    ///
+    /// Blank becomes nil rather than "": an empty title is the state a
+    /// recording has before transcription, and an empty topic would make
+    /// `Filer` build a path at the library root itself.
+    nonisolated static func editedSidecar(
+        from sidecar: Sidecar, title: String, topic: String?
+    ) -> Sidecar {
+        func trimmedOrNil(_ value: String?) -> String? {
+            guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !trimmed.isEmpty else { return nil }
+            return trimmed
+        }
+
+        var edited = sidecar
+        edited.title = trimmedOrNil(title)
+        edited.topic = trimmedOrNil(topic)
+        return edited
+    }
+
     /// Manual escape hatch for the menu's "Sync now" button -- the same
     /// guard `startSync` already relies on via `.attached` and the poll loop,
     /// just reachable on demand instead of waiting for the next attach or tick.
@@ -827,6 +863,68 @@ public final class AppModel: @unchecked Sendable {
                 self.lastError = description
             }
         }
+    }
+
+    /// Saves a title and topic edit from the library window.
+    ///
+    /// This is the THIRD writer to a sidecar, after the automatic sweep and
+    /// manual re-transcription, and it takes the same `sidecarsInFlight` guard
+    /// they do. Skipping it reopens the race spec 2 closed, and the failure
+    /// would be silent: last writer wins, so a title just typed could be
+    /// replaced by the sweep finishing a moment later.
+    ///
+    /// Write order: sidecar first, then the index, then the note. The sidecar
+    /// is the source of truth and the only step that can fail the edit -- once
+    /// it lands, the correction is durable even if everything after it fails.
+    /// The index and the note are both derived, rebuildable caches (see
+    /// `LibraryIndex`'s and `Filer`'s own doc comments), so a failure in
+    /// either leaves them stale rather than wrong-forever, recoverable via
+    /// "Rebuild Index" / `rebuildTopicFolders()` -- not worth failing the edit
+    /// over, matching `TranscriptionQueue.run`'s own note-write, which is
+    /// `try?` for the same reason.
+    ///
+    /// The note removal is unconditional on a PREVIOUS topic existing, not on
+    /// the topic having changed -- same as `TranscriptionQueue.run`. A note's
+    /// filename embeds the title (`Filer.noteStem(for:)`), so a title-only
+    /// edit with the topic unchanged still moves the note to a new path;
+    /// removing only on a topic change would leave the old, stale-titled note
+    /// behind as an orphan next to the new one.
+    public func updateRecording(
+        _ sidecar: Sidecar, title: String, topic: String?
+    ) async -> RecordingEditOutcome {
+        let requested = topic?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let requested, !requested.isEmpty, TopicName.sanitised(requested) == nil {
+            return .rejectedTopic(requested)
+        }
+
+        guard Self.mayStartTranscribing(signature: sidecar.signature,
+                                        inFlight: sidecarsInFlight) else { return .busy }
+        sidecarsInFlight.insert(sidecar.signature)
+        defer { sidecarsInFlight.remove(sidecar.signature) }
+
+        let edited = Self.editedSidecar(from: sidecar, title: title, topic: topic)
+        let root = libraryRoot
+        let library = Library(root: root)
+
+        do {
+            try await Task.detached { try library.updateSidecar(edited) }.value
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+
+        try? index?.upsert(edited)
+
+        let filer = Filer(root: root)
+        if let previousTopic = sidecar.topic {
+            filer.removeNote(for: sidecar, topic: previousTopic)
+        }
+        if edited.topic != nil,
+           let transcript = TranscriptStore(root: root).transcript(for: edited) {
+            _ = try? filer.write(for: edited, transcript: transcript)
+        }
+
+        reloadRecent()
+        return .updated(edited)
     }
 
     /// Topic folders are derived, exactly like `index.sqlite`. This is a button,
