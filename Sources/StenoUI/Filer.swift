@@ -67,15 +67,34 @@ public struct Filer: Sendable {
         // if now empty: the user may have put other things in it.
     }
 
-    /// Removes every topic folder this type owns and regenerates them.
+    /// Removes every NOTE this type owns inside a topic folder it owns, and
+    /// regenerates them.
     ///
     /// A folder is "owned" when its name matches some sidecar's topic. Anything
     /// else at the root is left alone — dated folders, `.incoming`, and whatever
-    /// the user put there.
+    /// the user put there. Critically, the same restraint applies INSIDE an
+    /// owned folder: a topic folder sits at the library root, in Finder, where
+    /// a person can and does drop their own files — `removeNote`'s doc comment
+    /// says exactly this. Deleting the whole folder tree, as this once did,
+    /// destroyed anything a user had put there. Only `.md` files whose front
+    /// matter carries a `signature:` belonging to one of the passed-in
+    /// sidecars are removed; every other file — a user's own, or an unrelated
+    /// note with no matching signature — is left untouched.
     public func rebuild(from sidecars: [Sidecar], store: TranscriptStore) throws {
+        let signatures = Set(sidecars.map(\.signature))
         let topics = Set(sidecars.compactMap { $0.topic.flatMap(TopicName.sanitised) })
         for topic in topics {
-            try? FileManager.default.removeItem(at: root.appendingPathComponent(topic))
+            let folder = root.appendingPathComponent(topic)
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: folder.path)
+            else { continue }
+            for name in names where name.hasSuffix(".md") {
+                let url = folder.appendingPathComponent(name)
+                guard let text = try? String(contentsOf: url, encoding: .utf8),
+                      let signature = Self.signature(inFrontMatter: Self.frontMatter(of: text)),
+                      signatures.contains(signature)
+                else { continue }
+                try? FileManager.default.removeItem(at: url)
+            }
         }
         for sidecar in sidecars {
             guard sidecar.topic.flatMap(TopicName.sanitised) != nil,
@@ -127,6 +146,20 @@ public struct Filer: Sendable {
             of: "\n---\n", range: afterOpeningFence..<text.endIndex)
         else { return Substring(text) }
         return text[afterOpeningFence..<closingFence.lowerBound]
+    }
+
+    /// The value of the `signature:` line inside a front-matter slice, or nil
+    /// if there isn't one. `rebuild` uses this to decide whether a note found
+    /// on disk is one this type owns, rather than doing an O(sidecars) substring
+    /// `contains` check per file that could in principle match a signature
+    /// that is merely a substring of another.
+    private static func signature(inFrontMatter frontMatter: Substring) -> String? {
+        for line in frontMatter.split(separator: "\n") {
+            if line.hasPrefix("signature: ") {
+                return String(line.dropFirst("signature: ".count))
+            }
+        }
+        return nil
     }
 
     // en_US_POSIX for the same reason `Library` uses it: under a non-Gregorian

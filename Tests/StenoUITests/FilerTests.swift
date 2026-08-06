@@ -212,6 +212,56 @@ private func sampleTranscript(_ signature: String = "c8357e00d535682319c8e19d506
     #expect(topLevel.filter { !$0.hasPrefix("2026-") }.count == 2)
 }
 
+/// CRITICAL: a topic folder sits at the library root, in Finder — exactly the
+/// kind of folder a person drops their own file into, or where an unrelated
+/// note with no matching signature might already live. `removeNote` already
+/// says so ("Leave the folder even if now empty: the user may have put other
+/// things in it."); `rebuild` must honour the same rule. Pressing "Rebuild
+/// Topic Folders" must never destroy a file this type does not own.
+@Test func rebuildLeavesFilesItDoesNotOwnAlone() throws {
+    let root = tempRoot()
+    let filer = Filer(root: root)
+    let store = TranscriptStore(root: root)
+    let sidecar = filed(signature: "aaaa1111", topic: "Groceries",
+                        relativePath: "2026-08-05/aaaa1111.mp3")
+    try store.write(
+        TranscriptBody(text: "buy eggs", segments: [], locale: "en_PH",
+                       backend: "speechanalyzer", modelID: "m"), for: sidecar, at: Date())
+
+    // First pass creates the folder and the owned note.
+    try filer.rebuild(from: [sidecar], store: store)
+    let folder = root.appendingPathComponent("Groceries")
+
+    // A user-authored file that happens to live in this topic folder.
+    let userFile = folder.appendingPathComponent("Notes.txt")
+    try "keep me".write(to: userFile, atomically: true, encoding: .utf8)
+
+    // An unrelated `.md` with no matching signature — not this type's note.
+    let unrelatedNote = folder.appendingPathComponent("Unrelated.md")
+    try """
+        ---
+        signature: not-a-real-signature
+        ---
+
+        Somebody else's note.
+        """.write(to: unrelatedNote, atomically: true, encoding: .utf8)
+
+    try filer.rebuild(from: [sidecar], store: store)
+
+    #expect(FileManager.default.fileExists(atPath: userFile.path))
+    #expect(try String(contentsOf: userFile, encoding: .utf8) == "keep me")
+    #expect(FileManager.default.fileExists(atPath: unrelatedNote.path))
+
+    // The owned note must still be correctly regenerated alongside them.
+    let ownedNames = try FileManager.default.contentsOfDirectory(atPath: folder.path)
+        .filter { $0.hasSuffix(".md") && $0 != "Unrelated.md" }
+    #expect(ownedNames.count == 1)
+    let ownedText = try String(
+        contentsOf: folder.appendingPathComponent(ownedNames[0]), encoding: .utf8)
+    #expect(ownedText.contains("signature: aaaa1111"))
+    #expect(ownedText.contains("buy eggs"))
+}
+
 @Test func aSidecarWithNoTopicProducesNoNote() throws {
     let root = tempRoot()
     let unfiled = filed(topic: nil)
