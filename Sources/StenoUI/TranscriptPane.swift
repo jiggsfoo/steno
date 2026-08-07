@@ -58,9 +58,10 @@ public struct TranscriptPane: View {
     /// `player.currentTime`, so a setter that waited for release would leave
     /// the thumb pinned under the pointer, unmoving, for the whole gesture.
     private var transport: some View {
-        // `?? 0` rather than a second unknown-duration branch: `scrubber` and
-        // `elapsed` already treat zero as "not known", so resolving to one
-        // number here keeps the bar and the readout unable to disagree.
+        // `?? 0` rather than a second unknown-duration branch: `scrubber`,
+        // `remaining`, and `total` already treat zero as "not known", so
+        // resolving to one number here keeps the bar and both labels unable
+        // to disagree.
         let duration = Self.transportDuration(
             observed: player.duration, sidecar: recording.sidecar.durationSeconds) ?? 0
         let scrubber = Self.scrubber(currentTime: player.currentTime, duration: duration)
@@ -91,7 +92,7 @@ public struct TranscriptPane: View {
                 .disabled(!scrubber.isEnabled)
                 .accessibilityLabel("Playback position")
 
-            Text(Self.elapsed(currentTime: player.currentTime, duration: duration))
+            Text(Self.elapsedLabel(currentTime: player.currentTime))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
@@ -279,16 +280,56 @@ public struct TranscriptPane: View {
         let isEnabled: Bool
     }
 
-    /// The transport's readout: `0:41 / 66:25`, or `0:41 / --:--` while the
-    /// duration is still unknown.
+    /// The transport's left-hand label: elapsed time alone.
     ///
     /// PURE. Reuses `timestamp(_:)` rather than growing a second formatter —
-    /// two would drift, and this readout sits directly under the per-line
-    /// stamps it has to agree with.
-    nonisolated static func elapsed(currentTime: Double, duration: Double) -> String {
-        let now = timestamp(currentTime.isFinite && currentTime > 0 ? currentTime : 0)
-        guard duration.isFinite, duration > 0 else { return "\(now) / --:--" }
-        return "\(now) / \(timestamp(duration))"
+    /// two would drift, and this sits directly under the per-line stamps it
+    /// has to agree with.
+    nonisolated static func elapsedLabel(currentTime: Double) -> String {
+        timestamp(currentTime.isFinite && currentTime > 0 ? currentTime : 0)
+    }
+
+    /// The transport's right-hand label in its counting-down state.
+    ///
+    /// PURE. Clamped at zero: `AVPlayer` can report a `currentTime` a hair
+    /// past the item's duration at the end of playback, and "-0:01 remaining"
+    /// is nonsense a reader would notice.
+    nonisolated static func remaining(currentTime: Double, duration: Double) -> String {
+        guard duration.isFinite, duration > 0 else { return "--:--" }
+        let now = currentTime.isFinite ? min(max(currentTime, 0), duration) : 0
+        return "-\(timestamp(duration - now))"
+    }
+
+    /// The transport's right-hand label in its total state. Clicking the label
+    /// swaps between this and `remaining`.
+    ///
+    /// PURE. A zero duration means "not known yet" here exactly as it does in
+    /// `scrubber` and `transportDuration`, so the bar and both labels can
+    /// never disagree about whether the length is known.
+    nonisolated static func total(duration: Double) -> String {
+        guard duration.isFinite, duration > 0 else { return "--:--" }
+        return timestamp(duration)
+    }
+
+    /// Where a ±10s skip lands, clamped to the recording.
+    ///
+    /// PURE. Both ends matter: a negative result becomes a negative `CMTime`
+    /// in `AudioPlayer.seek`, and overshooting the end leaves the scrubber
+    /// outside its own range, which is not a defined `Slider` state.
+    nonisolated static func skipTarget(from currentTime: Double,
+                                       by delta: Double,
+                                       duration: Double) -> Double {
+        guard duration.isFinite, duration > 0 else { return 0 }
+        let now = currentTime.isFinite ? currentTime : 0
+        return min(max(now + delta, 0), duration)
+    }
+
+    /// The speed menu's choices, slowest first.
+    ///
+    /// PURE. Which one is current is `AudioPlayer.rate`, not a return value
+    /// here — one source of truth for the speed.
+    nonisolated static func speedChoices() -> [Double] {
+        [0.75, 1, 1.25, 1.5, 1.75, 2]
     }
 
     /// A speaker label, or nil when the recording was never diarized.

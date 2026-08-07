@@ -109,31 +109,6 @@ import Testing
     #expect(TranscriptPane.transportDuration(observed: .infinity, sidecar: 3985) == 3985)
 }
 
-/// The bar and the readout are resolved from ONE number, so they cannot
-/// disagree about how long the recording is.
-@Test func theReadoutShowsTheFallbackDurationTheBarIsScrubbing() {
-    let duration = TranscriptPane.transportDuration(observed: 0, sidecar: 3985) ?? 0
-    #expect(TranscriptPane.elapsed(currentTime: 0, duration: duration) == "0:00 / 66:25")
-}
-
-@Test func theTransportReadoutPairsElapsedWithDuration() {
-    #expect(TranscriptPane.elapsed(currentTime: 41, duration: 3985) == "0:41 / 66:25")
-}
-
-/// No invented "0:00" total: a duration that is not known yet must not read as
-/// a zero-length recording.
-@Test func theTransportReadoutSaysNothingItDoesNotKnow() {
-    #expect(TranscriptPane.elapsed(currentTime: 0, duration: 0) == "0:00 / --:--")
-    #expect(TranscriptPane.elapsed(currentTime: 5, duration: .nan) == "0:05 / --:--")
-}
-
-/// One formatter, not two. The readout sits directly under the per-line
-/// stamps and has to agree with them.
-@Test func theTransportReadoutUsesTheSameStampAsTheTranscriptLines() {
-    #expect(TranscriptPane.elapsed(currentTime: 41, duration: 3985)
-            == "\(TranscriptPane.timestamp(41)) / \(TranscriptPane.timestamp(3985))")
-}
-
 /// Deepgram populates `speaker`; on-device leaves it nil. A recording that was
 /// never diarized must not sprout a fake "Speaker 1".
 @Test func onlyDiarizedSegmentsGetASpeakerLabel() {
@@ -147,4 +122,65 @@ import Testing
 @Test func speakerLabelsAreOneBasedForReading() {
     #expect(TranscriptPane.speakerLabel(for: Segment(start: 0, end: 1, text: "x", speaker: 0)) == "Speaker 1")
     #expect(TranscriptPane.speakerLabel(for: Segment(start: 0, end: 1, text: "x", speaker: 1)) == "Speaker 2")
+}
+
+@Test func theElapsedLabelIsJustTheElapsedTime() {
+    #expect(TranscriptPane.elapsedLabel(currentTime: 41) == "0:41")
+    #expect(TranscriptPane.elapsedLabel(currentTime: 3985) == "66:25")
+}
+
+/// A player that has not loaded reports 0, and one at the very end can report
+/// a hair past. Neither should render as a negative or a NaN.
+@Test func theElapsedLabelSurvivesNonsense() {
+    #expect(TranscriptPane.elapsedLabel(currentTime: -5) == "0:00")
+    #expect(TranscriptPane.elapsedLabel(currentTime: .nan) == "0:00")
+    #expect(TranscriptPane.elapsedLabel(currentTime: .infinity) == "0:00")
+}
+
+@Test func remainingCountsDownWithALeadingMinus() {
+    #expect(TranscriptPane.remaining(currentTime: 41, duration: 3985) == "-65:44")
+}
+
+@Test func remainingIsZeroAtTheEndRatherThanNegative() {
+    #expect(TranscriptPane.remaining(currentTime: 3985, duration: 3985) == "-0:00")
+    #expect(TranscriptPane.remaining(currentTime: 4000, duration: 3985) == "-0:00")
+}
+
+/// Zero duration means "not known yet", exactly as it does in `scrubber` and
+/// `transportDuration` — the bar and both labels resolve from one number.
+@Test func remainingSaysSoWhenTheLengthIsUnknown() {
+    #expect(TranscriptPane.remaining(currentTime: 41, duration: 0) == "--:--")
+}
+
+@Test func totalIsTheWholeLength() {
+    #expect(TranscriptPane.total(duration: 3985) == "66:25")
+    #expect(TranscriptPane.total(duration: 0) == "--:--")
+}
+
+/// Skipping back near the start must land at 0, not at a negative time that
+/// `AudioPlayer.seek` would hand to `AVPlayer` as a `CMTime`.
+@Test func skippingBackNearTheStartLandsAtZero() {
+    #expect(TranscriptPane.skipTarget(from: 3, by: -10, duration: 3985) == 0)
+    #expect(TranscriptPane.skipTarget(from: 0, by: -10, duration: 3985) == 0)
+}
+
+@Test func skippingForwardNearTheEndLandsAtTheEnd() {
+    #expect(TranscriptPane.skipTarget(from: 3980, by: 10, duration: 3985) == 3985)
+}
+
+@Test func skippingInTheMiddleMovesByExactlyTheIncrement() {
+    #expect(TranscriptPane.skipTarget(from: 100, by: -10, duration: 3985) == 90)
+    #expect(TranscriptPane.skipTarget(from: 100, by: 10, duration: 3985) == 110)
+}
+
+/// With no known duration there is nothing to skip within.
+@Test func skippingWithNoKnownDurationStaysPut() {
+    #expect(TranscriptPane.skipTarget(from: 0, by: 10, duration: 0) == 0)
+}
+
+@Test func theSpeedChoicesRunSlowestFirstAndIncludeNormal() {
+    let choices = TranscriptPane.speedChoices()
+
+    #expect(choices == [0.75, 1, 1.25, 1.5, 1.75, 2])
+    #expect(choices == choices.sorted())
 }
