@@ -12,7 +12,28 @@ public enum TopicName {
 
     /// Names the library already owns. A topic folder sits at the library root
     /// beside these, so a collision is indistinguishable from the real thing.
-    private static let reserved: Set<String> = ["undated", ".incoming"]
+    ///
+    /// `LibrarySidebar.unfiled` is in here for a related but distinct reason,
+    /// worth spelling out: it is not a folder at all. It is the heading the
+    /// sidebar files every UNTOPICED recording under
+    /// (`sidecar.topic ?? unfiled`), so a recording genuinely filed under a
+    /// topic of that name merges into the "no topic" group and becomes
+    /// indistinguishable from the recordings that have no topic — the same
+    /// class of collision as `undated`, one level up in the UI instead of on
+    /// disk. Referenced rather than respelled as a second literal, so the two
+    /// cannot drift.
+    ///
+    /// Matched case-INSENSITIVELY: `sanitised` lowercases before this lookup,
+    /// so every entry here must be lowercase. That is the right comparison for
+    /// all three. A folder called "Undated" collides with `undated` on a
+    /// case-insensitive volume, which is the macOS default; and the sidebar
+    /// groups on the topic string itself, where "unfiled" and "Unfiled" would
+    /// merely produce two adjacent headings that both look like the sentinel.
+    private static let reserved: Set<String> = [
+        "undated",
+        ".incoming",
+        LibrarySidebar.unfiled.lowercased(),
+    ]
 
     public static func sanitised(_ raw: String) -> String? {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)

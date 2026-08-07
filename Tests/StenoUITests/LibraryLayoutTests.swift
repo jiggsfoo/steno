@@ -47,10 +47,9 @@ import Testing
 /// that 0.5pt bias) are nowhere near that edge, so the assertion below is
 /// sound — but do not reuse `hostedInkBands` for an assertion whose margin
 /// is within a couple of points of its tolerance without accounting for
-/// this. (`List`, the container behind `LibrarySidebar`/`ReclaimView`, has
-/// the same `ImageRenderer` blindness and is worse: it returns one band
-/// spanning the whole frame instead of zero, which reads as a successful
-/// measurement. No test uses `inkBands` against a `List` today.)
+/// this. (`List` has the same `ImageRenderer` blindness and is worse still --
+/// that warning now lives on `inkBands` itself, where someone about to point
+/// it at `LibrarySidebar` will be looking.)
 @MainActor
 private func hostedInkBands(of view: some View, alphaFloor: CGFloat = 0.05) -> [InkBand] {
     let hosting = NSHostingView(rootView: view)

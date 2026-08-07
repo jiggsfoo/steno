@@ -20,11 +20,19 @@ private func recording(_ signature: String) -> LoadedRecording {
 ///
 /// `Mirror`/`type(of:)` read runtime metadata, which plain Swift access
 /// control (`package`, `@usableFromInline`) does not hide. `View.id(_:)` is
-/// `@inlinable` and its body is literally `return IDView(self, id: id)`
-/// (SwiftUICore's public `.swiftinterface`, confirmed on this SDK at
-/// `SwiftUICore.framework/.../arm64e-apple-macos.swiftinterface` near its
-/// `IDView` declaration) — so this reads the real composition
-/// `LibraryWindow.detailContent` builds, not a stand-in for it. Capped at a
+/// `@inlinable` and its body is literally `return IDView(self, id: id)` — so
+/// this reads the real composition `LibraryWindow.detailContent` builds, not a
+/// stand-in for it.
+///
+/// Verified against **macOS SDK 26.5** (`MacOSX26.5.sdk`, Xcode 26.6 build
+/// 17F113, Swift 6.3.3), in SwiftUICore's public
+/// `.../SwiftUICore.swiftmodule/arm64e-apple-macos.swiftinterface`: `IDView`
+/// is declared at line 18335 and the `.id(_:)` body quoted above is at line
+/// 18362. The SDK version is recorded because this is an unsupported
+/// implementation detail — when this test starts returning nil, the first
+/// thing to check is whether that body still reads the same on whatever SDK
+/// is current, which is a one-step diagnosis with the baseline named and a
+/// re-derivation without it. Capped at a
 /// generous depth rather than recursing unbounded, since `AudioPlayer` is a
 /// reference type reachable from `TranscriptPane` and its
 /// `ObservationRegistrar` internals are not a shape this test owns.

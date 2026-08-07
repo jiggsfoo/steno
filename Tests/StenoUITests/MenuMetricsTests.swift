@@ -26,6 +26,22 @@ struct InkBand {
 /// Rendered at scale 2, so every measurement below resolves to 0.5pt.
 private let renderScale = 2.0
 
+/// Measures a view by reading back the pixels it actually drew.
+///
+/// DO NOT USE THIS ON A `List`, or on anything containing one -- today that
+/// means `LibrarySidebar` and `ReclaimView`. `ImageRenderer` cannot see inside
+/// either a `List` or a `ScrollView`, and the two fail differently: a
+/// `ScrollView`'s content renders as nothing, which is obvious, while a `List`
+/// comes back as ONE band spanning the whole frame. That reads as a
+/// successful measurement -- a band with a plausible height, at a plausible
+/// position -- and any spacing assertion built on it is measuring the
+/// container's bounds, not its contents, while looking like it passed.
+///
+/// `LibraryLayoutTests.hostedInkBands` is the substitute for `ScrollView`
+/// content: an offscreen `NSHostingView` backing a real `NSWindow`, which does
+/// draw it. Read that function's own doc comment before reaching for it -- it
+/// is not a drop-in replacement, and it carries a one-sided 0.5pt bias on
+/// measured gaps.
 @MainActor
 func inkBands(of view: some View, alphaFloor: CGFloat = 0.05) -> [InkBand] {
     let renderer = ImageRenderer(content: view)

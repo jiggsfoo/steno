@@ -51,3 +51,19 @@ func ordinaryNamesPassThroughWithOnlyWhitespaceTrimmed(_ pair: (String, String))
     #expect(TopicName.sanitised("2026-08-05") == nil)
     #expect(TopicName.sanitised("2026-8-5") != nil)   // not the library's format
 }
+
+/// The sidebar's sentinel, not a folder: `LibrarySidebar.grouped` files every
+/// untopiced recording under `sidecar.topic ?? unfiled`. A recording actually
+/// filed under a topic of that name merges into the no-topic group and becomes
+/// indistinguishable from the recordings that genuinely have none — reachable
+/// the moment the new editor lets someone type it.
+///
+/// Asserted against `LibrarySidebar.unfiled` itself, not a copy of its
+/// spelling: a test with its own literal would keep passing if the sentinel
+/// were ever renamed, which is exactly the drift `reserved` references it to
+/// avoid.
+@Test func theSidebarsUnfiledSentinelIsReserved() {
+    #expect(TopicName.sanitised(LibrarySidebar.unfiled) == nil)
+    #expect(TopicName.sanitised(LibrarySidebar.unfiled.lowercased()) == nil)
+    #expect(TopicName.sanitised("  UNFILED  ") == nil)
+}
