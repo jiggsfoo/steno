@@ -499,3 +499,79 @@ under the real library root — the sidebar's topic grouping has only ever been
 exercised against fixtures, never against a real directory tree, until either
 a filing directive is actually spoken during a recording or a topic is set by
 hand in this window.
+
+## Spec 5 deferred human checks
+
+No agent in this project has a display or a way to simulate a real tap, so
+everything below needs a person with the app open and a finger on the
+trackpad — recorded here so it isn't quietly assumed working just because the
+layout and pure-function tests came back clean.
+
+1. **A speed change being audible, and holding across recordings and across a
+   relaunch.** Check: change the playback speed, confirm it is audibly faster
+   or slower, then switch to a different recording and relaunch Steno, and
+   confirm the chosen speed is still applied rather than reset to 1x.
+2. **±10s landing ten seconds away, and re-attaching following when it was
+   detached.** Check: hand-scroll the transcript until following detaches,
+   tap ±10s, and confirm both that playback actually moved ten seconds and
+   that the transcript resumes auto-scrolling.
+3. **Changing speed does *not* move the transcript.** Check: change speed
+   mid-line and confirm the highlighted transcript line does not jump — only
+   elapsed time should move faster, not position.
+4. **The remaining/total label toggling on click.** Check: click the time
+   label and confirm it switches between showing total duration and
+   remaining time.
+5. **Hovering the title and the topic revealing the affordance before you
+   click.** Check: hover each field without clicking and confirm some visual
+   cue appears before any click happens.
+6. **Return commits and Esc restores, for both the title and the topic
+   field.** Check: edit each field and press Return, and confirm the new
+   value sticks; edit again and press Esc, and confirm it reverts to what was
+   there before.
+7. **A refused topic name keeping the field open with what was typed, and
+   showing the reason underneath.** Check: type a topic name that gets
+   rejected and confirm the field stays open with the rejected text still in
+   it and an explanation shown, rather than silently discarding it or
+   closing.
+8. **The combo box's chevron opening a list of the existing topics plus
+   "None — unfile this."** Check: click the chevron and confirm the dropdown
+   lists every topic currently in use, plus an unfiling option.
+9. **The transport's disabled state — no known duration.** This is only
+   reachable on a recording whose audio is missing entirely, and has never
+   actually been seen. If one turns up, confirm the transport reads as
+   disabled rather than showing a broken or infinite duration.
+
+Four more came out of the review rounds, each recorded here because no test
+on this branch can reach it:
+
+10. **The chevron's on-screen legibility.** Task 5 proved by ink-area
+    measurement that the fixed construction draws ~2.17× the ink of the
+    broken one, but that measures the construction in isolation — not that
+    `RecordingEditor`'s own tree draws it at a readable size under a real
+    tap. Check: look at the chevron in the running app and confirm it reads
+    clearly, not just that it measures bigger in isolation than before.
+11. **That a live tap reaches the edit handlers at all.** `@State` on a
+    detached view constructed in a test is inert — writes are accepted and
+    silently dropped, because the storage only materialises once installed
+    in a live hierarchy — and the suite has no gesture-simulation
+    infrastructure. So click-to-edit, Return-commits, Esc-restores, the
+    resync-on-entry, and the menu selections (checks 5–8 above) are all
+    unverified by machine; only a live tap in the running app proves them.
+12. **That ±10s actually re-attaches following.** The rule is "anything that
+    moves the playhead re-attaches"; `skip(by:)` implements it, but nothing
+    asserts the call site — the same gap exists for `scrub(to:)` and the
+    line tap. Check 2 above is the human check that closes this; it covers
+    all three trigger paths, not just ±10s.
+13. **That changing speed does *not* move the transcript.** The other half
+    of the same rule. Check 3 above is the human check; nothing on this
+    branch asserts that a speed change and a position change stay decoupled.
+
+**A latent trap surfaced but not introduced by this branch.**
+`TranscriptPane.timestamp(_:)` does `Int(seconds)`, and both
+`Int(Double.infinity)` and `Int(Double.nan)` trap at runtime in Swift. The
+transport's own callers guard against that, but `timestamp` is also called
+with `segment.start` for every transcript line (`TranscriptPane.swift:230`,
+`MomentsPane.swift:31`), straight from decoded JSON. A corrupt or hand-edited
+transcript with a non-finite `start` would crash the pane rather than render
+badly. Pre-existing, out of scope for spec 5, worth someone's judgement on
+whether to guard it.
