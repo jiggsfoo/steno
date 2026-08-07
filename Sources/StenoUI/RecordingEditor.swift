@@ -15,7 +15,6 @@ public struct RecordingEditor: View {
     /// into `LibraryStore.recordings` on its own -- see `LibraryWindow.reload()`,
     /// the closure every real caller hands in here.
     let onSaved: () async -> Void
-    @Environment(\.dismiss) private var dismiss
 
     @State private var title: String
     @State private var topic: String
@@ -33,39 +32,59 @@ public struct RecordingEditor: View {
     }
 
     public var body: some View {
-        Form {
-            TextField("Title", text: $title)
-            TextField("Topic", text: $topic)
-                .accessibilityLabel("Topic folder")
-            Text("Leave the topic empty to unfile this recording.")
-                .font(.caption).foregroundStyle(.secondary)
-
-            if !knownTopics.isEmpty {
-                Picker("Existing topics", selection: $topic) {
-                    Text("—").tag("")
-                    ForEach(knownTopics, id: \.self) { Text($0).tag($0) }
-                }
+        VStack(alignment: .leading, spacing: 2) {
+            if editingTitle {
+                TextField("Title", text: $title)
+                    .textFieldStyle(.roundedBorder)
+                    .font(.headline)
+                    .frame(maxWidth: 340)
+                    .onSubmit { Task { await commitTitle() } }
+                    .onExitCommand {
+                        title = recording.sidecar.title ?? ""
+                        editingTitle = false
+                    }
+            } else {
+                Text(recording.displayTitle)
+                    .font(.headline)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    // Static text that is secretly clickable is the weak point
+                    // of inline editing. The hover background IS the
+                    // affordance — without it the control is invisible.
+                    .background(hoveringTitle ? Color.secondary.opacity(0.18) : .clear,
+                                in: RoundedRectangle(cornerRadius: 5))
+                    .onHover { hoveringTitle = $0 }
+                    .onTapGesture { editingTitle = true }
             }
 
+            // Static for now; Task 5 makes this the combo box.
+            Text(recording.sidecar.topic ?? LibrarySidebar.unfiled)
+                .font(.caption).foregroundStyle(.secondary)
+
             if let lastOutcome, let message = Self.message(for: lastOutcome) {
-                // Same `Color` type on both arms of the ternary -- `.secondary`
-                // resolves to `HierarchicalShapeStyle`, which does not unify
-                // with `Color`, so busy gets its own color rather than the
-                // semantic style token.
+                // Same `Color` type on both arms: `.secondary` resolves to
+                // `HierarchicalShapeStyle`, which does not unify with `Color`.
                 Text(message).font(.caption)
                     .foregroundStyle(Self.isBusyMessage(lastOutcome) ? Color.orange : Color.red)
             }
-
-            HStack {
-                Spacer()
-                Button("Cancel") { dismiss() }
-                Button("Save") { Task { await save() } }
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(isSaving)
-            }
         }
-        .padding()
-        .frame(width: 380)
+    }
+
+    @State private var editingTitle = false
+    @State private var hoveringTitle = false
+
+    /// Commits the title, and leaves edit mode only if the save landed.
+    ///
+    /// `save()` is unchanged — it still sends both `title` and `topic` to
+    /// `AppModel.updateRecording`, and `topic` still holds what the sidecar
+    /// had, so a title-only edit writes the topic back unchanged.
+    ///
+    /// Uses `!Self.shouldNotifySaved(for:)` directly rather than a dedicated
+    /// "stays editing" predicate — that would be byte-for-byte the inverse of
+    /// an already-tested decision, one discriminator duplicated for no new
+    /// information.
+    private func commitTitle() async {
+        await save()
+        if let lastOutcome { editingTitle = !Self.shouldNotifySaved(for: lastOutcome) }
     }
 
     private func save() async {
@@ -78,31 +97,29 @@ public struct RecordingEditor: View {
 
         lastOutcome = outcome
         if Self.shouldNotifySaved(for: outcome) {
-            // Reload before dismissing, not after -- but this closes the gap
-            // between "the write landed" and "the window shows it" only when
-            // the reload can actually start. `LibraryWindow.reload()` (the
-            // closure every real caller hands in here) begins a load when
-            // none is in flight, and awaiting THAT does close the gap: the
-            // pane behind the sheet is already correct by the time the sheet
-            // goes.
+            // This closes the gap between "the write landed" and "the pane
+            // behind the field shows it" only when the reload can actually
+            // start. `LibraryWindow.reload()` (the closure every real caller
+            // hands in here) begins a load when none is in flight, and
+            // awaiting THAT does close the gap: the pane is already correct
+            // by the time this call returns.
             //
             // When a load IS in flight -- a sweep-driven reload mid-scan,
             // which is the exact case `reloadQueued` was added for -- that
             // call records the request and returns at once, so this `await`
             // completes while the in-flight load still has work to do and
-            // `dismiss()` runs on stale content. Measured with a standalone
-            // probe: the save-driven `reload()` returned after 0ms against an
-            // in-flight load that still needed ~50ms.
+            // the pane briefly shows stale content. Measured with a
+            // standalone probe: the save-driven `reload()` returned after 0ms
+            // against an in-flight load that still needed ~50ms.
             //
             // Left that way rather than made to await the queued drain. The
             // effect is benign -- the queued reload lands a moment later and
-            // the pane corrects itself, with the sheet gone either way -- and
-            // the alternative is a per-waiter continuation threaded through
-            // the one function whose MainActor serial-executor argument this
-            // window's whole no-overlapping-loads guarantee rests on. Not
-            // worth risking that reasoning to shave an invisible ~50ms.
+            // the pane corrects itself -- and the alternative is a
+            // per-waiter continuation threaded through the one function
+            // whose MainActor serial-executor argument this window's whole
+            // no-overlapping-loads guarantee rests on. Not worth risking
+            // that reasoning to shave an invisible ~50ms.
             await onSaved()
-            dismiss()
         }
     }
 

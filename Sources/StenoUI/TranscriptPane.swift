@@ -13,7 +13,6 @@ public struct TranscriptPane: View {
     let onSaved: () async -> Void
 
     @State private var isFollowing = true
-    @State private var isEditing = false
     /// Whether the right-hand label counts down or shows the whole length.
     ///
     /// Not persisted: it is a glance, not a preference, and it resets with the
@@ -176,19 +175,11 @@ public struct TranscriptPane: View {
         return ScrollViewReader { proxy in
             VStack(spacing: 0) {
                 HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(recording.displayTitle).font(.headline)
-                        Text(recording.sidecar.topic ?? LibrarySidebar.unfiled)
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                    RecordingEditor(recording: recording, knownTopics: knownTopics,
+                                    model: model, onSaved: onSaved)
                     Spacer()
-                    Button("Edit…") { isEditing = true }
                 }
                 .padding(.horizontal, 12).padding(.top, 10)
-                .sheet(isPresented: $isEditing) {
-                    RecordingEditor(recording: recording, knownTopics: knownTopics,
-                                     model: model, onSaved: onSaved)
-                }
 
                 if !isFollowing {
                     HStack {
