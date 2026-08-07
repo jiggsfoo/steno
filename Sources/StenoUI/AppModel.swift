@@ -131,9 +131,28 @@ public final class AppModel: @unchecked Sendable {
     private var sidecarsInFlight: Set<String> = []
     private var retryDelay: Duration = .seconds(2)
     /// The one real diagnostic logger for this process's lifetime, handed to
-    /// every `SyncEngine` this class constructs. Tests never construct
-    /// `AppModel` (it drives real USB I/O), so there is no injected `nil`
-    /// case needed here the way there is on `SyncEngine`.
+    /// every `SyncEngine` this class constructs. There is no injected `nil`
+    /// case here the way there is on `SyncEngine`.
+    ///
+    /// This used to claim tests never construct `AppModel`. FIVE do --
+    /// `LibraryWindowTests`, `LibraryLayoutTests`, `MenuBarIconLabelTests` and
+    /// `MenuMetricsTests` twice, two of them added on this branch -- because
+    /// composing a view that takes an `AppModel` leaves them no choice. That
+    /// is a HAZARD, not a blessing, and it is only quiet by accident:
+    /// `init` runs `LegacyMigration.runIfNeeded` unconditionally, gated
+    /// solely by a `UserDefaults` bool that happens to be set on the machine
+    /// this branch was written on. Where it is NOT set -- a fresh clone, a
+    /// new user account, CI -- constructing `AppModel` in a test MOVES
+    /// `~/Recordings/HiDock` to `~/Recordings/Steno`, moves
+    /// `~/Library/Application Support/HiDock`, and appends to the real
+    /// diagnostic log. `start()` is what drives USB, and no test calls it, so
+    /// the "real USB I/O" half was never the reason to stay away.
+    ///
+    /// The fix is an injection seam on `init` (a follow-up, deliberately not
+    /// this wave). Until then: do not add a sixth, and note that no test may
+    /// point a constructed `AppModel` at a temp root either -- `libraryRoot`'s
+    /// setter writes the user's real `UserDefaults` key and rebuilds the
+    /// hardcoded `~/Library/Application Support/Steno/index.sqlite`.
     private let log = DiagnosticLog()
     /// Idle-poll loop. Only ever runs while the P1 is presumed attached
     /// (started once a sync completes after `.attached`, cancelled on
@@ -664,8 +683,10 @@ public final class AppModel: @unchecked Sendable {
 
     /// Pure decision extracted for testing, same rationale as
     /// `shouldSyncAfterPoll` above -- `AppModel` itself has no seam for
-    /// exercising a live task race under test, and this project's tests never
-    /// construct `AppModel` at all (it drives real USB I/O).
+    /// exercising a live task race under test. Some tests DO construct an
+    /// `AppModel`, purely to compose a view around it; see `log`'s doc comment
+    /// for why that is a hazard rather than an available seam, and why none of
+    /// them may drive one.
     ///
     /// `true` means the captured generation is still current, so whichever
     /// transcription task's `defer` is asking is the one `transcriptionTask`
