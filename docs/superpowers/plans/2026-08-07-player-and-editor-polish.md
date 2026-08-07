@@ -577,63 +577,20 @@ matters, and a one-row layout gives the bar a fifth of the pixels."
 
 **Interfaces:**
 - Consumes: `AppModel.updateRecording(_:title:topic:)`, `RecordingEditOutcome`, `RecordingEditor.save()`, `message(for:)`, `shouldNotifySaved(for:)`, `isBusyMessage(_:)` (all existing, unmodified).
-- Produces:
-  - `RecordingEditor.staysEditing(after:) -> Bool` (nonisolated static, pure)
-  - `RecordingEditor` presented inline rather than via `.sheet`.
+- Produces: `RecordingEditor` rendered inline rather than presented via `.sheet`.
 
 **Do not modify `AppModel`.** `updateRecording` re-reads the sidecar from disk inside the `sidecarsInFlight` guard; that was added for a data-integrity Critical and this task must not touch it.
 
-- [ ] **Step 1: Write the failing tests**
+**No new predicate for "stay in edit mode".** An earlier draft of this plan added `staysEditing(after:)`, which is byte-for-byte the inverse of the existing `shouldNotifySaved(for:)` — the same `if case .updated` discriminator with opposite returns. Use `!Self.shouldNotifySaved(for:)` at the two call sites instead. One discriminator, one already-tested decision, nothing to drift. If some future outcome ever needs to save *without* leaving edit mode, split them then, with a real case to name.
 
-Append to `Tests/StenoUITests/RecordingEditorTests.swift`:
+- [ ] **Step 1: Confirm the existing decision already covers this**
 
-```swift
-/// The sheet could close on any outcome and show its message on the way out.
-/// Inline editing cannot: a refusal has nowhere to go once the field is gone,
-/// so a refused edit must KEEP the field open with what was typed intact.
-@Test func aRefusedTopicKeepsTheFieldOpen() {
-    #expect(RecordingEditor.staysEditing(after: .rejectedTopic("../etc")))
-}
+No new test is needed for the stay-in-edit-mode rule: `shouldNotifySaved(for:)` already has tests covering `.updated`, `.busy`, `.rejectedTopic` and `.failed`, and the inline behaviour is its negation.
 
-@Test func aBusyRecordingKeepsTheFieldOpen() {
-    #expect(RecordingEditor.staysEditing(after: .busy))
-}
+Run: `swift test --filter shouldNotifySaved`
+Expected: PASS. Record the test names in your report so the reviewer can see which cases are already covered.
 
-@Test func aFailedSaveKeepsTheFieldOpen() {
-    #expect(RecordingEditor.staysEditing(after: .failed("disk full")))
-}
-
-@Test func aSuccessfulSaveLeavesEditMode() {
-    let sidecar = withTopic("Admin", "a").sidecar
-
-    #expect(!RecordingEditor.staysEditing(after: .updated(sidecar)))
-}
-```
-
-- [ ] **Step 2: Run and watch them fail**
-
-Run: `swift test --filter RecordingEditor`
-Expected: FAIL to compile — no `staysEditing`.
-
-- [ ] **Step 3: Add the decision**
-
-In `RecordingEditor.swift`, beside `shouldNotifySaved` and `isBusyMessage`:
-
-```swift
-    /// Whether the field stays in edit mode after this outcome.
-    ///
-    /// PURE, and the exact inverse of `shouldNotifySaved` today — but they
-    /// answer different questions and will not stay inverses if a future
-    /// outcome saves without dismissing, so they are separate. A sheet could
-    /// close on anything and show its message on the way out; an inline field
-    /// that closes on a refusal loses both the message and what was typed.
-    nonisolated static func staysEditing(after outcome: RecordingEditOutcome) -> Bool {
-        if case .updated = outcome { return false }
-        return true
-    }
-```
-
-- [ ] **Step 4: Turn `RecordingEditor` into the header editor**
+- [ ] **Step 2: Turn `RecordingEditor` into the header editor**
 
 All editing state stays inside `RecordingEditor` — `title`, `topic`, `lastOutcome` and `isSaving` are already its `@State` and must not migrate into `TranscriptPane`. What changes is that its `body` becomes the header layout instead of a `Form`, and `TranscriptPane` renders it inline instead of presenting it.
 
@@ -694,7 +651,7 @@ Replace `RecordingEditor`'s `body` with:
 
 Delete the `Cancel`/`Save` `HStack`, `.padding()` and `.frame(width: 380)` from the old `Form` body — the footer buttons go with the sheet.
 
-- [ ] **Step 5: Cut `dismiss` out of `save()` — this one bites**
+- [ ] **Step 3: Cut `dismiss` out of `save()` — this one bites**
 
 `save()` currently ends with `dismiss()` (`RecordingEditor.swift:105`), and `@Environment(\.dismiss)` at `:18` resolves against whatever presented the view. Inside a sheet that closed the sheet. Inside a `Window` scene it **closes the window** — so saving a title would make the whole library disappear.
 
@@ -712,7 +669,7 @@ grep -n 'dismiss' Sources/StenoUI/RecordingEditor.swift
 
 Expected: no hits outside comments.
 
-- [ ] **Step 6: Render it inline and delete the sheet**
+- [ ] **Step 4: Render it inline and delete the sheet**
 
 In `TranscriptPane.swift`'s header, replace the `VStack` holding the title and topic `Text`s, the `Edit…` `Button`, and `.sheet(isPresented: $isEditing)` with a single call:
 
@@ -729,20 +686,20 @@ grep -n 'isEditing\|Edit…\|\.sheet' Sources/StenoUI/TranscriptPane.swift
 
 and confirm nothing remains.
 
-- [ ] **Step 7: Run everything**
+- [ ] **Step 5: Run everything**
 
 Run: `swift build 2>&1 | grep -i warning; swift build -c release 2>&1 | grep -i warning; swift test`
 Expected: zero warnings in both, everything passes.
 
-- [ ] **Step 8: MUTATION-CHECK the refusal rule**
+- [ ] **Step 6: MUTATION-CHECK the refusal rule**
 
 Change `staysEditing` to `if case .rejectedTopic = outcome { return true }; return false`. Run `swift test --filter aBusyRecordingKeepsTheFieldOpen`. Build must succeed, test must FAIL. Restore.
 
-- [ ] **Step 9: Re-run the identity guard's mutation check**
+- [ ] **Step 7: Re-run the identity guard's mutation check**
 
 `TranscriptPane`'s body changed. Delete `.id(recording.id)` from `LibraryWindow.detailContent`. Run `swift test --filter selectingARecordingGivesTheDetailPaneAFreshIdentity`. Build must succeed, test must FAIL. Restore. Report the message verbatim.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git add Sources/StenoUI/RecordingEditor.swift Sources/StenoUI/TranscriptPane.swift \
