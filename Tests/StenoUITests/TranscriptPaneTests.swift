@@ -124,6 +124,41 @@ import Testing
     #expect(TranscriptPane.speakerLabel(for: Segment(start: 0, end: 1, text: "x", speaker: 1)) == "Speaker 2")
 }
 
+/// `Int(seconds)` is a trap, not a conversion. All three of these abort the
+/// process, and the third is the one nothing upstream catches: a sidecar with
+/// `durationSeconds: 1e300` passes `transportDuration`'s `isFinite`/`> 0`
+/// check intact and reaches `total` and `remaining`. The per-line stamp takes
+/// `segment.start` straight out of decoded JSON with no guard at all.
+///
+/// The point of these is that they RETURN. Not trapping is the assertion.
+@Test func aStampIsNeverAskedToConvertSomethingIntCannotHold() {
+    #expect(TranscriptPane.timestamp(.nan) == "0:00")
+    #expect(TranscriptPane.timestamp(-1) == "0:00")
+    #expect(TranscriptPane.timestamp(.infinity) == TranscriptPane.timestamp(1e300))
+    #expect(TranscriptPane.timestamp(.infinity) != TranscriptPane.timestamp(.nan))
+}
+
+/// The clamp behind it, as a truth table. `nan` has no magnitude to keep so it
+/// floors; an overflowing magnitude keeps its sign and loses its size, which
+/// renders as an absurd stamp rather than a plausible invented length.
+@Test func theStampClampToWhatIntCanHold() {
+    #expect(TranscriptPane.clampedSeconds(.nan) == 0)
+    #expect(TranscriptPane.clampedSeconds(-.infinity) == 0)
+    #expect(TranscriptPane.clampedSeconds(-1) == 0)
+    #expect(TranscriptPane.clampedSeconds(.infinity) == TranscriptPane.stampCeiling)
+    #expect(TranscriptPane.clampedSeconds(1e300) == TranscriptPane.stampCeiling)
+    #expect(TranscriptPane.clampedSeconds(.greatestFiniteMagnitude) == TranscriptPane.stampCeiling)
+}
+
+/// A real length must pass through untouched — a clamp that also rounded or
+/// capped normal values would be caught here rather than by eye.
+@Test func aRealLengthIsNotClamped() {
+    #expect(TranscriptPane.clampedSeconds(3985) == 3985)
+    #expect(TranscriptPane.timestamp(3985) == "66:25")
+    #expect(TranscriptPane.timestamp(0) == "0:00")
+    #expect(TranscriptPane.timestamp(41.9) == "0:41")
+}
+
 @Test func theElapsedLabelIsJustTheElapsedTime() {
     #expect(TranscriptPane.elapsedLabel(currentTime: 41) == "0:41")
     #expect(TranscriptPane.elapsedLabel(currentTime: 3985) == "66:25")

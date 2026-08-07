@@ -399,7 +399,51 @@ public struct TranscriptPane: View {
         segment.speaker.map { "Speaker \($0 + 1)" }
     }
 
+    /// `m:ss`, from any `Double` at all.
+    ///
+    /// `Int(seconds)` is a trap, not a conversion: `Int(.nan)`, `Int(.infinity)`
+    /// AND `Int(1e300)` all abort the process. The magnitude case is the one
+    /// nothing upstream catches — `transportDuration` checks only `isFinite`
+    /// and `> 0`, so a sidecar carrying `durationSeconds: 1e300` passes it
+    /// intact and reaches `total` and `remaining`. Three of this function's
+    /// four callers are new on this branch; the fourth is the per-line stamp,
+    /// which takes `segment.start` straight out of decoded JSON with no guard
+    /// anywhere (`MomentsPane` calls it the same way).
+    ///
+    /// Clamped HERE rather than at each caller, because here is where the
+    /// conversion happens. After this the callers' own `isFinite` guards are
+    /// belt-and-braces rather than load-bearing.
+    /// `%ld`, not `%d`. `%d` reads a 32-bit `int` while Swift passes `Int` as
+    /// 64 bits, which is invisible at any real length and wrong past one:
+    /// measured, the ceiling below rendered as `-2101409110:40` under `%d` —
+    /// a NEGATIVE stamp, which is worse than an absurd one because it looks
+    /// like a bug in the clamp rather than a value that had no business being
+    /// a duration.
     nonisolated static func timestamp(_ seconds: Double) -> String {
-        String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60)
+        let whole = Int(clampedSeconds(seconds))
+        return String(format: "%ld:%02ld", whole / 60, whole % 60)
     }
+
+    /// A value `Int(_:)` is defined on.
+    ///
+    /// PURE. `nan` has no magnitude to preserve, so it becomes zero; so do
+    /// negatives and `-infinity`, the same floor `elapsedLabel` and `remaining`
+    /// already apply for their own reasons. `+infinity` and anything above the
+    /// ceiling keep their sign and lose their size, which renders as an absurd
+    /// stamp. That is the right outcome and not a shortcoming: the number
+    /// really is absurd, and a formatter inventing a plausible length to hide
+    /// that would be worse than showing what it was handed.
+    nonisolated static func clampedSeconds(_ seconds: Double) -> Double {
+        guard !seconds.isNaN else { return 0 }
+        return min(max(seconds, 0), stampCeiling)
+    }
+
+    /// The largest value `timestamp(_:)` will convert.
+    ///
+    /// Not a claim about how long a recording can be — it is a bound on
+    /// `Int(_:)`, kept far enough below `Int.max` that the conversion is exact
+    /// rather than merely representable. `Double(Int.max)` rounds UP past
+    /// `Int.max`, so clamping to it would trap on the very value meant to be
+    /// safe.
+    nonisolated static let stampCeiling: Double = 1e15
 }

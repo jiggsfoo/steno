@@ -571,13 +571,3 @@ injectable-defaults seam — no display, no audio hardware, no real file.
 Mutation-checked: adding `currentTime = 0` to `setRate` passed all 361 tests
 before it was written. Check 3 above stays only for what a person still adds
 over it: that the highlighted line on screen does not visibly jump.
-
-**A latent trap surfaced but not introduced by this branch.**
-`TranscriptPane.timestamp(_:)` does `Int(seconds)`, and both
-`Int(Double.infinity)` and `Int(Double.nan)` trap at runtime in Swift. The
-transport's own callers guard against that, but `timestamp` is also called
-with `segment.start` for every transcript line (`TranscriptPane.swift:230`,
-`MomentsPane.swift:31`), straight from decoded JSON. A corrupt or hand-edited
-transcript with a non-finite `start` would crash the pane rather than render
-badly. Pre-existing, out of scope for spec 5, worth someone's judgement on
-whether to guard it.
