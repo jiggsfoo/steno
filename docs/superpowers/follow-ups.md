@@ -450,7 +450,42 @@ because the layout test and the release build came back clean.
     `0:00 / 66:25`, not a dead grey bar reading `0:00 / --:--`. The length
     comes from `Sidecar.durationSeconds` until `AVPlayer` reports its own;
     confirm the two agree once playback starts rather than the bar jumping.
-14. **Reopening the window restoring playback.** Check: play a recording,
+14. **The menu dismissing when a window opens — all THREE of them.** Check:
+    open Library, then Settings, then Free Up Space, each from the menu, and
+    confirm the popover goes away rather than staying up on top of the window
+    it just opened. It is one shared `open(_:)`, so all three should behave
+    identically; a menu that dismisses for one and not another is worse than
+    the original bug. The fix is `@Environment(\.dismiss)` called before
+    `NSApp.activate`, and **it is unverified** — `\.dismiss`'s documented
+    behaviour covers being called from within a window and a `.window`-style
+    `MenuBarExtra` hosts its content in one, but no agent here has a display
+    and there is no test seam. If it does not work, the fix is to bridge an
+    `NSViewRepresentable` to capture the popover's own hosting window and close
+    that. Do NOT reach for `NSApp.keyWindow?.close()`: this popover does not
+    activate the app, so key at that instant may be a different Steno window,
+    and closing Settings out from under the user is a worse failure than the
+    overlap. Also confirm the window still lands IN FRONT of other apps —
+    that is what the `NSApp.activate` line exists for and it must not have
+    been lost.
+15. **The Dock icon appearing on library open and going away on close.**
+    Check: with no window open, confirm Steno has no Dock icon. Open the
+    library and confirm one appears and that ⌘-Tab can now switch away and
+    back. Close the library and confirm the icon goes away again. Then the
+    awkward case: **open Settings, open the library, close the library while
+    Settings is still up** — confirm Settings does not get pushed behind
+    another app or reordered when the app drops to `.accessory`. That last one
+    is the real unknown; `setActivationPolicy` is documented not to close or
+    reorder windows, but an app resigning active as it leaves `.regular` is
+    plausible and cannot be checked without a display.
+    While the icon is up, glance at the **main menu bar**, which this app has
+    never had before. It should carry a working ⌘W and ⌘Q and nothing dead —
+    there is no `WindowGroup`, so no "New Window", and no `Settings` scene, so
+    no ⌘, that opens nothing. If something dead is in there, say so.
+    If `.onDisappear` does not fire on a scene close, the icon stays until
+    relaunch. That is accepted as cosmetic and self-correcting — but note it
+    shares its trigger with `player.stop()`, so check 8 passing means this
+    fired too, and check 8 failing means both did not.
+16. **Reopening the window restoring playback.** Check: play a recording,
     close the library window, reopen it, and confirm the play button and the
     transcript lines still work rather than being silent no-ops. This is the
     reopened-`@State` case: the selection survives the close, the player does
