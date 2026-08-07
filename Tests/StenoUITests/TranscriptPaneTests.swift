@@ -194,3 +194,10 @@ import Testing
     #expect(choices == [0.75, 1, 1.25, 1.5, 1.75, 2])
     #expect(choices == choices.sorted())
 }
+
+@Test func speedLabelsReadAsSpeedsNotMeasurements() {
+    #expect(TranscriptPane.speedLabel(1) == "1x")
+    #expect(TranscriptPane.speedLabel(2) == "2x")
+    #expect(TranscriptPane.speedLabel(0.75) == "0.75x")
+    #expect(TranscriptPane.speedLabel(1.5) == "1.5x")
+}

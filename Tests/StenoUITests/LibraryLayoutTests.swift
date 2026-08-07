@@ -133,44 +133,63 @@ private func layoutProbePane(transcribed: Bool = true) -> some View {
 /// test green. This is the only assertion on this branch that the feature
 /// actually exists on screen.
 ///
-/// The signature asserted is the transport row's, not an arbitrary pixel
-/// count: a hairline rule spanning the full pane width, a wide row directly
-/// under it, and nothing below that. Measured at 500pt wide, the transport
-/// band is 473pt across and the rule 500pt by 1pt, while an ordinary
-/// transcript line is 202.5pt — so the width test has better than 2x
-/// headroom, far outside the 0.5pt one-sided bias `hostedInkBands` carries
-/// (which applies to measured GAPS in any case, and nothing here measures a
-/// gap). Verified stable: identical to 0.5pt across three consecutive runs.
+/// The signature asserted is the transport's, not an arbitrary pixel count: a
+/// hairline rule spanning the full pane width, with the transport drawing
+/// below it and nothing below THAT. Two rows of stacked controls now draw as
+/// three separate ink bands — the scrubber, the elapsed/remaining line, and
+/// the button row — with real vertical gaps between them (measured 5–7.5pt),
+/// not one taller band the way a single-row transport was. So `bands.last`
+/// is no longer the whole transport: it is only the button row, centred by
+/// `Spacer()`s on both sides and just 272pt wide of 500pt — narrower than the
+/// 80%-of-pane-width floor below, despite being exactly the row this test
+/// means to find. Position-from-the-end (`bands.count - 2` / `.last`) is what
+/// broke; the rule's own SHAPE did not, so it is found by that shape —
+/// height ≤ 2pt, width ≥ 98% of the pane — searched from the end, and
+/// everything after it (whatever number of bands that is) is folded into one
+/// bounding box standing in for "the transport". That box's width is 476.5pt
+/// (the full-width scrubber alone clears the 80% floor) and its height is
+/// 52.5pt of ink — under the SAME 60pt ceiling the single-row transport used,
+/// with 7.5pt of margin, so the ceiling did not need widening even though the
+/// row it bounds now spans three lines rather than one. Both numbers hold
+/// for both transcript states. Not folding the trailing bands would have
+/// meant either hardcoding "3" (brittle to a font-rendering tweak merging or
+/// splitting one of the three rows) or reverting to position math (which is
+/// exactly what just broke).
 ///
 /// Run for BOTH transcript states. The transport lives in `body` rather than
 /// inside `reader(_:)` precisely so an untranscribed recording can still be
 /// played, and moving it back inside would silently take that away — the
-/// untranscribed case renders the same rule-then-row signature.
+/// untranscribed case renders the same rule-then-transport signature.
 ///
 /// `bands.count >= 3` guards the `List` degenerate-render failure mode
 /// `inkBands`' own doc comment warns about: one band spanning the whole frame
-/// reads as a successful measurement. Nine bands are produced with a
-/// transcript, five without.
+/// reads as a successful measurement. Eleven bands are produced with a
+/// transcript, seven without (up from nine and five before this task — the
+/// two extra rows).
 @MainActor
 @Test(arguments: [true, false])
 func theTransportRowIsMountedBelowARuleAtTheBottomOfThePane(transcribed: Bool) throws {
     let bands = hostedInkBands(of: layoutProbePane(transcribed: transcribed))
     try #require(bands.count >= 3)
 
-    let row = try #require(bands.last)
-    let rule = bands[bands.count - 2]
+    let ruleIndex = try #require(
+        bands.lastIndex { $0.height <= 2 && $0.width >= paneWidth * 0.98 },
+        Comment(rawValue: "no full-width hairline rule found anywhere in the pane — "
+                + "the transport's Divider is missing"))
+    let transportBands = bands[(ruleIndex + 1)...]
+    try #require(!transportBands.isEmpty,
+                 Comment(rawValue: "nothing draws below the rule — the transport row is missing"))
+
+    let row = InkBand(top: transportBands.map(\.top).min()!,
+                      bottom: transportBands.map(\.bottom).max()!,
+                      minX: transportBands.map(\.minX).min()!,
+                      maxX: transportBands.map(\.maxX).max()!)
 
     #expect(row.width > paneWidth * 0.8,
-            Comment(rawValue: "the bottom band is \(row.width)pt wide of \(paneWidth)pt — "
+            Comment(rawValue: "the transport's combined band is \(row.width)pt wide of \(paneWidth)pt — "
                     + "that is a transcript line, not the transport row"))
     #expect(row.height < 60,
-            Comment(rawValue: "the bottom band is \(row.height)pt tall — a row, not a pane"))
-    #expect(rule.height <= 2,
-            Comment(rawValue: "no hairline above the bottom row (measured \(rule.height)pt) — "
-                    + "the transport's Divider is missing"))
-    #expect(rule.width >= paneWidth * 0.98,
-            Comment(rawValue: "the hairline spans \(rule.width)pt of \(paneWidth)pt — "
-                    + "that is not a full-width rule"))
+            Comment(rawValue: "the transport's combined band is \(row.height)pt tall — a row, not a pane"))
 }
 
 @MainActor

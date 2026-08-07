@@ -14,6 +14,11 @@ public struct TranscriptPane: View {
 
     @State private var isFollowing = true
     @State private var isEditing = false
+    /// Whether the right-hand label counts down or shows the whole length.
+    ///
+    /// Not persisted: it is a glance, not a preference, and it resets with the
+    /// rest of the pane's state when `.id(recording.id)` changes.
+    @State private var showingRemaining = true
 
     public init(recording: LoadedRecording, player: AudioPlayer,
                 knownTopics: [String], model: AppModel,
@@ -42,48 +47,20 @@ public struct TranscriptPane: View {
         }
     }
 
-    /// The spec's "playhead along the bottom": play/pause, a draggable
-    /// position bar, and an elapsed/duration readout.
-    ///
-    /// Outside `reader(_:)` rather than inside it, so it is there for a
-    /// recording that has no transcript yet too. Before this,
-    /// `AudioPlayer.pause()`, `stop()`, `isPlaying` and `duration` had no
-    /// caller anywhere outside `AudioPlayer` itself: once you clicked a
-    /// transcript line the only ways to stop the audio were selecting a
-    /// different recording or closing the window, and an untranscribed
-    /// recording could not be played at all.
-    ///
-    /// The `Slider`'s setter runs on every step of a drag, not only on
-    /// release. That is deliberate and not chattiness: the thumb's position IS
-    /// `player.currentTime`, so a setter that waited for release would leave
-    /// the thumb pinned under the pointer, unmoving, for the whole gesture.
     private var transport: some View {
         // `?? 0` rather than a second unknown-duration branch: `scrubber`,
-        // `remaining`, and `total` already treat zero as "not known", so
-        // resolving to one number here keeps the bar and both labels unable
-        // to disagree.
+        // `remaining` and `total` all treat zero as "not known", so resolving
+        // to one number here keeps the bar and both labels unable to disagree.
         let duration = Self.transportDuration(
             observed: player.duration, sidecar: recording.sidecar.durationSeconds) ?? 0
         let scrubber = Self.scrubber(currentTime: player.currentTime, duration: duration)
-        return HStack(spacing: 10) {
-            Button {
-                if player.isPlaying { player.pause() } else { player.play() }
-            } label: {
-                Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
-                    .frame(width: 12)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
-
+        return VStack(spacing: 4) {
             // The getter recomputes from `player.currentTime` rather than
             // reading the `scrubber` snapshot above. `transport` is evaluated
-            // once per body pass and the closure would capture that one
-            // value, so a `get` landing between a `set` and the next body pass
-            // returns the PRE-scrub position — the thumb snaps back to where
-            // it was and then forward again, which is exactly the stutter
-            // mechanism a drag would show. `upperBound` is safe to take from
-            // the snapshot: `player.duration` is read in this same body pass,
-            // so any change to it schedules another one.
+            // once per body pass and the closure would capture that one value,
+            // so a `get` landing between a `set` and the next body pass
+            // returns the PRE-scrub position — the thumb snaps back and then
+            // forward, which is the stutter a drag would show.
             Slider(value: Binding(
                 get: { Self.scrubber(currentTime: player.currentTime,
                                      duration: duration).position },
@@ -92,12 +69,86 @@ public struct TranscriptPane: View {
                 .disabled(!scrubber.isEnabled)
                 .accessibilityLabel("Playback position")
 
-            Text(Self.elapsedLabel(currentTime: player.currentTime))
-                .font(.caption.monospacedDigit())
-                .foregroundStyle(.secondary)
+            HStack {
+                Text(Self.elapsedLabel(currentTime: player.currentTime))
+                    .accessibilityLabel("Elapsed")
+                Spacer()
+                Button {
+                    showingRemaining.toggle()
+                } label: {
+                    Text(showingRemaining
+                         ? Self.remaining(currentTime: player.currentTime, duration: duration)
+                         : Self.total(duration: duration))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(showingRemaining ? "Time remaining" : "Total time")
+            }
+            .font(.caption.monospacedDigit())
+            .foregroundStyle(.secondary)
+
+            HStack(spacing: 18) {
+                Spacer()
+                Button { skip(by: -10) } label: {
+                    Image(systemName: "gobackward.10")
+                }
+                .buttonStyle(.plain)
+                .disabled(!scrubber.isEnabled)
+                .accessibilityLabel("Back 10 seconds")
+
+                Button {
+                    if player.isPlaying { player.pause() } else { player.play() }
+                } label: {
+                    Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                        .font(.title3)
+                        .frame(width: 16)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
+
+                Button { skip(by: 10) } label: {
+                    Image(systemName: "goforward.10")
+                }
+                .buttonStyle(.plain)
+                .disabled(!scrubber.isEnabled)
+                .accessibilityLabel("Forward 10 seconds")
+                Spacer()
+            }
+            .overlay(alignment: .trailing) {
+                Menu {
+                    ForEach(Self.speedChoices(), id: \.self) { choice in
+                        Button {
+                            player.setRate(choice)
+                        } label: {
+                            // A checkmark rather than a separate "current"
+                            // return value from `speedChoices` — the player
+                            // stays the one source of truth for the speed.
+                            if player.rate == choice { Image(systemName: "checkmark") }
+                            Text(Self.speedLabel(choice))
+                        }
+                    }
+                } label: {
+                    Text(Self.speedLabel(player.rate))
+                        .font(.caption.monospacedDigit())
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .accessibilityLabel("Playback speed")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    /// Moves the playhead by `delta` seconds and re-attaches following.
+    ///
+    /// A skip MOVES the playhead, so it re-attaches for the same reason a
+    /// scrub and a line tap do — see `followsAfterPlayheadMove`.
+    private func skip(by delta: Double) {
+        let duration = Self.transportDuration(
+            observed: player.duration, sidecar: recording.sidecar.durationSeconds) ?? 0
+        player.seek(to: Self.skipTarget(from: player.currentTime,
+                                        by: delta, duration: duration))
+        isFollowing = Self.followsAfterPlayheadMove()
     }
 
     /// Moves the playhead, and re-attaches following.
@@ -330,6 +381,14 @@ public struct TranscriptPane: View {
     /// here — one source of truth for the speed.
     nonisolated static func speedChoices() -> [Double] {
         [0.75, 1, 1.25, 1.5, 1.75, 2]
+    }
+
+    /// `1x`, `1.5x` — trailing zeros dropped so the menu reads as speeds
+    /// rather than as measurements.
+    nonisolated static func speedLabel(_ rate: Double) -> String {
+        rate == rate.rounded()
+            ? "\(Int(rate))x"
+            : String(format: "%gx", rate)
     }
 
     /// A speaker label, or nil when the recording was never diarized.
