@@ -60,7 +60,7 @@ private func idViewID(in value: Any, depth: Int = 0) -> String? {
 /// pure function's truth table.
 @MainActor
 @Test func selectingARecordingGivesTheDetailPaneAFreshIdentity() {
-    let player = AudioPlayer()
+    let player = AudioPlayer(defaults: ThrowawayDefaults())
     let model = AppModel()
     let content = LibraryWindow.detailContent(
         for: recording("abc123"), player: player,

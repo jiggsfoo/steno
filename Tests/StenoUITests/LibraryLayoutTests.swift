@@ -122,7 +122,8 @@ private func layoutProbeRecording(transcribed: Bool = true) -> LoadedRecording {
 @MainActor
 private func layoutProbePane(transcribed: Bool = true) -> some View {
     TranscriptPane(recording: layoutProbeRecording(transcribed: transcribed),
-                   player: AudioPlayer(), knownTopics: [], model: AppModel(), onSaved: {})
+                   player: AudioPlayer(defaults: ThrowawayDefaults()),
+                   knownTopics: [], model: AppModel(), onSaved: {})
         .frame(width: paneWidth)
 }
 
