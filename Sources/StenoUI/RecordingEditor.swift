@@ -152,9 +152,16 @@ public struct RecordingEditor: View {
     /// "stays editing" predicate — that would be byte-for-byte the inverse of
     /// an already-tested decision, one discriminator duplicated for no new
     /// information.
+    ///
+    /// Decides from the outcome `save(_:)` RETURNED, not from the `lastOutcome`
+    /// `@State` read back after an `await`. That state is shared with the topic
+    /// field, so a topic save landing in the gap would decide whether the title
+    /// field stays open.
     private func commitTitle() async {
-        await save(Self.titleCommit(typed: title, topicOnDisk: recording.sidecar.topic))
-        if let lastOutcome { editingTitle = !Self.shouldNotifySaved(for: lastOutcome) }
+        guard let outcome = await save(
+            Self.titleCommit(typed: title, topicOnDisk: recording.sidecar.topic))
+        else { return }
+        editingTitle = !Self.shouldNotifySaved(for: outcome)
     }
 
     /// Commits the topic, and leaves edit mode only if the save landed.
@@ -166,13 +173,34 @@ public struct RecordingEditor: View {
     /// "stays editing" predicate would just be its inverse.
     ///
     /// Same sibling rule as `commitTitle()`, pointed the other way: the title
-    /// it sends is the sidecar's, not the `title` `@State`.
+    /// it sends is the sidecar's, not the `title` `@State`. Same
+    /// decide-from-the-returned-outcome rule too, for the same reason.
     private func commitTopic() async {
-        await save(Self.topicCommit(typed: topic, titleOnDisk: recording.sidecar.title))
-        if let lastOutcome { editingTopic = !Self.shouldNotifySaved(for: lastOutcome) }
+        guard let outcome = await save(
+            Self.topicCommit(typed: topic, titleOnDisk: recording.sidecar.title))
+        else { return }
+        editingTopic = !Self.shouldNotifySaved(for: outcome)
     }
 
-    private func save(_ edit: Edit) async {
+    /// Writes one edit, and returns what happened — or nil when a save was
+    /// already in flight and this submit was dropped.
+    ///
+    /// `isSaving` was write-only, and the double submit it was named for was
+    /// only accidentally safe. `AppModel.updateRecording` inserts into
+    /// `sidecarsInFlight` synchronously and only then suspends, so a second
+    /// submit landing in that window comes back `.busy` — and `.busy`'s copy
+    /// says "this recording is being transcribed right now", which here is
+    /// simply false: the user's own first save is holding the guard. Return in
+    /// the title then immediately Return in the topic rendered that message,
+    /// left the topic field open and NOT written (`.busy` does not notify), and
+    /// then had the message vanish a moment later when the title's `.updated`
+    /// overwrote `lastOutcome` — an edit lost with nothing on screen to say so.
+    ///
+    /// Dropping the second submit instead leaves that field open with what was
+    /// typed and says nothing, which is true, and Return works again the moment
+    /// the first save returns.
+    private func save(_ edit: Edit) async -> RecordingEditOutcome? {
+        guard !isSaving else { return nil }
         isSaving = true
         defer { isSaving = false }
 
@@ -205,6 +233,7 @@ public struct RecordingEditor: View {
             // that reasoning to shave an invisible ~50ms.
             await onSaved()
         }
+        return outcome
     }
 
     /// The exact pair a commit hands to `AppModel.updateRecording`.
