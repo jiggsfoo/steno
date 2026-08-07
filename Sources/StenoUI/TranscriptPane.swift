@@ -58,7 +58,12 @@ public struct TranscriptPane: View {
     /// `player.currentTime`, so a setter that waited for release would leave
     /// the thumb pinned under the pointer, unmoving, for the whole gesture.
     private var transport: some View {
-        let scrubber = Self.scrubber(currentTime: player.currentTime, duration: player.duration)
+        // `?? 0` rather than a second unknown-duration branch: `scrubber` and
+        // `elapsed` already treat zero as "not known", so resolving to one
+        // number here keeps the bar and the readout unable to disagree.
+        let duration = Self.transportDuration(
+            observed: player.duration, sidecar: recording.sidecar.durationSeconds) ?? 0
+        let scrubber = Self.scrubber(currentTime: player.currentTime, duration: duration)
         return HStack(spacing: 10) {
             Button {
                 if player.isPlaying { player.pause() } else { player.play() }
@@ -74,7 +79,7 @@ public struct TranscriptPane: View {
                 .disabled(!scrubber.isEnabled)
                 .accessibilityLabel("Playback position")
 
-            Text(Self.elapsed(currentTime: player.currentTime, duration: player.duration))
+            Text(Self.elapsed(currentTime: player.currentTime, duration: duration))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
@@ -219,6 +224,30 @@ public struct TranscriptPane: View {
     /// `position` is clamped rather than trusted. `AVPlayer` can report a
     /// `currentTime` a hair past the item's duration at the end of playback,
     /// and a `Slider` value outside its own range is not a defined state.
+    /// Which duration the transport should be driven from, or nil when neither
+    /// source has a usable one.
+    ///
+    /// PURE. `AudioPlayer.duration` starts at 0 and is only ever written from
+    /// inside the periodic time observer — which does not fire again until
+    /// playback begins, and at registration the item's duration is still
+    /// indefinite, so the `isFinite` check there leaves it 0. Driving the
+    /// transport off that alone meant selecting a recording produced a dead
+    /// grey bar reading `0:00 / --:--` until you pressed play: the control the
+    /// spec asked for looked broken on first contact.
+    ///
+    /// `Sidecar.durationSeconds` is measured at `Library.commit` time and
+    /// already rendered by `LibrarySidebar.subtitle`, so the length is known
+    /// long before any audio loads. It is the FALLBACK, not the answer: the
+    /// observed value wins the moment it arrives, because the sidecar's is
+    /// measured from the staged file at sync time while the observer's is what
+    /// this `AVPlayer` will actually play. They should agree; where they do
+    /// not, the thing doing the playing is right.
+    nonisolated static func transportDuration(observed: Double, sidecar: Double?) -> Double? {
+        if observed.isFinite, observed > 0 { return observed }
+        if let sidecar, sidecar.isFinite, sidecar > 0 { return sidecar }
+        return nil
+    }
+
     nonisolated static func scrubber(currentTime: Double, duration: Double) -> Scrubber {
         guard duration.isFinite, duration > 0 else {
             return Scrubber(position: 0, upperBound: 1, isEnabled: false)

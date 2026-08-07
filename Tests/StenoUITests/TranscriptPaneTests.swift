@@ -59,6 +59,63 @@ import Testing
     #expect(TranscriptPane.scrubber(currentTime: .nan, duration: 3985).position == 0)
 }
 
+// MARK: - Which duration drives the transport
+//
+// `AudioPlayer.duration` starts at 0 and is only written from inside the
+// periodic observer, which does not fire again until playback begins — and at
+// registration the item's duration is still indefinite, so `isFinite` leaves it
+// 0. Driving the transport off that alone gave a dead grey bar reading
+// `0:00 / --:--` on every freshly selected recording until you pressed play.
+
+/// The sidecar's length is measured at `Library.commit` time and known long
+/// before any audio loads, so the control is live the moment a recording is
+/// selected.
+@Test func theSidecarsLengthDrivesTheTransportBeforePlaybackStarts() {
+    #expect(TranscriptPane.transportDuration(observed: 0, sidecar: 3985) == 3985)
+
+    let scrubber = TranscriptPane.scrubber(
+        currentTime: 0,
+        duration: TranscriptPane.transportDuration(observed: 0, sidecar: 3985) ?? 0)
+    #expect(scrubber.isEnabled)
+    #expect(scrubber.upperBound == 3985)
+}
+
+/// The observed value wins once it arrives: the sidecar's is measured from the
+/// staged file at sync time, the observer's is what this `AVPlayer` will
+/// actually play. Where they disagree, the thing doing the playing is right.
+@Test func theObservedDurationOutranksTheSidecarsOnceItArrives() {
+    #expect(TranscriptPane.transportDuration(observed: 4000, sidecar: 3985) == 4000)
+}
+
+/// A sidecar written before duration measurement existed, or one whose audio
+/// could not be measured, carries nil — and must not resurrect the dead bar as
+/// a live one scrubbing a length nobody knows.
+@Test func neitherSourceHavingADurationLeavesTheTransportDisabled() {
+    #expect(TranscriptPane.transportDuration(observed: 0, sidecar: nil) == nil)
+    #expect(TranscriptPane.transportDuration(observed: 0, sidecar: 0) == nil)
+    #expect(TranscriptPane.transportDuration(observed: 0, sidecar: -5) == nil)
+    #expect(TranscriptPane.transportDuration(observed: 0, sidecar: .nan) == nil)
+    #expect(TranscriptPane.transportDuration(observed: .nan, sidecar: nil) == nil)
+
+    #expect(!TranscriptPane.scrubber(
+        currentTime: 0,
+        duration: TranscriptPane.transportDuration(observed: 0, sidecar: nil) ?? 0).isEnabled)
+}
+
+/// A non-finite observed value is not a usable duration either — `AVPlayer`
+/// reports an indefinite item's as NaN, and infinity for a live stream.
+@Test func aNonFiniteObservedDurationFallsBackToTheSidecar() {
+    #expect(TranscriptPane.transportDuration(observed: .nan, sidecar: 3985) == 3985)
+    #expect(TranscriptPane.transportDuration(observed: .infinity, sidecar: 3985) == 3985)
+}
+
+/// The bar and the readout are resolved from ONE number, so they cannot
+/// disagree about how long the recording is.
+@Test func theReadoutShowsTheFallbackDurationTheBarIsScrubbing() {
+    let duration = TranscriptPane.transportDuration(observed: 0, sidecar: 3985) ?? 0
+    #expect(TranscriptPane.elapsed(currentTime: 0, duration: duration) == "0:00 / 66:25")
+}
+
 @Test func theTransportReadoutPairsElapsedWithDuration() {
     #expect(TranscriptPane.elapsed(currentTime: 41, duration: 3985) == "0:41 / 66:25")
 }
