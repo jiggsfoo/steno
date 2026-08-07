@@ -55,12 +55,20 @@ public struct TranscriptPane: View {
             observed: player.duration, sidecar: recording.sidecar.durationSeconds) ?? 0
         let scrubber = Self.scrubber(currentTime: player.currentTime, duration: duration)
         return VStack(spacing: 4) {
+            // The `Slider`'s setter runs on every step of a drag, not only on
+            // release. That is deliberate and not chattiness: the thumb's
+            // position IS `player.currentTime`, so a setter that waited for
+            // release would leave the thumb pinned under the pointer,
+            // unmoving, for the whole gesture.
+            //
             // The getter recomputes from `player.currentTime` rather than
             // reading the `scrubber` snapshot above. `transport` is evaluated
             // once per body pass and the closure would capture that one value,
             // so a `get` landing between a `set` and the next body pass
             // returns the PRE-scrub position — the thumb snaps back and then
-            // forward, which is the stutter a drag would show.
+            // forward, which is the stutter a drag would show. `upperBound`
+            // is safe to take from the snapshot: `player.duration` is read in
+            // this same body pass, so any change to it schedules another one.
             Slider(value: Binding(
                 get: { Self.scrubber(currentTime: player.currentTime,
                                      duration: duration).position },
