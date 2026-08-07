@@ -70,6 +70,25 @@ public struct Library: Sendable {
         return try? Self.decoder.decode(Sidecar.self, from: data)
     }
 
+    /// Reads the sidecar beside the audio at `relativePath`, if one is there
+    /// and decodes.
+    ///
+    /// The counterpart to `updateSidecar(_:)`, which writes to exactly this
+    /// path — so this is how a caller holding a possibly-stale `Sidecar`
+    /// value re-reads what is actually on disk before overwriting it. Keyed on
+    /// `relativePath` rather than signature because that is the only field
+    /// that names a location, and it never changes for a recording: the audio
+    /// is installed once by `commit` and never moved (only the derived NOTE
+    /// moves between topic folders). Returns nil rather than throwing —
+    /// missing, unreadable and undecodable are one answer here, "there is no
+    /// trustworthy sidecar at that path", and the caller must not proceed on
+    /// any of them.
+    public func sidecar(atRelativePath relativePath: String) -> Sidecar? {
+        let audio = root.appendingPathComponent(relativePath)
+        guard let data = try? Data(contentsOf: Self.sidecarURL(forAudio: audio)) else { return nil }
+        return try? Self.decoder.decode(Sidecar.self, from: data)
+    }
+
     static func sidecarURL(forAudio url: URL) -> URL {
         url.deletingPathExtension().appendingPathExtension("json")
     }

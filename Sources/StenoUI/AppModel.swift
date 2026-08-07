@@ -22,6 +22,22 @@ public enum RecordingEditOutcome: Sendable, Equatable {
     case failed(String)
 }
 
+/// What the off-main-actor half of an edit produced.
+///
+/// Separate from `RecordingEditOutcome` because it carries one thing the UI
+/// has no use for and the rest of `updateRecording` cannot do without:
+/// `previous`, the sidecar as it was ON DISK immediately before the write.
+/// The note removal has to be driven from that, not from the caller's
+/// snapshot — see `AppModel.writeEdit` for why.
+enum RecordingEditWrite: Sendable, Equatable {
+    case wrote(previous: Sidecar, edited: Sidecar)
+    /// Nothing decodable is at the recording's path any more, or what is there
+    /// belongs to a different recording. The edit was NOT written.
+    case vanished
+    /// The write itself failed. Carries the reason.
+    case failed(String)
+}
+
 /// `@unchecked Sendable`: every mutable property is only ever written from
 /// MainActor-isolated code (this class's own `@MainActor` methods, or an
 /// explicit `MainActor.run` / `Task { @MainActor in ... }` hop from a
@@ -704,6 +720,68 @@ public final class AppModel: @unchecked Sendable {
         return edited
     }
 
+    /// Re-reads a recording's sidecar from disk, applies the edit to THAT, and
+    /// writes it back.
+    ///
+    /// The whole data-integrity step in one place, and `nonisolated` so it is
+    /// callable — and testable — without a live `AppModel`. `updateRecording`
+    /// does nothing but hold the guard, hand this a `Library`, and react to
+    /// the result; every decision that can lose data is here.
+    ///
+    /// THE RE-READ IS THE POINT. `editedSidecar` copies all sixteen `Sidecar`
+    /// fields from whatever it is handed and overwrites only two, and
+    /// `updateSidecar` then replaces the whole file atomically. Applied to the
+    /// caller's snapshot, that silently reverts every field some OTHER writer
+    /// changed since the library window loaded it. `sidecarsInFlight` does not
+    /// close this: it stops two writers OVERLAPPING, it says nothing about a
+    /// snapshot that went stale between load and save — and the window's copy
+    /// stays stale for as long as the window is open. `retranscribe` never
+    /// touches `transcriptionProgress`, which is the only thing the window
+    /// reloads on, so a manual re-transcription leaves it stale INDEFINITELY;
+    /// the sweep clears that flag only in its whole task's `defer`, so every
+    /// recording after the one just written is stale too. The observed loss:
+    /// a sweep writes `{title, topic, transcribedAt, transcriptBackend}`, then
+    /// a title edit from the open window writes the other three back to their
+    /// pre-transcription values. The note in the topic folder is then orphaned
+    /// PERMANENTLY — the removal below is driven off `previous.topic`, which
+    /// in the stale version was nil, and `Filer.rebuild` only ever revisits
+    /// folders that are some CURRENT sidecar's topic.
+    ///
+    /// Re-reading here rather than at the call site is what makes it race-free
+    /// by construction: `updateRecording` holds `sidecarsInFlight` across this
+    /// entire call, so no other writer in this process can land between the
+    /// read and the write.
+    ///
+    /// `.vanished` rather than a fall back to the caller's snapshot when the
+    /// re-read comes back empty (deleted from under the window) or carries a
+    /// different signature (a different recording at that path). Writing the
+    /// snapshot in that case is exactly the data loss this function exists to
+    /// prevent, and `updateSidecar` would additionally RESURRECT a sidecar
+    /// whose audio may be gone. Refusing is recoverable; a confident lie on
+    /// disk is not — the same reasoning `Library.commit` uses to fail closed
+    /// on an unreadable sidecar.
+    nonisolated static func writeEdit(
+        for sidecar: Sidecar, title: String, topic: String?, in library: Library
+    ) -> RecordingEditWrite {
+        guard let previous = library.sidecar(atRelativePath: sidecar.relativePath),
+              previous.signature == sidecar.signature else { return .vanished }
+
+        let edited = editedSidecar(from: previous, title: title, topic: topic)
+        do {
+            try library.updateSidecar(edited)
+        } catch {
+            return .failed(error.localizedDescription)
+        }
+        return .wrote(previous: previous, edited: edited)
+    }
+
+    /// What to say when the re-read finds nothing to edit. One definition, so
+    /// the test asserting the caller does not silently fall back can name the
+    /// same string the editor renders.
+    nonisolated static let vanishedRecordingMessage =
+        "This recording is no longer where the library expects it. "
+        + "Close and reopen the library, then try again."
+
     /// Manual escape hatch for the menu's "Sync now" button -- the same
     /// guard `startSync` already relies on via `.attached` and the poll loop,
     /// just reachable on demand instead of waiting for the next attach or tick.
@@ -907,6 +985,31 @@ public final class AppModel: @unchecked Sendable {
     /// renders a whole transcript body, and a save on a large folder must not
     /// hitch the window. `index?.upsert` stays on MainActor: it is small, and
     /// matches `retranscribe`'s existing precedent.
+    ///
+    /// The caller's `sidecar` argument is IDENTITY AND LOCATION ONLY --
+    /// `signature` and `relativePath`. Its field values are a snapshot the
+    /// library window may have been holding for as long as it has been open,
+    /// and `Self.writeEdit` deliberately throws them away and re-reads from
+    /// disk instead; see its doc comment for the loss that caused. The
+    /// PREVIOUS topic the note removal below is driven from likewise comes
+    /// from that fresh read, not from the argument -- a stale nil there is
+    /// what orphaned a note permanently.
+    ///
+    /// The re-read runs inside the same `Task.detached` as the write, off the
+    /// main actor: it is a file read plus a JSON decode, the same class of
+    /// work `updateSidecar` is already detached for below and the same reason
+    /// `LibraryStore.load` moves sidecar decoding off the main actor. That
+    /// costs nothing in safety -- serialization here comes from
+    /// `sidecarsInFlight`, held across this whole function, not from the
+    /// actor, so no writer in this process can land between the read and the
+    /// write regardless of which executor they run on.
+    ///
+    /// `.rejectedTopic` stays AHEAD of the guard, deliberately. It is a pure
+    /// function of the user's own input string -- it reads nothing, writes
+    /// nothing, and cannot go stale. Moving it inside would only mean a user
+    /// who typed an illegal folder name gets told "busy, try again in a
+    /// moment" whenever the sweep happens to be on this recording, and has to
+    /// retry before finding out what was actually wrong.
     public func updateRecording(
         _ sidecar: Sidecar, title: String, topic: String?
     ) async -> RecordingEditOutcome {
@@ -920,31 +1023,35 @@ public final class AppModel: @unchecked Sendable {
         sidecarsInFlight.insert(sidecar.signature)
         defer { sidecarsInFlight.remove(sidecar.signature) }
 
-        let edited = Self.editedSidecar(from: sidecar, title: title, topic: topic)
         let root = libraryRoot
         let library = Library(root: root)
 
-        do {
-            try await Task.detached { try library.updateSidecar(edited) }.value
-        } catch {
-            return .failed(error.localizedDescription)
-        }
-
-        try? index?.upsert(edited)
-
-        await Task.detached {
-            let filer = Filer(root: root)
-            if let previousTopic = sidecar.topic {
-                filer.removeNote(for: sidecar, topic: previousTopic)
-            }
-            if edited.topic != nil,
-               let transcript = TranscriptStore(root: root).transcript(for: edited) {
-                _ = try? filer.write(for: edited, transcript: transcript)
-            }
+        let write = await Task.detached {
+            Self.writeEdit(for: sidecar, title: title, topic: topic, in: library)
         }.value
 
-        reloadRecent()
-        return .updated(edited)
+        switch write {
+        case .vanished:
+            return .failed(Self.vanishedRecordingMessage)
+        case .failed(let reason):
+            return .failed(reason)
+        case let .wrote(previous, edited):
+            try? index?.upsert(edited)
+
+            await Task.detached {
+                let filer = Filer(root: root)
+                if let previousTopic = previous.topic {
+                    filer.removeNote(for: previous, topic: previousTopic)
+                }
+                if edited.topic != nil,
+                   let transcript = TranscriptStore(root: root).transcript(for: edited) {
+                    _ = try? filer.write(for: edited, transcript: transcript)
+                }
+            }.value
+
+            reloadRecent()
+            return .updated(edited)
+        }
     }
 
     /// Topic folders are derived, exactly like `index.sqlite`. This is a button,

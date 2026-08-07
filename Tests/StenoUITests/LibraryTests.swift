@@ -225,6 +225,44 @@ private func sampleFile(name: String = "20260804143022REC001.mp3", length: Int =
     #expect(rewritten.topic == "Meetings")
 }
 
+/// `updateSidecar` writes to the path derived from `relativePath`, and this
+/// reads back from exactly that path. The symmetry is what lets
+/// `AppModel.writeEdit` re-read a recording immediately before overwriting
+/// it -- a reader keyed on anything else could miss the write it is chasing.
+@Test func aSidecarReadsBackFromTheRelativePathItWasWrittenTo() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let lib = Library(root: root)
+    let file = sampleFile()
+    let audio = lib.destinationURL(for: file)
+    try FileManager.default.createDirectory(
+        at: audio.deletingLastPathComponent(), withIntermediateDirectories: true)
+
+    var sidecar = Sidecar(signature: file.signature, deviceFilename: file.name,
+                          relativePath: Library.relativePath(of: audio, under: root),
+                          lengthBytes: 4, durationSeconds: 1.0, recordedAt: file.recordedAt,
+                          syncedAt: Date(timeIntervalSince1970: 1), deviceSerial: "SN1",
+                          deviceModel: "hidock-p1", timeZoneIdentifier: "UTC")
+    sidecar.topic = "Receipts"
+    try lib.updateSidecar(sidecar)
+
+    #expect(lib.sidecar(atRelativePath: sidecar.relativePath) == sidecar)
+}
+
+/// Missing and undecodable are one answer -- "there is no trustworthy sidecar
+/// here" -- because a caller about to overwrite must refuse on both.
+@Test func readingASidecarThatIsAbsentOrGarbageReturnsNil() throws {
+    let root = tempRoot(); defer { try? FileManager.default.removeItem(at: root) }
+    let lib = Library(root: root)
+
+    #expect(lib.sidecar(atRelativePath: "2026-08-05/nothing.mp3") == nil)
+
+    let audio = root.appendingPathComponent("2026-08-05/a.mp3")
+    try FileManager.default.createDirectory(
+        at: audio.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data("not json at all".utf8).write(to: Library.sidecarURL(forAudio: audio))
+    #expect(lib.sidecar(atRelativePath: "2026-08-05/a.mp3") == nil)
+}
+
 @Test func reachabilityIsFalseForMissingRoot() {
     let lib = Library(root: URL(fileURLWithPath: "/nonexistent-\(UUID().uuidString)"))
     #expect(lib.isReachable() == false)
