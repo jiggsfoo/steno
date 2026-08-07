@@ -96,27 +96,86 @@ private func hostedInkBands(of view: some View, alphaFloor: CGFloat = 0.05) -> [
     return bands
 }
 
-@MainActor
-@Test func transcriptLinesDoNotCollapseWhenTheWindowIsShort() {
+/// The width every measurement below renders at.
+private let paneWidth = 500.0
+
+private func layoutProbeRecording(transcribed: Bool = true) -> LoadedRecording {
     let segments = (0..<6).map {
         Segment(start: Double($0) * 10, end: Double($0) * 10 + 8,
                 text: "A line of transcript number \($0)", speaker: nil)
     }
-    let recording = LoadedRecording(
-        sidecar: Sidecar(signature: "sig", deviceFilename: "a.hda",
-                         relativePath: "2026-08-05/a.mp3", lengthBytes: 10,
-                         durationSeconds: 60, recordedAt: nil,
-                         syncedAt: Date(timeIntervalSince1970: 1), deviceSerial: "S",
-                         deviceModel: "hidock-p1", timeZoneIdentifier: "Asia/Manila",
-                         title: "Layout probe"),
+    let sidecar = Sidecar(signature: "sig", deviceFilename: "a.hda",
+                          relativePath: "2026-08-05/a.mp3", lengthBytes: 10,
+                          durationSeconds: 60, recordedAt: nil,
+                          syncedAt: Date(timeIntervalSince1970: 1), deviceSerial: "S",
+                          deviceModel: "hidock-p1", timeZoneIdentifier: "Asia/Manila",
+                          title: "Layout probe")
+    guard transcribed else { return LoadedRecording(sidecar: sidecar, transcript: nil) }
+    return LoadedRecording(
+        sidecar: sidecar,
         transcript: Transcript(signature: "sig", text: "x", segments: segments,
                                locale: "en_US", backend: "speechanalyzer", modelID: "m",
                                transcribedAt: Date(timeIntervalSince1970: 1),
                                audioDurationSeconds: 60))
+}
 
-    let pane = TranscriptPane(recording: recording, player: AudioPlayer(),
-                              knownTopics: [], model: AppModel(), onSaved: {})
-        .frame(width: 500)
+@MainActor
+private func layoutProbePane(transcribed: Bool = true) -> some View {
+    TranscriptPane(recording: layoutProbeRecording(transcribed: transcribed),
+                   player: AudioPlayer(), knownTopics: [], model: AppModel(), onSaved: {})
+        .frame(width: paneWidth)
+}
+
+/// Every DECISION behind the playhead is covered by `TranscriptPaneTests`'
+/// pure-function tests. That the playhead is MOUNTED IN THE VIEW is not
+/// something any of them can see: deleting `Divider()` and `transport` from
+/// `TranscriptPane.body` compiles with zero warnings and leaves every other
+/// test green. This is the only assertion on this branch that the feature
+/// actually exists on screen.
+///
+/// The signature asserted is the transport row's, not an arbitrary pixel
+/// count: a hairline rule spanning the full pane width, a wide row directly
+/// under it, and nothing below that. Measured at 500pt wide, the transport
+/// band is 473pt across and the rule 500pt by 1pt, while an ordinary
+/// transcript line is 202.5pt — so the width test has better than 2x
+/// headroom, far outside the 0.5pt one-sided bias `hostedInkBands` carries
+/// (which applies to measured GAPS in any case, and nothing here measures a
+/// gap). Verified stable: identical to 0.5pt across three consecutive runs.
+///
+/// Run for BOTH transcript states. The transport lives in `body` rather than
+/// inside `reader(_:)` precisely so an untranscribed recording can still be
+/// played, and moving it back inside would silently take that away — the
+/// untranscribed case renders the same rule-then-row signature.
+///
+/// `bands.count >= 3` guards the `List` degenerate-render failure mode
+/// `inkBands`' own doc comment warns about: one band spanning the whole frame
+/// reads as a successful measurement. Nine bands are produced with a
+/// transcript, five without.
+@MainActor
+@Test(arguments: [true, false])
+func theTransportRowIsMountedBelowARuleAtTheBottomOfThePane(transcribed: Bool) throws {
+    let bands = hostedInkBands(of: layoutProbePane(transcribed: transcribed))
+    try #require(bands.count >= 3)
+
+    let row = try #require(bands.last)
+    let rule = bands[bands.count - 2]
+
+    #expect(row.width > paneWidth * 0.8,
+            Comment(rawValue: "the bottom band is \(row.width)pt wide of \(paneWidth)pt — "
+                    + "that is a transcript line, not the transport row"))
+    #expect(row.height < 60,
+            Comment(rawValue: "the bottom band is \(row.height)pt tall — a row, not a pane"))
+    #expect(rule.height <= 2,
+            Comment(rawValue: "no hairline above the bottom row (measured \(rule.height)pt) — "
+                    + "the transport's Divider is missing"))
+    #expect(rule.width >= paneWidth * 0.98,
+            Comment(rawValue: "the hairline spans \(rule.width)pt of \(paneWidth)pt — "
+                    + "that is not a full-width rule"))
+}
+
+@MainActor
+@Test func transcriptLinesDoNotCollapseWhenTheWindowIsShort() {
+    let pane = layoutProbePane()
 
     func minimumGap(_ view: some View) -> Double {
         let bands = hostedInkBands(of: view)
