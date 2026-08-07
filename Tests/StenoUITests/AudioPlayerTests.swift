@@ -160,3 +160,17 @@ private let segments = [
 @Test func aFreshInstallStartsAtNormalSpeed() {
     #expect(AudioPlayer(defaults: throwawayDefaults()).rate == 1)
 }
+
+/// `clampedRate` is tested directly above, but `setRate` is where a bad value
+/// actually arrives from the UI — and it clamps on the way IN so `rate` is
+/// never a non-speed. Without this, dropping that clamp is invisible:
+/// `appliedRate` re-clamps on the way out, so playback stays at 1x while
+/// `rate` reads 0 and the speed menu renders it.
+@MainActor
+@Test func setRateRefusesAValueThatIsNotASpeed() {
+    let player = AudioPlayer(defaults: throwawayDefaults())
+    player.setRate(1.5)
+    player.setRate(0)
+
+    #expect(player.rate == 1)
+}
