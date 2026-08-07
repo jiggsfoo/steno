@@ -71,12 +71,31 @@ public struct LibraryWindow: View {
             // it restores exactly what was playing.
             loadAudio(for: store.selection)
         }
+        // The Dock icon, paired exactly with `.onDisappear` below. Not folded
+        // into the `.task` above: that one is `async`, and a hop would let the
+        // window draw before the app had an icon, which is the flicker this
+        // pairing exists to avoid. See `activationPolicy(isLibraryOpen:)`.
+        .onAppear { NSApp.setActivationPolicy(Self.activationPolicy(isLibraryOpen: true)) }
         // Closing the window must stop the audio. `AudioPlayer`'s `isolated
         // deinit` already tears the periodic observer down, but only once the
         // player is actually deallocated -- and `@State` is owned by SwiftUI,
         // which is free to keep a closed window's state alive. One explicit
         // line is cheap next to a window that is gone but still playing.
-        .onDisappear { player.stop() }
+        //
+        // The policy revert rides along here rather than getting its own more
+        // reliable AppKit trigger. `.onDisappear` on a `Window` scene is not
+        // guaranteed -- the comment above says so -- and if it does not fire,
+        // the app keeps a Dock icon until it is relaunched. That degradation
+        // is cosmetic and self-correcting, which the audio next to it is not:
+        // the two SHARE A FATE, so the existing human check for "closing the
+        // window stops playback" is also the check for this. Buying more
+        // reliability means bridging to AppKit to find and observe this
+        // window's `NSWindow` -- new untestable machinery in a view, to fix a
+        // stuck icon. Not proportionate.
+        .onDisappear {
+            player.stop()
+            NSApp.setActivationPolicy(Self.activationPolicy(isLibraryOpen: false))
+        }
         // Loading audio belongs here rather than inside a detail branch: a
         // closure created in one branch would capture the selection that was
         // current when that branch was built, and load the previous
@@ -87,6 +106,37 @@ public struct LibraryWindow: View {
         .onChange(of: model.transcriptionProgress) { _, progress in
             if progress == nil { Task { await reload() } }
         }
+    }
+
+    /// The activation policy the app should hold while the library window is,
+    /// or is not, on screen.
+    ///
+    /// PURE, and the whole ruling in one line — extracted for the same reason
+    /// as `TranscriptPane.followsAfterPlayheadMove`, and with the same honest
+    /// limit: it pins the DECISION, and nothing enforces that the view calls
+    /// it. `Info.plist` sets `LSUIElement`, which was right while Steno was
+    /// menu-bar-only and is wrong now that it owns a window. With no Dock icon
+    /// and no app-switcher entry, a library window sent behind another app
+    /// cannot be Command-Tabbed back to at all — the only way back is the menu
+    /// bar icon and "Library…" again.
+    ///
+    /// `.regular` only WHILE that window is open, not permanently: a menu-bar
+    /// utility that keeps a Dock icon after its one window closes has quietly
+    /// become the wrong kind of app. Settings and Reclaim deliberately do not
+    /// count — they are short-lived forms that were fine without a Dock icon
+    /// for the whole of specs 1–3, and making them count would mean the icon
+    /// appears for a window nobody switches away from.
+    ///
+    /// Going `.regular` also gives this app a main menu bar it has never had.
+    /// That is accepted rather than worked around, and it is arguably the
+    /// point: a user looking at a Dock icon and a focused window expects ⌘W to
+    /// close it and ⌘Q to quit, and both come from that menu. Nothing dead
+    /// appears in it — there is no `WindowGroup`, so no "New Window", and no
+    /// `Settings` scene, so no ⌘, that opens nothing.
+    nonisolated static func activationPolicy(
+        isLibraryOpen: Bool
+    ) -> NSApplication.ActivationPolicy {
+        isLibraryOpen ? .regular : .accessory
     }
 
     /// Points the player at whichever recording `signature` names.

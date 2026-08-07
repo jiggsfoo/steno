@@ -68,3 +68,26 @@ private func idViewID(in value: Any, depth: Int = 0) -> String? {
         knownTopics: [], model: model, onSaved: {}, onPlay: { _ in })
     #expect(idViewID(in: content) == "abc123")
 }
+
+/// `Info.plist` sets `LSUIElement`, so Steno has no Dock icon and no
+/// app-switcher entry. That was right while it was menu-bar-only; now that it
+/// owns a window, a library window sent behind another app cannot be
+/// Command-Tabbed back to at all — the only way back is the menu bar icon and
+/// "Library…" again. The ruling is a Dock icon only WHILE that window is open,
+/// so a menu-bar utility does not quietly become the wrong kind of app once
+/// its one window closes.
+///
+/// WHAT THIS PROVES AND WHAT IT DOES NOT. It pins the mapping, and only that.
+/// It cannot see that `LibraryWindow.body` calls it from `.onAppear` and
+/// `.onDisappear` — deleting either call leaves this green (mutation V below)
+/// — and it cannot see whether AppKit honours the change, because activation
+/// policy is process-global state with no display behind it here. Whether the
+/// icon actually appears and goes away is human check 15. This is the whole of
+/// the honest headless coverage, written rather than skipped because the
+/// mapping is the part that can be got backwards in a way nobody would notice
+/// until someone had a permanent Dock icon.
+@MainActor
+@Test func theLibraryWindowEarnsADockIconOnlyWhileItIsOpen() {
+    #expect(LibraryWindow.activationPolicy(isLibraryOpen: true) == .regular)
+    #expect(LibraryWindow.activationPolicy(isLibraryOpen: false) == .accessory)
+}
