@@ -78,10 +78,29 @@ public struct RecordingEditor: View {
 
         lastOutcome = outcome
         if Self.shouldNotifySaved(for: outcome) {
-            // Reload before dismissing, not after: this is what closes the
-            // gap between "the write landed" and "the window shows it" --
-            // dismissing first would drop the sheet while the pane behind it
-            // could, for a moment, still be showing the stale title.
+            // Reload before dismissing, not after -- but this closes the gap
+            // between "the write landed" and "the window shows it" only when
+            // the reload can actually start. `LibraryWindow.reload()` (the
+            // closure every real caller hands in here) begins a load when
+            // none is in flight, and awaiting THAT does close the gap: the
+            // pane behind the sheet is already correct by the time the sheet
+            // goes.
+            //
+            // When a load IS in flight -- a sweep-driven reload mid-scan,
+            // which is the exact case `reloadQueued` was added for -- that
+            // call records the request and returns at once, so this `await`
+            // completes while the in-flight load still has work to do and
+            // `dismiss()` runs on stale content. Measured with a standalone
+            // probe: the save-driven `reload()` returned after 0ms against an
+            // in-flight load that still needed ~50ms.
+            //
+            // Left that way rather than made to await the queued drain. The
+            // effect is benign -- the queued reload lands a moment later and
+            // the pane corrects itself, with the sheet gone either way -- and
+            // the alternative is a per-waiter continuation threaded through
+            // the one function whose MainActor serial-executor argument this
+            // window's whole no-overlapping-loads guarantee rests on. Not
+            // worth risking that reasoning to shave an invisible ~50ms.
             await onSaved()
             dismiss()
         }
