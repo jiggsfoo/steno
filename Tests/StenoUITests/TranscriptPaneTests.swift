@@ -148,13 +148,18 @@ import Testing
 
 /// Zero duration means "not known yet", exactly as it does in `scrubber` and
 /// `transportDuration` — the bar and both labels resolve from one number.
+/// `.infinity` matters here beside `0`: a future guard narrowed to
+/// `duration > 0` alone would let it slip through undetected, since
+/// `.infinity > 0` is true where `.nan > 0` is false.
 @Test func remainingSaysSoWhenTheLengthIsUnknown() {
     #expect(TranscriptPane.remaining(currentTime: 41, duration: 0) == "--:--")
+    #expect(TranscriptPane.remaining(currentTime: 41, duration: .infinity) == "--:--")
 }
 
 @Test func totalIsTheWholeLength() {
     #expect(TranscriptPane.total(duration: 3985) == "66:25")
     #expect(TranscriptPane.total(duration: 0) == "--:--")
+    #expect(TranscriptPane.total(duration: .infinity) == "--:--")
 }
 
 /// Skipping back near the start must land at 0, not at a negative time that
@@ -173,9 +178,14 @@ import Testing
     #expect(TranscriptPane.skipTarget(from: 100, by: 10, duration: 3985) == 110)
 }
 
-/// With no known duration there is nothing to skip within.
-@Test func skippingWithNoKnownDurationStaysPut() {
-    #expect(TranscriptPane.skipTarget(from: 0, by: 10, duration: 0) == 0)
+/// With no known duration there is no valid position to hold, so the target
+/// collapses to the start rather than holding at `currentTime`. `from: 50`
+/// is deliberate, not `0`: `skipTarget`'s unknown-duration branch returns `0`
+/// unconditionally, so an input already at `0` cannot distinguish "collapses
+/// to the start" from "genuinely stayed put".
+@Test func skippingWithNoKnownDurationLandsAtZero() {
+    #expect(TranscriptPane.skipTarget(from: 50, by: 10, duration: 0) == 0)
+    #expect(TranscriptPane.skipTarget(from: 50, by: 10, duration: .infinity) == 0)
 }
 
 @Test func theSpeedChoicesRunSlowestFirstAndIncludeNormal() {
