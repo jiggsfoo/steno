@@ -581,3 +581,54 @@ injectable-defaults seam — no display, no audio hardware, no real file.
 Mutation-checked: adding `currentTime = 0` to `setRate` passed all 361 tests
 before it was written. Check 3 above stays only for what a person still adds
 over it: that the highlighted line on screen does not visibly jump.
+
+## Spec 5 carried debt (`feat/player-polish`, 2026-08-07)
+
+Filed out of the final fix wave's re-review so that none of it lives only in a
+report. None blocks merge; all five were adjudicated.
+
+**`timestamp(_:)`'s `%ld` has no regression test.** The format was `%d`, which
+reads 32 bits while Swift passes `Int` as 64, so at the clamp ceiling it
+rendered `-2101409110:40` — a negative stamp. That is fixed. What is missing is
+a guard: reverting `%ld` to `%d` passes all 365 tests, because `%d` corrupts
+`.infinity`, `1e300` and `.nan` *identically*, so the existing comparison-based
+assertions still hold. One line closes it:
+`#expect(TranscriptPane.timestamp(TranscriptPane.stampCeiling) == "16666666666666:40")`.
+The final-fix report claimed this was already covered; it was not.
+
+**The Critical's residual: `recording.sidecar` is only as fresh as the last
+reload.** The commit-time fix sources each field's sibling from
+`recording.sidecar` rather than stale `@State`, which closes the tap-to-Return
+window. But `LibraryWindow` reloads on `transcriptionProgress` going nil, and
+`AppModel` sets that only in the sweep task's `defer` — when the *whole queue*
+drains — while updating progress per recording without triggering a reload. So
+during a multi-recording sweep, recording A's new topic is on disk but not yet
+in `recording.sidecar`, and a Return in that window still commits the stale
+value. Strictly narrower than what was fixed, and not closable while `AppModel`
+stays untouched: `updateRecording(_:title:topic:)` takes a whole edit and
+already spends `nil` on "unfile", so there is no way to say "leave this field
+alone." Wants the patch-shaped-edit API filed under Spec 4 carried debt.
+
+**Two doc comments assert more than was measured.** `ThrowawayDefaults`' comment
+says overriding only the `Any?` variant would have let `AudioPlayer`'s write
+reach the real domain — built and measured, it would not: `setDouble:forKey:`
+routes through `setObject:forKey:`. The typed-setter overrides are harmless
+belt-and-braces, not the load-bearing fix the comment claims. Separately,
+`AudioPlayerTests` says one `ThrowawayDefaults` is shared *between tests*;
+Swift Testing builds one suite instance per test, so the sharing is between the
+two `player()` calls within a single test, as `ThrowawayDefaults`' own comment
+correctly says.
+
+**Picking a topic from the menu during an in-flight save looks committed and is
+not.** The selection sets `topic`, so the field visibly shows the choice, but
+`save()`'s `guard !isSaving` returns without writing and without a message.
+Consistent with the Return path, but the menu path now *looks* like it took.
+
+**`LegacyMigrationTests` leaks a plist per run into `~/Library/Preferences`.**
+Pre-existing and unrelated to spec 5, but large: 4,342 empty 42-byte
+`LegacyMigrationTests.*.plist` files had accumulated and were removed by hand
+this session, and ~19 more appear per `swift test`. The `AudioPlayerTests` leak
+found during this branch was fixed with a dictionary-backed `UserDefaults`
+subclass (`Tests/StenoUITests/ThrowawayDefaults.swift`) after `removePersistentDomain`
+proved insufficient — cfprefsd rewrites the file after the process exits. The
+same substitute is what `LegacyMigrationTests` needs.
