@@ -19,6 +19,8 @@ public struct MenuBarView: View {
 
     @Bindable var model: AppModel
     @Environment(\.openWindow) private var openWindow
+    /// Takes the `MenuBarExtra(.window)` popover down. See `open(_:)`.
+    @Environment(\.dismiss) private var dismiss
 
     public init(model: AppModel) { self.model = model }
 
@@ -260,7 +262,41 @@ public struct MenuBarView: View {
     /// sheet came back on the next click of the menu bar icon. A `Window` scene
     /// is owned by the app, not by the popover, so there is no teardown to
     /// survive and nothing left holding it presented.
+    ///
+    /// THE DISMISSAL IS FIRST, AND IT IS NOT OPTIONAL EITHER. Without it the
+    /// popover stayed up, rendering ON TOP of the window it had just opened
+    /// and overlapping it. Ordering the new window front cannot fix that: a
+    /// `MenuBarExtra(.window)` popover is a floating panel at a higher window
+    /// level than an ordinary window, so it is above by construction, not by
+    /// z-order accident. Taking the panel down is the only thing that helps.
+    ///
+    /// Before `NSApp.activate`, not after, for two reasons. It is the ordering
+    /// where the new window is never drawn underneath the panel even for a
+    /// frame; and `dismiss()` acts on the presentation context this view is
+    /// currently inside, which is unambiguous now and less so once a window
+    /// scene has taken key. The activate-then-open pair below is untouched and
+    /// still runs unconditionally, so the property it exists for -- an
+    /// `.accessory` app's window landing in front rather than behind
+    /// everything -- is preserved exactly.
+    ///
+    /// All three windows, deliberately. They share this function, and a menu
+    /// that dismisses for Library but not for Settings is a worse bug than the
+    /// one being fixed.
+    ///
+    /// UNVERIFIED HERE, and worth being plain about: no agent on this project
+    /// has a display, and `\.dismiss` has no test seam. What is known is that
+    /// `DismissAction`'s documented behaviour covers being called "from within
+    /// a window" (it closes that window), and a `.window`-style `MenuBarExtra`
+    /// hosts its content in one. What was NOT done is the popular alternative,
+    /// `NSApp.keyWindow?.close()`: this popover does not activate the app --
+    /// that is the whole reason the `NSApp.activate` line below exists -- so
+    /// `keyWindow` at this instant may well be some OTHER Steno window, and
+    /// closing Settings out from under the user would be a far worse failure
+    /// than the overlap. If the human check finds `\.dismiss` ineffective, the
+    /// fix is to bridge an `NSViewRepresentable` to capture this view's own
+    /// hosting window and close THAT -- targeted, not a guess about key state.
     private func open(_ windowID: String) {
+        dismiss()
         NSApp.activate(ignoringOtherApps: true)
         openWindow(id: windowID)
     }
