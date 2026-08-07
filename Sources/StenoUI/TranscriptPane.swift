@@ -74,7 +74,19 @@ public struct TranscriptPane: View {
             .buttonStyle(.plain)
             .accessibilityLabel(player.isPlaying ? "Pause" : "Play")
 
-            Slider(value: Binding(get: { scrubber.position }, set: { scrub(to: $0) }),
+            // The getter recomputes from `player.currentTime` rather than
+            // reading the `scrubber` snapshot above. `transport` is evaluated
+            // once per body pass and the closure would capture that one
+            // value, so a `get` landing between a `set` and the next body pass
+            // returns the PRE-scrub position — the thumb snaps back to where
+            // it was and then forward again, which is exactly the stutter
+            // mechanism a drag would show. `upperBound` is safe to take from
+            // the snapshot: `player.duration` is read in this same body pass,
+            // so any change to it schedules another one.
+            Slider(value: Binding(
+                get: { Self.scrubber(currentTime: player.currentTime,
+                                     duration: duration).position },
+                set: { scrub(to: $0) }),
                    in: 0...scrubber.upperBound)
                 .disabled(!scrubber.isEnabled)
                 .accessibilityLabel("Playback position")

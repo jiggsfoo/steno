@@ -131,8 +131,24 @@ public final class AudioPlayer {
         isPlaying = false
     }
 
+    /// Seeks EXACTLY, not to the nearest sync sample.
+    ///
+    /// `AVPlayer.seek(to:)` without tolerances defaults both to
+    /// `.positiveInfinity`, which lets it land on whatever sync sample is
+    /// nearest — so a scrubber thumb dropped at 41:00 could resume somewhere
+    /// else, and clicking a transcript line could start mid-way through the
+    /// previous one. Naming zero tolerances makes "seeks where you dropped it"
+    /// true in code instead of something a human has to go and check.
+    ///
+    /// Affordable here specifically because the library is MP3
+    /// (`FileInfo.preferredExtension`): its frames are ~26ms and near-enough
+    /// independently decodable, so an exact seek decodes a handful of frames
+    /// rather than a long GOP. And a drag issuing several seeks a second is
+    /// not a pile-up — `AVPlayer` cancels a pending seek when a new one
+    /// arrives.
     public func seek(to seconds: Double) {
-        player?.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
+        player?.seek(to: CMTime(seconds: seconds, preferredTimescale: 600),
+                     toleranceBefore: .zero, toleranceAfter: .zero)
         currentTime = seconds
     }
 
