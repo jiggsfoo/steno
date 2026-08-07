@@ -70,3 +70,16 @@ private func withTopic(_ topic: String?, _ signature: String) -> LoadedRecording
     #expect(!RecordingEditor.isBusyMessage(.failed("disk full")))
     #expect(!RecordingEditor.isBusyMessage(.updated(sidecar)))
 }
+
+/// The combo box offers what exists plus an explicit way out. "None" must be
+/// distinguishable from a topic literally named that — `TopicName` reserves
+/// the sidebar's Unfiled sentinel, so the menu's own escape hatch carries no
+/// topic string at all.
+@Test func theTopicMenuOffersExistingTopicsAndAWayToUnfile() {
+    let choices = RecordingEditor.topicChoices(from: [
+        withTopic("Receipts", "a"), withTopic("Admin", "b"),
+    ])
+
+    #expect(choices == ["Admin", "Receipts"])
+    #expect(RecordingEditor.unfileLabel == "None — unfile this")
+}

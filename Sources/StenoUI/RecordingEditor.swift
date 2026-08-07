@@ -70,9 +70,49 @@ public struct RecordingEditor: View {
                     }
             }
 
-            // Static for now; Task 5 makes this the combo box.
-            Text(recording.sidecar.topic ?? LibrarySidebar.unfiled)
-                .font(.caption).foregroundStyle(.secondary)
+            if editingTopic {
+                HStack(spacing: 0) {
+                    TextField("Topic", text: $topic)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { Task { await commitTopic() } }
+                        .onExitCommand {
+                            topic = recording.sidecar.topic ?? ""
+                            editingTopic = false
+                        }
+                    // The chevron is not optional: a dropdown that does not
+                    // advertise itself will never be found, and discovering
+                    // existing topics is the whole reason this is a combo box
+                    // rather than a plain text field.
+                    Menu {
+                        ForEach(knownTopics, id: \.self) { choice in
+                            Button(choice) { topic = choice }
+                        }
+                        Divider()
+                        Button(Self.unfileLabel) { topic = "" }
+                    } label: { EmptyView() }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 16)
+                }
+                .frame(maxWidth: 240)
+            } else {
+                Text(recording.sidecar.topic ?? LibrarySidebar.unfiled)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.horizontal, 5).padding(.vertical, 2)
+                    .background(hoveringTopic ? Color.secondary.opacity(0.18) : .clear,
+                                in: RoundedRectangle(cornerRadius: 5))
+                    .onHover { hoveringTopic = $0 }
+                    .onTapGesture {
+                        // Same resync-before-edit reasoning as the title's
+                        // `.onTapGesture` above: `@State` survives `recording`
+                        // being replaced by a sweep-driven rewrite, so this
+                        // control has to pull both fields fresh from the live
+                        // sidecar too, or it inherits the exact bug that tap
+                        // handler exists to fix.
+                        title = recording.sidecar.title ?? ""
+                        topic = recording.sidecar.topic ?? ""
+                        editingTopic = true
+                    }
+            }
 
             if let lastOutcome, let message = Self.message(for: lastOutcome) {
                 // Same `Color` type on both arms: `.secondary` resolves to
@@ -85,6 +125,8 @@ public struct RecordingEditor: View {
 
     @State private var editingTitle = false
     @State private var hoveringTitle = false
+    @State private var editingTopic = false
+    @State private var hoveringTopic = false
 
     /// Commits the title, and leaves edit mode only if the save landed.
     ///
@@ -99,6 +141,18 @@ public struct RecordingEditor: View {
     private func commitTitle() async {
         await save()
         if let lastOutcome { editingTitle = !Self.shouldNotifySaved(for: lastOutcome) }
+    }
+
+    /// Commits the topic, and leaves edit mode only if the save landed.
+    ///
+    /// A refusal — `TopicName` rejects a bad folder name rather than repairing
+    /// it — keeps the field open with what was typed, so the reason rendered
+    /// below has something to point at. Same `!Self.shouldNotifySaved(for:)`
+    /// discriminator as `commitTitle()`, for the same reason: a dedicated
+    /// "stays editing" predicate would just be its inverse.
+    private func commitTopic() async {
+        await save()
+        if let lastOutcome { editingTopic = !Self.shouldNotifySaved(for: lastOutcome) }
     }
 
     private func save() async {
@@ -136,6 +190,11 @@ public struct RecordingEditor: View {
             await onSaved()
         }
     }
+
+    /// The combo box's escape hatch. Selecting it sets the topic to empty,
+    /// which `updateRecording` turns into nil — it does not set a topic named
+    /// "None".
+    nonisolated static let unfileLabel = "None — unfile this"
 
     /// Every topic already in use, alphabetically.
     ///
