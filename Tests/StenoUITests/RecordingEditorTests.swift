@@ -84,24 +84,53 @@ private func withTopic(_ topic: String?, _ signature: String) -> LoadedRecording
     #expect(RecordingEditor.unfileLabel == "None — unfile this")
 }
 
-/// The review's second Important: tapping one field must not discard the
-/// other's unsaved edit. A field mid-edit holds the user's own intent, which
-/// is newer than disk, so it is exempt from the resync a sibling's tap would
-/// otherwise trigger — the same "newer wins" ruling Task 4's `AppModel`
-/// stale-snapshot fix applied one layer down, applied here to two `@State`
-/// vars instead of a file on disk.
-@Test func aFieldMidEditIsNotClobberedByTheOtherFieldsResync() {
-    #expect(RecordingEditor.resyncedValue(current: "typed", onDisk: "disk", isEditing: true) == "typed")
+/// The whole-branch review's Critical, as a truth table.
+///
+/// The editor resynced on ENTRY and then committed from the entry-time
+/// snapshot. Between tapping the title and pressing Return, the transcription
+/// sweep can file the recording — writing `topic` into the sidecar and
+/// creating the note in that topic's folder — and `LibraryWindow.reload()`
+/// refreshes `recording` without re-running `init`, so the `topic` `@State`
+/// stayed at its tap-time value. Return then sent nil, and `updateRecording`
+/// removed the note instead of moving it: the AI-assigned topic reverted to
+/// Unfiled and the markdown note was orphaned.
+///
+/// Taking the sibling from disk AT COMMIT TIME is what closes it — the stale
+/// `@State` is not an input to this function at all, so no gap between tap and
+/// Return can reopen it.
+@Test func committingTheTitleWritesTheTopicTheSidecarHasNow() {
+    let edit = RecordingEditor.titleCommit(typed: "Kickoff call", topicOnDisk: "Client Calls")
+
+    #expect(edit == RecordingEditor.Edit(title: "Kickoff call", topic: "Client Calls"))
 }
 
-/// The counterpart: an idle field DOES pick up whatever is on disk, which is
-/// the whole point of resyncing at all — see Task 4's stale-`@State` fix.
-@Test func anIdleFieldResyncsFromDisk() {
-    #expect(RecordingEditor.resyncedValue(current: "stale", onDisk: "fresh", isEditing: false) == "fresh")
+/// The review's second Important, closed by the same fix pointed the other
+/// way: an abandoned draft in the title field is not evidence of anything.
+/// Type "Weekl", tap over to the topic without pressing Return, commit the
+/// topic — the title on disk stays "Weekly Sync", which is also what makes Esc
+/// on the still-open title field restore something true.
+@Test func committingTheTopicWritesTheTitleTheSidecarHasNow() {
+    let edit = RecordingEditor.topicCommit(typed: "Projects", titleOnDisk: "Weekly Sync")
+
+    #expect(edit == RecordingEditor.Edit(title: "Weekly Sync", topic: "Projects"))
 }
 
-/// No topic on disk resyncs to empty, matching `init`'s own `?? ""` and
-/// `save()`'s `topic.isEmpty ? nil : topic` round trip.
-@Test func anIdleFieldWithNoDiskValueResyncsToEmpty() {
-    #expect(RecordingEditor.resyncedValue(current: "stale", onDisk: nil, isEditing: false) == "")
+/// An unfiled recording has no topic at all rather than one named "" —
+/// matching `init`'s `?? ""` on the way in and what `writeEdit` does with an
+/// empty string on the way out. This is the menu's "None — unfile this" path.
+@Test func anEmptyTopicCommitsAsUnfiled() {
+    #expect(RecordingEditor.topicCommit(typed: "", titleOnDisk: "Weekly Sync").topic == nil)
+}
+
+/// A recording synced but not yet titled has `title: nil` on its sidecar.
+/// Committing a topic must not invent a title for it, and must not send nil to
+/// a parameter that does not take one.
+@Test func aRecordingWithNoTitleYetCommitsAnEmptyOne() {
+    #expect(RecordingEditor.topicCommit(typed: "Projects", titleOnDisk: nil).title == "")
+}
+
+/// The other direction of the same restraint: retitling an unfiled recording
+/// must not file it anywhere.
+@Test func committingTheTitleOfAnUnfiledRecordingLeavesItUnfiled() {
+    #expect(RecordingEditor.titleCommit(typed: "Kickoff", topicOnDisk: nil).topic == nil)
 }

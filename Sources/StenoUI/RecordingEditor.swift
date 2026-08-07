@@ -54,28 +54,23 @@ public struct RecordingEditor: View {
                                 in: RoundedRectangle(cornerRadius: 5))
                     .onHover { hoveringTitle = $0 }
                     .onTapGesture {
-                        // Resync from the live sidecar before opening the
-                        // field, not just on Esc: `RecordingEditor` keeps its
-                        // identity for as long as the same `recording.id`
-                        // stays selected, so a sweep-driven title (or topic)
-                        // rewrite that lands while this pane is open never
-                        // reaches this `@State` on its own. Skipping this
-                        // would let a title-only edit silently overwrite a
-                        // fresher topic with whatever `topic` was last set
-                        // to -- the same stale-snapshot shape as the
-                        // `AppModel` Critical, one layer up.
+                        // Seed from the live sidecar, not just on Esc:
+                        // `RecordingEditor` keeps its identity for as long as
+                        // the same `recording.id` stays selected, so a
+                        // sweep-driven title (or topic) rewrite that lands
+                        // while this pane is open never reaches this `@State`
+                        // on its own.
                         //
-                        // The topic is resynced only when it is NOT currently
-                        // being edited -- see `resyncedValue(current:onDisk:
-                        // isEditing:)`. If the user is mid-edit on the topic
-                        // field, its live `@State` is their own unsaved intent
-                        // -- newer than disk -- and overwriting it here would
-                        // silently discard keystrokes the moment they tapped
-                        // over to the title.
+                        // ONLY the field being opened. The sibling is left
+                        // exactly as it is, because nothing reads it any more:
+                        // a commit sends the sibling straight from
+                        // `recording.sidecar` (see `titleCommit(typed:
+                        // topicOnDisk:)`), and the sibling's own tap seeds it
+                        // from disk the same way this line does. Resyncing it
+                        // here as well was the previous shape of this fix, and
+                        // it did not work -- a sweep landing BETWEEN the tap
+                        // and Return still committed the tap-time value.
                         title = recording.sidecar.title ?? ""
-                        topic = Self.resyncedValue(current: topic,
-                                                    onDisk: recording.sidecar.topic,
-                                                    isEditing: editingTopic)
                         editingTitle = true
                     }
             }
@@ -121,19 +116,13 @@ public struct RecordingEditor: View {
                                 in: RoundedRectangle(cornerRadius: 5))
                     .onHover { hoveringTopic = $0 }
                     .onTapGesture {
-                        // Same resync-before-edit reasoning as the title's
-                        // `.onTapGesture` above: `@State` survives `recording`
-                        // being replaced by a sweep-driven rewrite, so this
-                        // control has to pull both fields fresh from the live
-                        // sidecar too, or it inherits the exact bug that tap
-                        // handler exists to fix. And the same carve-out via
-                        // `resyncedValue(current:onDisk:isEditing:)`: the
-                        // title is resynced only when it is not the one
-                        // mid-edit, so tapping the topic while the title has
-                        // unsaved typing does not throw that typing away.
-                        title = Self.resyncedValue(current: title,
-                                                    onDisk: recording.sidecar.title,
-                                                    isEditing: editingTitle)
+                        // Same seed-from-disk reasoning as the title's
+                        // `.onTapGesture` above, and the same restraint: this
+                        // touches only the field it opens. Leaving `title`
+                        // alone is also what keeps a half-typed title visible
+                        // in a title field that is still open -- overwriting
+                        // it here would discard keystrokes the moment the user
+                        // tapped over to the topic.
                         topic = recording.sidecar.topic ?? ""
                         editingTopic = true
                     }
@@ -155,16 +144,16 @@ public struct RecordingEditor: View {
 
     /// Commits the title, and leaves edit mode only if the save landed.
     ///
-    /// `save()` is unchanged — it still sends both `title` and `topic` to
-    /// `AppModel.updateRecording`, and `topic` still holds what the sidecar
-    /// had, so a title-only edit writes the topic back unchanged.
+    /// The topic it sends comes from the sidecar as it stands RIGHT NOW, not
+    /// from the `topic` `@State` — see `titleCommit(typed:topicOnDisk:)` for
+    /// why that distinction is the whole fix.
     ///
     /// Uses `!Self.shouldNotifySaved(for:)` directly rather than a dedicated
     /// "stays editing" predicate — that would be byte-for-byte the inverse of
     /// an already-tested decision, one discriminator duplicated for no new
     /// information.
     private func commitTitle() async {
-        await save()
+        await save(Self.titleCommit(typed: title, topicOnDisk: recording.sidecar.topic))
         if let lastOutcome { editingTitle = !Self.shouldNotifySaved(for: lastOutcome) }
     }
 
@@ -175,18 +164,20 @@ public struct RecordingEditor: View {
     /// below has something to point at. Same `!Self.shouldNotifySaved(for:)`
     /// discriminator as `commitTitle()`, for the same reason: a dedicated
     /// "stays editing" predicate would just be its inverse.
+    ///
+    /// Same sibling rule as `commitTitle()`, pointed the other way: the title
+    /// it sends is the sidecar's, not the `title` `@State`.
     private func commitTopic() async {
-        await save()
+        await save(Self.topicCommit(typed: topic, titleOnDisk: recording.sidecar.title))
         if let lastOutcome { editingTopic = !Self.shouldNotifySaved(for: lastOutcome) }
     }
 
-    private func save() async {
+    private func save(_ edit: Edit) async {
         isSaving = true
         defer { isSaving = false }
 
         let outcome = await model.updateRecording(
-            recording.sidecar, title: title,
-            topic: topic.isEmpty ? nil : topic)
+            recording.sidecar, title: edit.title, topic: edit.topic)
 
         lastOutcome = outcome
         if Self.shouldNotifySaved(for: outcome) {
@@ -216,22 +207,58 @@ public struct RecordingEditor: View {
         }
     }
 
-    /// What a field's `@State` should hold when the OTHER field is opened for
-    /// editing.
+    /// The exact pair a commit hands to `AppModel.updateRecording`.
     ///
-    /// PURE, and the whole "don't clobber active typing" ruling in one place
-    /// — both `.onTapGesture`s call this for the field they are not opening.
-    /// `current` is what that `@State` already holds; disk (`onDisk`) is
-    /// trusted only when `isEditing` is false, because a field the user is
-    /// actively typing in holds intent that is newer than whatever the
-    /// sidecar has written down — the same sense in which a sweep-driven
-    /// rewrite is newer than a value cached since `init`, just pointed the
-    /// other way. Review found this reachable for the first time in this
-    /// task: before the topic grew a tap gesture, the title's own resync
-    /// could not run into a topic actively being typed, so the collision
-    /// this resolves did not yet exist.
-    nonisolated static func resyncedValue(current: String, onDisk: String?, isEditing: Bool) -> String {
-        isEditing ? current : (onDisk ?? "")
+    /// Both fields go over on every write — `updateRecording` takes a whole
+    /// edit, not a patch — so "which value does the field I did NOT touch
+    /// send" is a real decision with a real answer, and this is the type that
+    /// carries it.
+    struct Edit: Equatable, Sendable {
+        let title: String
+        /// nil unfiles. `updateRecording` clears the topic rather than filing
+        /// under a topic literally named "".
+        let topic: String?
+    }
+
+    /// What committing the TITLE writes.
+    ///
+    /// PURE, and the Critical fix in one line: the topic comes from the
+    /// sidecar as it stands at COMMIT time, never from the `topic` `@State`.
+    ///
+    /// That `@State` cannot be trusted, and resyncing it when the title field
+    /// was opened was not enough. `RecordingEditor` keeps its identity while
+    /// the same `recording.id` stays selected, so `init` does not re-run when
+    /// `LibraryWindow.reload()` hands it a fresher `recording`. Everything the
+    /// user does in between takes real time: tap the auto-generated title of a
+    /// just-synced recording, spend fifteen seconds typing a real one, and the
+    /// transcription sweep can land in that gap — `TranscriptionQueue` writes
+    /// `topic` into the sidecar and `Filer.write` creates the note in that
+    /// topic's folder. Return then sent the tap-time topic (nil, because the
+    /// recording was unfiled when the field opened), `writeEdit` cleared the
+    /// topic, and `updateRecording` removed the note without rewriting it. The
+    /// AI-assigned topic reverted to Unfiled and the note was orphaned. The
+    /// disk re-read inside `updateRecording` does not protect against this:
+    /// the caller's argument is what wins.
+    ///
+    /// Sourcing the sibling here makes the stale value not an input at all,
+    /// which is the only version of this fix that a later gap between tap and
+    /// commit cannot reopen.
+    nonisolated static func titleCommit(typed: String, topicOnDisk: String?) -> Edit {
+        Edit(title: typed, topic: topicOnDisk)
+    }
+
+    /// What committing the TOPIC writes.
+    ///
+    /// PURE, the mirror of `titleCommit(typed:topicOnDisk:)`, and the fix for
+    /// the review's second Important: a draft abandoned in the title field is
+    /// not evidence of anything. Typing "Weekl" into the title, tapping over
+    /// to the topic without pressing Return, and committing the topic used to
+    /// write "Weekl" as well — and then Esc on the still-open title field
+    /// restored `recording.sidecar.title`, which by then WAS "Weekl", so the
+    /// undo was gone too. Taking the title from disk leaves the real title on
+    /// disk, which is what makes Esc mean something again.
+    nonisolated static func topicCommit(typed: String, titleOnDisk: String?) -> Edit {
+        Edit(title: titleOnDisk ?? "", topic: typed.isEmpty ? nil : typed)
     }
 
     /// The combo box's escape hatch. Selecting it sets the topic to empty,
