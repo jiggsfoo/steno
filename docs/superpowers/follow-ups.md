@@ -338,10 +338,18 @@ because the layout test and the release build came back clean.
    type a search term that should match something in a real transcript,
    confirm moments come back, click one, and confirm playback seeks to that
    point rather than somewhere nearby or not at all.
-3. **Following highlighting the right line and detaching on a hand scroll.**
-   Check: play a recording and watch the transcript auto-scroll and highlight
-   the current line, then scroll by hand and confirm following stops rather
-   than fighting the manual scroll.
+3. **Following highlighting the right line and detaching on a hand scroll —
+   including a MOUSE WHEEL, not only a trackpad drag.** Check: play a
+   recording and watch the transcript auto-scroll and highlight the current
+   line, then scroll by hand and confirm following stops rather than fighting
+   the manual scroll. Do it twice, once with a two-finger trackpad drag and
+   once with a discrete mouse wheel. The detach is driven by
+   `.onScrollPhaseChange { if phase == .interacting }`, and a trackpad drag
+   reliably passes through `.interacting` because the fingers are on the glass
+   for the whole gesture. A wheel notch has no such phase — it may go straight
+   to `.decelerating` and never report `.interacting` at all, in which case
+   following never detaches for wheel users and the view fights them for the
+   rest of the recording. Unverifiable without a display and a real mouse.
 4. **The Resume banner appearing and working.** Check: after detaching by
    hand-scrolling, confirm the "Following paused" banner appears, and that
    its Resume button jumps back to the current line and re-attaches.
@@ -356,6 +364,33 @@ because the layout test and the release build came back clean.
 7. **A recording with no transcript showing the not-yet state.** Check: open
    a recording that hasn't been transcribed yet and confirm the pane reads as
    "not transcribed yet" rather than blank or broken.
+8. **Closing the window stopping playback.** Check: play a recording, close
+   the library window while it is still playing, and confirm the audio stops
+   rather than continuing with no window to control it.
+   `LibraryWindow` has an explicit `.onDisappear { player.stop() }`, but only
+   a person can confirm that a window CLOSE actually fires it — SwiftUI is
+   free to keep a closed `Window` scene's `@State` alive, and `.onDisappear`
+   timing on a scene rather than a subview is not something the tests can
+   reach.
+9. **The scrubber dragging smoothly.** Check: drag the transport bar's thumb
+   across a long recording and confirm it tracks the pointer rather than
+   stuttering or snapping back. The `Slider`'s setter seeks on every step of
+   the drag, and `AudioPlayer`'s periodic observer writes `currentTime` four
+   times a second from the other direction — whether those two fight each
+   other visibly needs eyes.
+10. **The scrubber seeking to where it was dropped.** Check: drop the thumb
+    at a recognisable point and confirm playback resumes from there, and that
+    the elapsed/duration readout agrees with the transcript line highlighted
+    underneath.
+11. **Following re-attaching after a scrub.** Check: hand-scroll the
+    transcript until the "Following paused" banner appears, then scrub. The
+    ruling is that a scrub re-attaches following, exactly as clicking a
+    transcript line does — so confirm the banner clears and the transcript
+    starts auto-scrolling again without touching Resume.
+12. **The transport on a recording with no transcript.** Check: open a
+    recording still in the transcription queue, confirm the pane reads "not
+    transcribed yet" AND that the transport row underneath still plays it.
+    That case had no way to play at all before this.
 
 **Filing has still never run on the real library.** Zero topic folders exist
 under the real library root — the sidebar's topic grouping has only ever been
