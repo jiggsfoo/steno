@@ -54,7 +54,7 @@ private let segments = [
 /// guard held is observable without any asynchronous state at all.
 @MainActor
 @Test func aSecondLoadForTheSameURLDoesNotResetPlayback() {
-    let player = AudioPlayer()
+    let player = AudioPlayer(defaults: throwawayDefaults())
     let url = URL(fileURLWithPath: "/nonexistent/\(UUID().uuidString).m4a")
     player.load(url)
     player.seek(to: 5)
@@ -69,7 +69,7 @@ private let segments = [
 /// and SwiftUI may keep a closed window's `@State` alive.
 @MainActor
 @Test func playingWithNothingLoadedDoesNotClaimToBePlaying() {
-    let player = AudioPlayer()
+    let player = AudioPlayer(defaults: throwawayDefaults())
     #expect(player.isPlaying == false)
 
     player.play()
@@ -93,7 +93,7 @@ private let segments = [
 /// wait for `.readyToPlay`: only for the item to reach `.failed`.
 @MainActor
 @Test func aFailedLoadCanBeRetried() async throws {
-    let player = AudioPlayer()
+    let player = AudioPlayer(defaults: throwawayDefaults())
     let url = URL(fileURLWithPath: "/nonexistent/\(UUID().uuidString).m4a")
     player.load(url)
     player.seek(to: 5)

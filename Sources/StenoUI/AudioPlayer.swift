@@ -53,7 +53,7 @@ public final class AudioPlayer {
     public func setRate(_ newRate: Double) {
         rate = Self.clampedRate(newRate)
         defaults.set(rate, forKey: Self.rateKey)
-        if isPlaying { player?.rate = Float(rate) }
+        player?.rate = Self.appliedRate(chosen: rate, isPlaying: isPlaying)
     }
 
     /// A speed, or 1 for anything that is not one.
