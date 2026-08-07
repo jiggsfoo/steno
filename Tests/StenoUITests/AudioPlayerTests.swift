@@ -162,6 +162,25 @@ private let segments = [
         #expect(player().rate == 1)
     }
 
+    /// Speed and position are two different things, and changing one must not
+    /// move the other. This was filed as "unverifiable by machine" -- the rule
+    /// reads as "changing speed must not move the transcript", and the
+    /// transcript needs a display. It does not: the transcript follows
+    /// `player.currentTime`, so asserting the playhead does not move asserts
+    /// the whole of it, and this branch's injectable-defaults seam makes an
+    /// `AudioPlayer` reachable with no audio hardware and no real file.
+    ///
+    /// Mutation-checked: adding `currentTime = 0` to `setRate` passed all 361
+    /// tests before this one existed.
+    @Test func changingSpeedDoesNotMoveThePlayhead() {
+        let player = player()
+        player.load(URL(fileURLWithPath: "/nonexistent/\(UUID().uuidString).m4a"))
+        player.seek(to: 12)
+        player.setRate(1.5)
+
+        #expect(player.currentTime == 12)
+    }
+
     /// `clampedRate` is tested directly above, but `setRate` is where a bad value
     /// actually arrives from the UI -- and it clamps on the way IN so `rate` is
     /// never a non-speed. Without this, dropping that clamp is invisible:

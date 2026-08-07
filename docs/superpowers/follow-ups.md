@@ -562,9 +562,15 @@ on this branch can reach it:
     asserts the call site — the same gap exists for `scrub(to:)` and the
     line tap. Check 2 above is the human check that closes this; it covers
     all three trigger paths, not just ±10s.
-13. **That changing speed does *not* move the transcript.** The other half
-    of the same rule. Check 3 above is the human check; nothing on this
-    branch asserts that a speed change and a position change stay decoupled.
+
+The fourth, "that changing speed does not move the transcript", was **not**
+a human check after all and is now asserted:
+`AudioPlayerTests.changingSpeedDoesNotMoveThePlayhead`. The transcript
+follows `player.currentTime`, so the whole rule is reachable through the
+injectable-defaults seam — no display, no audio hardware, no real file.
+Mutation-checked: adding `currentTime = 0` to `setRate` passed all 361 tests
+before it was written. Check 3 above stays only for what a person still adds
+over it: that the highlighted line on screen does not visibly jump.
 
 **A latent trap surfaced but not introduced by this branch.**
 `TranscriptPane.timestamp(_:)` does `Int(seconds)`, and both
