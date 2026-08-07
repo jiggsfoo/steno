@@ -53,7 +53,21 @@ public struct RecordingEditor: View {
                     .background(hoveringTitle ? Color.secondary.opacity(0.18) : .clear,
                                 in: RoundedRectangle(cornerRadius: 5))
                     .onHover { hoveringTitle = $0 }
-                    .onTapGesture { editingTitle = true }
+                    .onTapGesture {
+                        // Resync from the live sidecar before opening the
+                        // field, not just on Esc: `RecordingEditor` keeps its
+                        // identity for as long as the same `recording.id`
+                        // stays selected, so a sweep-driven title (or topic)
+                        // rewrite that lands while this pane is open never
+                        // reaches this `@State` on its own. Skipping this
+                        // would let a title-only edit silently overwrite a
+                        // fresher topic with whatever `topic` was last set
+                        // to -- the same stale-snapshot shape as the
+                        // `AppModel` Critical, one layer up.
+                        title = recording.sidecar.title ?? ""
+                        topic = recording.sidecar.topic ?? ""
+                        editingTitle = true
+                    }
             }
 
             // Static for now; Task 5 makes this the combo box.
@@ -155,9 +169,8 @@ public struct RecordingEditor: View {
     /// PURE, same rationale as `message(for:)` above. Only `.updated`
     /// actually changed the sidecar on disk — `.busy`, `.rejectedTopic`, and
     /// `.failed` all leave it exactly as it was, so there is nothing for
-    /// `LibraryWindow` to reload, and the sheet has to stay open so the user
-    /// can see the message and try again rather than being dismissed on a
-    /// no-op.
+    /// `LibraryWindow` to reload, and the field has to stay open so the user
+    /// can see the message and try again rather than closing on a no-op.
     nonisolated static func shouldNotifySaved(for outcome: RecordingEditOutcome) -> Bool {
         if case .updated = outcome { return true }
         return false

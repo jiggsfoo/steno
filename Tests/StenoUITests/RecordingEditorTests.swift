@@ -48,7 +48,7 @@ private func withTopic(_ topic: String?, _ signature: String) -> LoadedRecording
 
 /// This is the decision behind the Critical fix: only `.updated` actually
 /// changed the sidecar on disk, so it's the only outcome worth telling
-/// `LibraryWindow` to reload over — the other three leave the sheet open
+/// `LibraryWindow` to reload over — the other three leave the field open
 /// with its message showing instead.
 @Test func aSuccessfulSaveNotifiesTheCaller() {
     let sidecar = withTopic("Admin", "a").sidecar
