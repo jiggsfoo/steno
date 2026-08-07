@@ -53,6 +53,12 @@ public struct LibraryWindow: View {
             }
         }
         .task { await reload() }
+        // Closing the window must stop the audio. `AudioPlayer`'s `isolated
+        // deinit` already tears the periodic observer down, but only once the
+        // player is actually deallocated -- and `@State` is owned by SwiftUI,
+        // which is free to keep a closed window's state alive. One explicit
+        // line is cheap next to a window that is gone but still playing.
+        .onDisappear { player.stop() }
         // Loading audio belongs here rather than inside a detail branch: a
         // closure created in one branch would capture the selection that was
         // current when that branch was built, and load the previous
