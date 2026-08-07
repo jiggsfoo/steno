@@ -76,18 +76,32 @@ private let everyStatus: [DeviceStatus] = [
     #expect(MenuBarView.recordingLabel(for: withControlByte) == "Recording…")
 }
 
-/// Both windows this menu opens are `Window(_:id:)` scenes in `StenoApp`, and
-/// SwiftUI tells them apart by id alone. Sharing one id would silently point
-/// "Free Up Space on P1…" at the Settings window -- there is no diagnostic for
-/// it, at compile time or at run time.
+/// All THREE windows this menu opens are `Window(_:id:)` scenes in `StenoApp`,
+/// and SwiftUI tells them apart by id alone. Two scenes sharing an id is
+/// undefined behaviour with no diagnostic at all, at compile time or at run
+/// time -- it would silently point one menu item at another item's window. A
+/// typo making `libraryWindowID` equal `"reclaim"` compiles, links, and ships.
+///
+/// PAIRWISE, not a chain. This test was written for two ids and the branch
+/// added a third; `a != b` and `b != c` together say nothing about `a` and
+/// `c`, so a test that only grew a link would still ship the collision it
+/// exists to stop.
 ///
 /// This is the only part of Bug 1's fix a test can reach: whether the window
 /// visibly stops re-presenting needs a human, and is recorded as such.
 @MainActor
-@Test func theTwoWindowScenesHaveDistinctIDs() {
-    #expect(!MenuBarView.settingsWindowID.isEmpty)
-    #expect(!MenuBarView.reclaimWindowID.isEmpty)
+@Test func theThreeWindowScenesHaveDistinctIDs() {
+    let ids = [MenuBarView.settingsWindowID,
+               MenuBarView.reclaimWindowID,
+               MenuBarView.libraryWindowID]
+
+    #expect(ids.allSatisfy { !$0.isEmpty })
     #expect(MenuBarView.settingsWindowID != MenuBarView.reclaimWindowID)
+    #expect(MenuBarView.settingsWindowID != MenuBarView.libraryWindowID)
+    #expect(MenuBarView.reclaimWindowID != MenuBarView.libraryWindowID)
+    // Belt and braces, and the part that keeps working when a fourth scene is
+    // added to the array above but its pair lines are forgotten.
+    #expect(Set(ids).count == ids.count)
 }
 
 @Test func transcriptionLabelReadsAsProgressWhileWorking() {
