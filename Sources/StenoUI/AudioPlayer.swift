@@ -26,7 +26,52 @@ public final class AudioPlayer {
     /// playable does not permanently wedge `loadedURL` (see `load(_:)`).
     @ObservationIgnored private var statusObserver: NSKeyValueObservation?
 
-    public init() {}
+    /// The playback speed the user chose, never zero.
+    ///
+    /// Distinct from `AVPlayer.rate`, which is this value while playing and 0
+    /// while paused — one property carrying two meanings. Keeping the choice
+    /// here is what lets `pause()` stop playback without forgetting the
+    /// speed, and `play()` resume at it rather than at 1x.
+    public private(set) var rate: Double
+
+    @ObservationIgnored private let defaults: UserDefaults
+    private static let rateKey = "playbackRate"
+
+    /// - Parameter defaults: injectable so tests never write the user's real
+    ///   preference domain. `AppModel` has no equivalent seam, which is why
+    ///   no test can drive its write paths; this one is cheap, so it exists.
+    public init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let stored = defaults.double(forKey: Self.rateKey)
+        // `double(forKey:)` returns 0 for a missing key, which `clampedRate`
+        // already maps to 1 — so a fresh install and a corrupt value take the
+        // same safe path without a separate existence check.
+        self.rate = Self.clampedRate(stored)
+    }
+
+    /// Sets the speed, applies it if playback is under way, and remembers it.
+    public func setRate(_ newRate: Double) {
+        rate = Self.clampedRate(newRate)
+        defaults.set(rate, forKey: Self.rateKey)
+        if isPlaying { player?.rate = Float(rate) }
+    }
+
+    /// A speed, or 1 for anything that is not one.
+    ///
+    /// PURE. Zero and negatives are stopped/reversed players rather than
+    /// speeds, and a NaN reaching `AVPlayer.rate` is undefined.
+    nonisolated static func clampedRate(_ value: Double) -> Double {
+        guard value.isFinite, value > 0 else { return 1 }
+        return value
+    }
+
+    /// What `AVPlayer.rate` should be, given the chosen speed and whether
+    /// playback is under way.
+    ///
+    /// PURE, and the whole two-meanings reconciliation in one line.
+    nonisolated static func appliedRate(chosen: Double, isPlaying: Bool) -> Float {
+        isPlaying ? Float(clampedRate(chosen)) : 0
+    }
 
     // The observer token is typed `Any`, which can never be proven
     // `Sendable` — so a plain `nonisolated deinit` (the default) cannot
@@ -122,7 +167,7 @@ public final class AudioPlayer {
     /// player is true.
     public func play() {
         guard let player else { return }
-        player.play()
+        player.rate = Self.appliedRate(chosen: rate, isPlaying: true)
         isPlaying = true
     }
 

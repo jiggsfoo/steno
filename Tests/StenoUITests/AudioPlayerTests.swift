@@ -2,6 +2,14 @@ import Foundation
 import Testing
 @testable import StenoUI
 
+/// A `UserDefaults` suite nobody else owns.
+///
+/// Tests MUST NOT touch `UserDefaults.standard` — it is the user's real
+/// preference domain, and `AudioPlayer` persists the playback rate there.
+private func throwawayDefaults() -> UserDefaults {
+    UserDefaults(suiteName: "steno.tests.\(UUID().uuidString)")!
+}
+
 private let segments = [
     Segment(start: 0, end: 10, text: "first", speaker: nil),
     Segment(start: 10, end: 20, text: "second", speaker: nil),
@@ -103,4 +111,52 @@ private let segments = [
         }
     }
     #expect(recovered)
+}
+
+/// `AVPlayer.rate` is the speed while playing and 0 while paused — one
+/// property with two meanings. `AudioPlayer.rate` is the CHOSEN speed and
+/// must survive a pause, or resuming would silently drop back to 1x.
+@MainActor
+@Test func pausingDoesNotForgetTheChosenSpeed() {
+    let player = AudioPlayer(defaults: throwawayDefaults())
+    player.setRate(1.5)
+    player.pause()
+
+    #expect(player.rate == 1.5)
+}
+
+@MainActor
+@Test func theChosenSpeedIsWhatGetsAppliedOnPlay() {
+    #expect(AudioPlayer.appliedRate(chosen: 1.5, isPlaying: true) == 1.5)
+    #expect(AudioPlayer.appliedRate(chosen: 1.5, isPlaying: false) == 0)
+}
+
+/// A zero or negative rate is a stopped player, not a speed. Accepting one
+/// would make `setRate(0)` indistinguishable from pausing, and the transport
+/// would have no way back.
+@Test func aRateThatIsNotASpeedIsRefused() {
+    #expect(AudioPlayer.clampedRate(0) == 1)
+    #expect(AudioPlayer.clampedRate(-2) == 1)
+    #expect(AudioPlayer.clampedRate(.nan) == 1)
+    #expect(AudioPlayer.clampedRate(.infinity) == 1)
+}
+
+@Test func aRealSpeedSurvivesClamping() {
+    #expect(AudioPlayer.clampedRate(0.75) == 0.75)
+    #expect(AudioPlayer.clampedRate(2) == 2)
+}
+
+/// The preference is about how Angelo listens, not about one file, so it
+/// outlives the process.
+@MainActor
+@Test func theChosenSpeedIsRestoredFromDefaults() {
+    let defaults = throwawayDefaults()
+    AudioPlayer(defaults: defaults).setRate(1.75)
+
+    #expect(AudioPlayer(defaults: defaults).rate == 1.75)
+}
+
+@MainActor
+@Test func aFreshInstallStartsAtNormalSpeed() {
+    #expect(AudioPlayer(defaults: throwawayDefaults()).rate == 1)
 }
