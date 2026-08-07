@@ -94,10 +94,10 @@ public struct RecordingEditor: View {
                     // invisible hit region with no affordance at all.
                     Menu {
                         ForEach(knownTopics, id: \.self) { choice in
-                            Button(choice) { topic = choice }
+                            Button(choice) { choose(choice) }
                         }
                         Divider()
-                        Button(Self.unfileLabel) { topic = "" }
+                        Button(Self.unfileLabel) { choose("") }
                     } label: {
                         Image(systemName: "chevron.down")
                             .font(.caption2)
@@ -141,6 +141,23 @@ public struct RecordingEditor: View {
     @State private var hoveringTitle = false
     @State private var editingTopic = false
     @State private var hoveringTopic = false
+
+    /// Picking from the topic menu IS the commit.
+    ///
+    /// Setting `topic` alone left the user still needing to press Return, so a
+    /// dropdown that visibly did something to the field appeared to do nothing
+    /// to the recording — and the chevron exists precisely to make that
+    /// dropdown discoverable, so the first thing anyone finds through it was
+    /// the thing that looked broken.
+    ///
+    /// Deliberately lands AFTER the commit-time sibling fix. Before it, a
+    /// selection would have committed whatever stale `title` the `@State` had
+    /// been carrying since the tap, which is the same data loss with a second
+    /// trigger.
+    private func choose(_ choice: String) {
+        topic = choice
+        Task { await commitTopic() }
+    }
 
     /// Commits the title, and leaves edit mode only if the save landed.
     ///

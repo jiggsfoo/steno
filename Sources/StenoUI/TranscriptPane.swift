@@ -46,12 +46,24 @@ public struct TranscriptPane: View {
         }
     }
 
-    private var transport: some View {
-        // `?? 0` rather than a second unknown-duration branch: `scrubber`,
-        // `remaining` and `total` all treat zero as "not known", so resolving
-        // to one number here keeps the bar and both labels unable to disagree.
-        let duration = Self.transportDuration(
+    /// The one number the whole transport is driven from.
+    ///
+    /// `?? 0` rather than a second unknown-duration branch: `scrubber`,
+    /// `remaining` and `total` all treat zero as "not known", so resolving to
+    /// one number keeps the bar and both labels unable to disagree.
+    ///
+    /// A property rather than the same expression written out at each call
+    /// site. `transport` draws the `Slider`'s range from it and `skip(by:)`
+    /// clamps against it; the two drifting apart would put the skip target
+    /// outside the Slider's own range, which is the undefined state
+    /// `skipTarget(from:by:duration:)`'s doc comment exists to prevent.
+    private var resolvedDuration: Double {
+        Self.transportDuration(
             observed: player.duration, sidecar: recording.sidecar.durationSeconds) ?? 0
+    }
+
+    private var transport: some View {
+        let duration = resolvedDuration
         let scrubber = Self.scrubber(currentTime: player.currentTime, duration: duration)
         return VStack(spacing: 4) {
             // The `Slider`'s setter runs on every step of a drag, not only on
@@ -151,10 +163,8 @@ public struct TranscriptPane: View {
     /// A skip MOVES the playhead, so it re-attaches for the same reason a
     /// scrub and a line tap do — see `followsAfterPlayheadMove`.
     private func skip(by delta: Double) {
-        let duration = Self.transportDuration(
-            observed: player.duration, sidecar: recording.sidecar.durationSeconds) ?? 0
         player.seek(to: Self.skipTarget(from: player.currentTime,
-                                        by: delta, duration: duration))
+                                        by: delta, duration: resolvedDuration))
         isFollowing = Self.followsAfterPlayheadMove()
     }
 
@@ -354,7 +364,8 @@ public struct TranscriptPane: View {
     /// swaps between this and `remaining`.
     ///
     /// PURE. A zero duration means "not known yet" here exactly as it does in
-    /// `scrubber` and `transportDuration`, so the bar and both labels can
+    /// `scrubber` — which is what `resolvedDuration`'s `?? 0` turns
+    /// `transportDuration`'s own `nil` into — so the bar and both labels can
     /// never disagree about whether the length is known.
     nonisolated static func total(duration: Double) -> String {
         guard duration.isFinite, duration > 0 else { return "--:--" }

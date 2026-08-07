@@ -535,7 +535,9 @@ layout and pure-function tests came back clean.
    closing.
 8. **The combo box's chevron opening a list of the existing topics plus
    "None — unfile this."** Check: click the chevron and confirm the dropdown
-   lists every topic currently in use, plus an unfiling option.
+   lists every topic currently in use, plus an unfiling option — and that
+   picking one COMMITS it, closing the field with the new topic filed,
+   rather than only filling the text field in and waiting for Return.
 9. **The transport's disabled state — no known duration.** This is only
    reachable on a recording whose audio is missing entirely, and has never
    actually been seen. If one turns up, confirm the transport reads as
@@ -555,8 +557,16 @@ on this branch can reach it:
     silently dropped, because the storage only materialises once installed
     in a live hierarchy — and the suite has no gesture-simulation
     infrastructure. So click-to-edit, Return-commits, Esc-restores, the
-    resync-on-entry, and the menu selections (checks 5–8 above) are all
-    unverified by machine; only a live tap in the running app proves them.
+    seed-from-disk on entry, and the menu selections (checks 5–8 above) are
+    all unverified by machine; only a live tap in the running app proves them.
+    What IS machine-checked is the decision each of those wires up: the
+    commit-time pair in `RecordingEditorTests`
+    (`committingTheTitleWritesTheTopicTheSidecarHasNow` and its mirror), which
+    is where the final review's Critical actually lived. The wiring that calls
+    it stays a human check. (The entry-time SIBLING resync those checks used
+    to cover is gone — once a commit sources the untouched field from
+    `recording.sidecar`, resyncing that field's `@State` on the other one's
+    tap was a no-op in both of its branches.)
 12. **That ±10s actually re-attaches following.** The rule is "anything that
     moves the playhead re-attaches"; `skip(by:)` implements it, but nothing
     asserts the call site — the same gap exists for `scrub(to:)` and the
