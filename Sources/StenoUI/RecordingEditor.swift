@@ -64,8 +64,18 @@ public struct RecordingEditor: View {
                         // fresher topic with whatever `topic` was last set
                         // to -- the same stale-snapshot shape as the
                         // `AppModel` Critical, one layer up.
+                        //
+                        // The topic is resynced only when it is NOT currently
+                        // being edited -- see `resyncedValue(current:onDisk:
+                        // isEditing:)`. If the user is mid-edit on the topic
+                        // field, its live `@State` is their own unsaved intent
+                        // -- newer than disk -- and overwriting it here would
+                        // silently discard keystrokes the moment they tapped
+                        // over to the title.
                         title = recording.sidecar.title ?? ""
-                        topic = recording.sidecar.topic ?? ""
+                        topic = Self.resyncedValue(current: topic,
+                                                    onDisk: recording.sidecar.topic,
+                                                    isEditing: editingTopic)
                         editingTitle = true
                     }
             }
@@ -82,16 +92,25 @@ public struct RecordingEditor: View {
                     // The chevron is not optional: a dropdown that does not
                     // advertise itself will never be found, and discovering
                     // existing topics is the whole reason this is a combo box
-                    // rather than a plain text field.
+                    // rather than a plain text field. `.borderlessButton`
+                    // draws nothing but its label -- unlike the automatic
+                    // pull-down style, it does not bake in a disclosure glyph
+                    // of its own -- so `EmptyView()` here would be an
+                    // invisible hit region with no affordance at all.
                     Menu {
                         ForEach(knownTopics, id: \.self) { choice in
                             Button(choice) { topic = choice }
                         }
                         Divider()
                         Button(Self.unfileLabel) { topic = "" }
-                    } label: { EmptyView() }
+                    } label: {
+                        Image(systemName: "chevron.down")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     .menuStyle(.borderlessButton)
                     .frame(width: 16)
+                    .accessibilityLabel("Choose an existing topic")
                 }
                 .frame(maxWidth: 240)
             } else {
@@ -107,8 +126,14 @@ public struct RecordingEditor: View {
                         // being replaced by a sweep-driven rewrite, so this
                         // control has to pull both fields fresh from the live
                         // sidecar too, or it inherits the exact bug that tap
-                        // handler exists to fix.
-                        title = recording.sidecar.title ?? ""
+                        // handler exists to fix. And the same carve-out via
+                        // `resyncedValue(current:onDisk:isEditing:)`: the
+                        // title is resynced only when it is not the one
+                        // mid-edit, so tapping the topic while the title has
+                        // unsaved typing does not throw that typing away.
+                        title = Self.resyncedValue(current: title,
+                                                    onDisk: recording.sidecar.title,
+                                                    isEditing: editingTitle)
                         topic = recording.sidecar.topic ?? ""
                         editingTopic = true
                     }
@@ -189,6 +214,24 @@ public struct RecordingEditor: View {
             // that reasoning to shave an invisible ~50ms.
             await onSaved()
         }
+    }
+
+    /// What a field's `@State` should hold when the OTHER field is opened for
+    /// editing.
+    ///
+    /// PURE, and the whole "don't clobber active typing" ruling in one place
+    /// — both `.onTapGesture`s call this for the field they are not opening.
+    /// `current` is what that `@State` already holds; disk (`onDisk`) is
+    /// trusted only when `isEditing` is false, because a field the user is
+    /// actively typing in holds intent that is newer than whatever the
+    /// sidecar has written down — the same sense in which a sweep-driven
+    /// rewrite is newer than a value cached since `init`, just pointed the
+    /// other way. Review found this reachable for the first time in this
+    /// task: before the topic grew a tap gesture, the title's own resync
+    /// could not run into a topic actively being typed, so the collision
+    /// this resolves did not yet exist.
+    nonisolated static func resyncedValue(current: String, onDisk: String?, isEditing: Bool) -> String {
+        isEditing ? current : (onDisk ?? "")
     }
 
     /// The combo box's escape hatch. Selecting it sets the topic to empty,

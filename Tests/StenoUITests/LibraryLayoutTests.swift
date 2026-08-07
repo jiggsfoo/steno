@@ -209,3 +209,65 @@ func theTransportRowIsMountedBelowARuleAtTheBottomOfThePane(transcribed: Bool) t
     #expect(squeezed >= relaxed - 0.5,
             Comment(rawValue: "lines sit \(squeezed)pt apart in a short window versus \(relaxed)pt relaxed — they are being squeezed together"))
 }
+
+/// Task 5's review caught `Menu { … } label: { EmptyView() }` in
+/// `RecordingEditor`'s topic combo box as an invisible affordance:
+/// `.menuStyle(.borderlessButton)` renders only what its label gives it,
+/// unlike the automatic pull-down style, which bakes a disclosure glyph into
+/// its bezel regardless of label content.
+///
+/// `RecordingEditor` itself cannot be rendered mid-edit to check this
+/// directly: `editingTopic` is `private @State`, defaulted `false`, with no
+/// initializer path in from outside a live tap gesture — the same
+/// `@State`-is-inert wall documented throughout this branch. So this isolates
+/// the exact label/style/frame construction the combo box's chevron uses
+/// (`Image(systemName: "chevron.down")`, `.caption2`, `.secondary`,
+/// `.menuStyle(.borderlessButton)`, `.frame(width: 16)`) and asks whether
+/// THAT draws meaningfully more ink than the broken form did — a check on the
+/// general SwiftUI behaviour the fix rests on, not on `RecordingEditor`'s own
+/// view tree.
+///
+/// NOT a plain "is it non-empty" check, deliberately: an `EmptyView()` label
+/// on this exact `Menu`/`.borderlessButton`/`frame(width: 16)` combination
+/// was measured to draw a small amount of ink of its own — one band, 4.5pt
+/// tall by 7pt wide (`≈32pt²`), not the literal zero its name and the
+/// review's wording suggest. Read directly off pixels, not asserted from
+/// AppKit documentation: `.borderlessButton` still supplies *some* minimal
+/// default chrome for hit-testing even with nothing in the label, and a bare
+/// `#expect(!bands.isEmpty)` would have passed on the ORIGINAL broken form
+/// too, proving nothing. What actually changed is the SIZE: the explicit
+/// glyph measures `≈68pt²`, roughly double the empty label's incidental
+/// artifact, and — unlike that artifact — starts at the frame's left edge
+/// rather than sitting inset and centred, consistent with a real chevron
+/// glyph rather than a stray focus-ring fragment. The `1.5×` floor below sits
+/// with comfortable margin under the measured `≈2.17×` and well above `1.0×`
+/// (which is what reverting to `EmptyView()` produces): confirmed by
+/// literally reverting to `label: { EmptyView() }` and rerunning, which
+/// fails this assertion (`chevronArea` and `emptyArea` converge to the same
+/// value, ratio ~1.0).
+@MainActor
+@Test func aBorderlessMenuLabelledByAnImageDrawsMeaningfullyMoreInkThanAnEmptyLabel() {
+    func probe(@ViewBuilder label: () -> some View) -> some View {
+        Menu {
+            Text("x")
+        } label: {
+            label()
+        }
+        .menuStyle(.borderlessButton)
+        .frame(width: 16, height: 16)
+    }
+
+    func inkArea(_ bands: [InkBand]) -> Double {
+        bands.reduce(0) { $0 + $1.width * $1.height }
+    }
+
+    let chevronArea = inkArea(hostedInkBands(of: probe {
+        Image(systemName: "chevron.down").font(.caption2).foregroundStyle(.secondary)
+    }))
+    let emptyArea = inkArea(hostedInkBands(of: probe { EmptyView() }))
+
+    #expect(chevronArea > emptyArea * 1.5,
+            Comment(rawValue: "Image(systemName: \"chevron.down\") drew \(chevronArea)pt² of ink versus "
+                    + "\(emptyArea)pt² for an EmptyView() label in the same Menu — not meaningfully "
+                    + "more visible, so the chevron affordance is effectively still missing"))
+}

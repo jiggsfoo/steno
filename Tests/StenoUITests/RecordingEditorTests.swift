@@ -83,3 +83,25 @@ private func withTopic(_ topic: String?, _ signature: String) -> LoadedRecording
     #expect(choices == ["Admin", "Receipts"])
     #expect(RecordingEditor.unfileLabel == "None — unfile this")
 }
+
+/// The review's second Important: tapping one field must not discard the
+/// other's unsaved edit. A field mid-edit holds the user's own intent, which
+/// is newer than disk, so it is exempt from the resync a sibling's tap would
+/// otherwise trigger — the same "newer wins" ruling Task 4's `AppModel`
+/// stale-snapshot fix applied one layer down, applied here to two `@State`
+/// vars instead of a file on disk.
+@Test func aFieldMidEditIsNotClobberedByTheOtherFieldsResync() {
+    #expect(RecordingEditor.resyncedValue(current: "typed", onDisk: "disk", isEditing: true) == "typed")
+}
+
+/// The counterpart: an idle field DOES pick up whatever is on disk, which is
+/// the whole point of resyncing at all — see Task 4's stale-`@State` fix.
+@Test func anIdleFieldResyncsFromDisk() {
+    #expect(RecordingEditor.resyncedValue(current: "stale", onDisk: "fresh", isEditing: false) == "fresh")
+}
+
+/// No topic on disk resyncs to empty, matching `init`'s own `?? ""` and
+/// `save()`'s `topic.isEmpty ? nil : topic` round trip.
+@Test func anIdleFieldWithNoDiskValueResyncsToEmpty() {
+    #expect(RecordingEditor.resyncedValue(current: "stale", onDisk: nil, isEditing: false) == "")
+}
