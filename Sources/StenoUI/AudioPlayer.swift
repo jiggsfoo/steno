@@ -106,8 +106,23 @@ public final class AudioPlayer {
         }
     }
 
+    /// Starts playback, and reports `isPlaying` only if there is something to
+    /// play.
+    ///
+    /// The guard is an honesty fix, not a safety one — `player?.play()` on nil
+    /// was already harmless. `isPlaying` is a CLAIM about the world, and the
+    /// transport's button renders it directly: setting it unconditionally
+    /// meant that with no loaded player the icon flipped to Pause over
+    /// silence, which is the reason the reopened-window bug was invisible
+    /// rather than obvious. Refusing costs nothing — every real caller loads
+    /// first — and it turns a silent lie into a button that visibly does not
+    /// latch.
+    ///
+    /// `pause()` needs no equivalent: reporting "not playing" when there is no
+    /// player is true.
     public func play() {
-        player?.play()
+        guard let player else { return }
+        player.play()
         isPlaying = true
     }
 

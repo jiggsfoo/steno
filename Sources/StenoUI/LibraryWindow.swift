@@ -52,7 +52,25 @@ public struct LibraryWindow: View {
                 store.selection = moment.signature
             }
         }
-        .task { await reload() }
+        .task {
+            await reload()
+            // REOPENING. `.onDisappear` below stopped the player, which nils
+            // its `AVPlayer` and its `loadedURL`. But `@State` is owned by
+            // SwiftUI, which is free to keep a closed window's state alive --
+            // the same premise `.onDisappear` exists for, read in the other
+            // direction. A window reopened with its `store.selection` intact
+            // therefore has a selection and no player, and
+            // `.onChange(of: store.selection)` cannot fire for a selection
+            // that never changed: every transcript line click and the play
+            // button would be silent no-ops.
+            //
+            // Here rather than in a bare `.onAppear` because it must run
+            // AFTER `reload()` -- the lookup needs `store.recordings`
+            // populated, which is not guaranteed on a fresh window. On a fresh
+            // window `selection` is nil and this is a no-op; on a reopened one
+            // it restores exactly what was playing.
+            loadAudio(for: store.selection)
+        }
         // Closing the window must stop the audio. `AudioPlayer`'s `isolated
         // deinit` already tears the periodic observer down, but only once the
         // player is actually deallocated -- and `@State` is owned by SwiftUI,
@@ -63,17 +81,26 @@ public struct LibraryWindow: View {
         // closure created in one branch would capture the selection that was
         // current when that branch was built, and load the previous
         // recording's audio.
-        .onChange(of: store.selection) { _, newValue in
-            guard let recording = store.recordings.first(where: { $0.id == newValue })
-            else { return }
-            player.load(model.libraryRoot
-                .appendingPathComponent(recording.sidecar.relativePath))
-        }
+        .onChange(of: store.selection) { _, newValue in loadAudio(for: newValue) }
         // The sweep finishing is exactly when new transcripts exist. `AppModel`
         // is `@Observable`, so this needs no timer and no polling.
         .onChange(of: model.transcriptionProgress) { _, progress in
             if progress == nil { Task { await reload() } }
         }
+    }
+
+    /// Points the player at whichever recording `signature` names.
+    ///
+    /// One definition for the two callers that need it -- the selection
+    /// change, and the `.task` that restores playback on a reopened window.
+    /// A no-op when nothing is selected or the signature is not in the loaded
+    /// list, and `AudioPlayer.load` is itself a guarded no-op for a URL it
+    /// already holds, so calling it redundantly cannot disturb a seek.
+    private func loadAudio(for signature: String?) {
+        guard let recording = store.recordings.first(where: { $0.id == signature })
+        else { return }
+        player.load(model.libraryRoot
+            .appendingPathComponent(recording.sidecar.relativePath))
     }
 
     /// The `detail:` pane's content, factored out of `body` so a test can

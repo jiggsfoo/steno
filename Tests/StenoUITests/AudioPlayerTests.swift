@@ -54,6 +54,28 @@ private let segments = [
     #expect(player.currentTime == 5)
 }
 
+/// `isPlaying` is a claim the transport button renders directly. With nothing
+/// loaded, setting it anyway flipped the icon to Pause over silence — which is
+/// exactly what made the reopened-window failure invisible instead of obvious.
+/// `stop()` is the reachable way back into that state: `.onDisappear` calls it,
+/// and SwiftUI may keep a closed window's `@State` alive.
+@MainActor
+@Test func playingWithNothingLoadedDoesNotClaimToBePlaying() {
+    let player = AudioPlayer()
+    #expect(player.isPlaying == false)
+
+    player.play()
+    #expect(player.isPlaying == false)
+
+    player.load(URL(fileURLWithPath: "/nonexistent/\(UUID().uuidString).m4a"))
+    player.play()
+    #expect(player.isPlaying)
+
+    player.stop()
+    player.play()
+    #expect(player.isPlaying == false)
+}
+
 /// The guard above must not be permanent: a load that never becomes
 /// playable (missing file, unsupported format, ...) has to be retryable,
 /// not wedged as "loaded" forever. Detecting the failure is inherently
