@@ -46,6 +46,51 @@ recordings hit the fallback path, are skipped, and never re-`upsert`, so the
 index does not refill on its own. Settings → "Rebuild index" recovers it, which
 is the documented path.
 
+## Spec 4 carried debt (`feat/library-window`, 2026-08-06)
+
+Filed out of the final fix wave, so that none of it lives only in a code
+comment or a report. None blocks merge; all four were adjudicated.
+
+**`AppModel.init` has no injection seam, and constructing one in a test is a
+real hazard.** `init` runs `LegacyMigration.runIfNeeded` unconditionally, gated
+solely by a `UserDefaults` bool. Five tests construct `AppModel()` purely to
+compose a view around it — `LibraryWindowTests`, `LibraryLayoutTests`,
+`MenuBarIconLabelTests`, and `MenuMetricsTests` twice. On this machine the flag
+is set, so the migration is a no-op and nothing happens. Where it is NOT set —
+a fresh clone, a new user account, CI — those five tests would MOVE
+`~/Recordings/HiDock` to `~/Recordings/Steno`, move
+`~/Library/Application Support/HiDock`, and append to the real diagnostic log.
+`AppModel.swift`'s doc comment on `log` promises this seam; this is where the
+promise is recorded. It also unblocks the two gaps below. Related constraint:
+no test may point a constructed `AppModel` at a temp root either, because
+`libraryRoot`'s setter writes the user's real defaults key and rebuilds the
+hardcoded `~/Library/Application Support/Steno/index.sqlite`.
+
+**Two review-only gaps, both mutation-proven, both waiting on that seam.**
+Neither can lose data; both were verified to leave the whole suite green when
+mutated.
+1. `updateRecording`'s note removal reads `previous.topic` — the freshly
+   re-read sidecar — rather than the caller's stale snapshot. Changing it back
+   passes every test, because `updateRecording` itself is unreachable. Only the
+   `topic:` argument is actually load-bearing: `Filer.removeNote` locates the
+   note by scanning front matter for `signature:`, and `AppModel.writeEdit`
+   already guarantees the signatures match, so `for: previous` versus
+   `for: sidecar` is semantically a no-op. The pure step that produces
+   `previous` IS covered.
+2. `TranscriptPane.scrub(to:)` calls `followsAfterPlayheadMove()` rather than
+   assigning `isFollowing = true` inline. Reverting it passes every test —
+   Swift emits no unused-static-method warning. Enforceable only by review.
+   (The third gap in this class, "nothing asserts the playhead is mounted", was
+   closed:  `LibraryLayoutTests.theTransportRowIsMountedBelowARuleAtTheBottomOfThePane`.)
+
+**`TopicName` points the wrong way at `LibrarySidebar`.** `TopicName` is a
+Foundation-only domain type and now reads `LibrarySidebar.unfiled` — a `View`'s
+static — to keep the reserved sentinel a single source of truth. The sentinel
+should move DOWN instead: define it on `TopicName` (or a shared constants type)
+and have `LibrarySidebar.unfiled` read that, which preserves the single source
+of truth while pointing the dependency the right way. Deliberately not done in
+the fix wave: it touches a spec-2 file and belongs in its own change.
+
 ## Ready to plan
 
 **Spec 3's audio routing is no longer speculative.** BlueCatch was verified on hardware
@@ -374,14 +419,19 @@ because the layout test and the release build came back clean.
    reach.
 9. **The scrubber dragging smoothly.** Check: drag the transport bar's thumb
    across a long recording and confirm it tracks the pointer rather than
-   stuttering or snapping back. The `Slider`'s setter seeks on every step of
-   the drag, and `AudioPlayer`'s periodic observer writes `currentTime` four
-   times a second from the other direction — whether those two fight each
-   other visibly needs eyes.
-10. **The scrubber seeking to where it was dropped.** Check: drop the thumb
-    at a recognisable point and confirm playback resumes from there, and that
-    the elapsed/duration readout agrees with the transcript line highlighted
-    underneath.
+   stuttering or snapping back. One known stutter mechanism is now fixed in
+   code — the binding's getter recomputes from `player.currentTime` instead of
+   a per-body-pass snapshot, so a `get` landing between a `set` and the next
+   pass no longer returns the pre-scrub position. What remains for eyes is the
+   other direction: `AudioPlayer`'s periodic observer writes `currentTime` four
+   times a second while the drag is writing it too, and whether those two fight
+   visibly cannot be measured headlessly.
+10. **The scrubber seeking to where it was dropped.** Check: drop the thumb at
+    a recognisable point and confirm playback resumes from there, and that the
+    elapsed/duration readout agrees with the transcript line highlighted
+    underneath. `AudioPlayer.seek` now names zero tolerances, so this should be
+    exact rather than nearest-sync-sample; confirm it, and confirm the exact
+    seek does not make a fast drag feel sluggish on a long MP3.
 11. **Following re-attaching after a scrub.** Check: hand-scroll the
     transcript until the "Following paused" banner appears, then scrub. The
     ruling is that a scrub re-attaches following, exactly as clicking a
@@ -390,7 +440,24 @@ because the layout test and the release build came back clean.
 12. **The transport on a recording with no transcript.** Check: open a
     recording still in the transcription queue, confirm the pane reads "not
     transcribed yet" AND that the transport row underneath still plays it.
-    That case had no way to play at all before this.
+    That case had no way to play at all before this. (That the row is MOUNTED
+    in both states is now asserted by
+    `LibraryLayoutTests.theTransportRowIsMountedBelowARuleAtTheBottomOfThePane`;
+    what needs a person is that it actually plays.)
+13. **The scrubber being live the moment a recording is selected.** Check:
+    select a recording and confirm the position bar is enabled and the readout
+    shows the real length BEFORE pressing play — it should read e.g.
+    `0:00 / 66:25`, not a dead grey bar reading `0:00 / --:--`. The length
+    comes from `Sidecar.durationSeconds` until `AVPlayer` reports its own;
+    confirm the two agree once playback starts rather than the bar jumping.
+14. **Reopening the window restoring playback.** Check: play a recording,
+    close the library window, reopen it, and confirm the play button and the
+    transcript lines still work rather than being silent no-ops. This is the
+    reopened-`@State` case: the selection survives the close, the player does
+    not, and `.onChange(of: store.selection)` cannot fire for a selection that
+    never changed. `LibraryWindow.task` now reloads the audio for the surviving
+    selection, but only a person can confirm a real scene close-and-reopen
+    behaves the way the model says.
 
 **Filing has still never run on the real library.** Zero topic folders exist
 under the real library root — the sidebar's topic grouping has only ever been
