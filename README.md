@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/images/icon.png" width="160" alt="Steno app icon"></p>
+
 # Steno
 
 A menu bar companion for the HiDock P1. Native macOS, syncs recordings off the
